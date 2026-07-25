@@ -24,16 +24,6 @@ public class HookContext {
 }
 
 public interface Hook {
-    func beforeRun(ctx: HookContext): Unit
-    func afterRun(ctx: HookContext): Unit
-    func beforeTurn(ctx: HookContext): Unit
-    func afterTurn(ctx: HookContext): Unit
-    func beforeTool(ctx: HookContext): Unit
-    func afterTool(ctx: HookContext): Unit
-}
-
-public open class HookAdapter <: Hook {
-    public init() {}
     public func beforeRun(ctx: HookContext): Unit {}
     public func afterRun(ctx: HookContext): Unit {}
     public func beforeTurn(ctx: HookContext): Unit {}
