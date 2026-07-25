@@ -1,11 +1,11 @@
 version = 0
 
 [requires]
-  snappy = {version = "1.0.0"}
-  jsonvalue = {version = "1.0.1"}
-  "ystyle::jsonrpc" = {version = "0.4.1"}
   mcp = {version = "2.2.0"}
-  sonyflake = {version = "1.0.9"}
-  gjson = {version = "1.1.1"}
+  jsonvalue = {version = "1.0.1"}
+  snappy = {version = "1.0.0"}
+  "ystyle::jsonrpc" = {version = "0.4.1"}
   badgercj = {version = "1.6.3"}
+  gjson = {version = "1.1.1"}
+  sonyflake = {version = "1.0.9"}
   bstorm = {version = "1.4.0"}
