@@ -5,6 +5,7 @@
 - 语法问题使用 `cangjie_docs` 相关工具在文档中查找，不要猜 API 和语法
 - 在提示语法错误时使用 `cangjie-mem` 加载语言级记忆
 - `match` 的 `case` 后不能接 `{}`，case 后直接写多行表达式
+- 有固定结构的类不要使用jsonvalue手动解析，实现json.stream的序列化接口
 
 ## 任务指南
 
@@ -39,6 +40,7 @@ cjpm clean
 ## LSP 报错
 
 如果代码看起来没错但 LSP 报错：
+
 - 源码文件：执行 `cjpm build` 编译
 - 测试文件：执行 `cjpm test --no-run` 编译
 
