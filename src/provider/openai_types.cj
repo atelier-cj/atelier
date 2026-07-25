@@ -30,7 +30,11 @@ public struct OpenAIRequest <: JsonSerializable {
         w.writeName("stream").writeValue(this.stream)
         w.writeName("max_tokens").writeValue(Int64(this.maxTokens))
         match (this.reasoningEffort) {
-            case Some(v) => w.writeName("reasoning_effort").writeValue(v)
+            case Some(v) =>
+                w.writeName("reasoning_effort").writeValue(v)
+                w.writeName("thinking").startObject()
+                w.writeName("type").writeValue("enabled")
+                w.endObject()
             case None => w.writeName("temperature").writeValue(this.temperature)
         }
         if (this.tools.size > 0) {
@@ -82,10 +86,16 @@ public struct OpenAIMessage <: JsonSerializable {
         if (this.role == "tool") {
             w.writeName("tool_call_id").writeValue(this.toolCallId)
         }
-        w.writeName("content").writeValue(this.content)
+        if (this.content == "" && this.role == "assistant" && this.toolCalls.size > 0) {
+            w.writeName("content").writeNullValue()
+        } else {
+            w.writeName("content").writeValue(this.content)
+        }
         match (this.reasoningContent) {
             case Some(v) => w.writeName("reasoning_content").writeValue(v)
-            case None => ()
+            case None => if (this.role == "assistant" && this.toolCalls.size > 0) {
+                w.writeName("reasoning_content").writeNullValue()
+            }
         }
         if (this.role == "assistant" && this.toolCalls.size > 0) {
             w.writeName("tool_calls").writeValue(this.toolCalls)

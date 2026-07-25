@@ -2,7 +2,10 @@ package atelier.cli
 
 import std.env.*
 import std.collection.*
+import std.fs.*
 import stdx.net.http.*
+import stdx.log.*
+import stdx.logger.*
 import atelier.message.*
 import atelier.agent.*
 import atelier.provider.*
@@ -10,6 +13,9 @@ import atelier.tool.*
 import atelier.tool.builtin.*
 import atelier.session.*
 import atelier.trust.*
+import atelier.skill.*
+import atelier.tool.McpManager
+import atelier.tool.McpServerConfig
 import atelier.server.*
 
 main(): Int64 {
@@ -21,10 +27,12 @@ main(): Int64 {
 
     let sessionStore: SessionStore = MemorySessionStore()
     let trustMgr = TrustManager()
+    let skillReg = SkillRegistry()
+
     let agentReg = AgentRegistry()
     let providerReg = ProviderRegistry()
 
-    let handler = AtelierHttpHandler(agentReg, toolReg, sessionStore, trustMgr)
+    let handler = AtelierHttpHandler(agentReg, toolReg, sessionStore, trustMgr, skillReg)
     handler.setProviderRegistry(providerReg)
 
     let providerRegForCli = providerReg
@@ -35,11 +43,18 @@ main(): Int64 {
         case None => "."
     }
     let config = loadToml(configDir + "/.atelier.toml")
+    initLogger(config.logging)
+    try { skillReg.loadDirectory(configDir + "/.agents/skills") } catch (_) { () }
     for (a in config.agent) {
         try { agentReg.create(a.name, agentConfigFrom(a)) } catch (_) { () }
     }
     for (p in config.provider) {
         providerReg.register(p.name, OpenAIProvider(p.name, p.baseURL, p.apiKey))
+    }
+    let mcpMgr = McpManager()
+    for (ms in config.mcpServer) {
+        let cfg = McpServerConfig(ms.name, ms.transport, ms.command, ms.url)
+        mcpMgr.addServer(toolReg, cfg)
     }
 
     match (cmd) {
@@ -56,7 +71,7 @@ main(): Int64 {
                     case None => AgentConfig.default()
                 }
                 let prov = resolveProviderFor(cfg, providerRegForCli)
-                AgentRuntime(cfg, prov, toolReg, sessionStore, trustMgr)
+                AgentRuntime(cfg, prov, toolReg, sessionStore, trustMgr, skillReg)
             })
             repl.run()
 
@@ -91,7 +106,7 @@ main(): Int64 {
                     c
             }
             let prov = resolveProviderFor(cfg, providerRegForCli)
-            let runtime = AgentRuntime(cfg, prov, toolReg, sessionStore, trustMgr)
+            let runtime = AgentRuntime(cfg, prov, toolReg, sessionStore, trustMgr, skillReg)
             let msgs = ArrayList<Message>()
             msgs.add(UserMessage(ContentList.ofText(prompt), 0))
             let stream = runtime.chat(msgs)
@@ -108,6 +123,28 @@ main(): Int64 {
             return 1
     }
     0
+}
+
+func initLogger(cfg: TomlLogging): Unit {
+    if (cfg.level == "") { return }
+    let level = match (cfg.level) {
+        case "trace" => LogLevel.TRACE
+        case "debug" => LogLevel.DEBUG
+        case "info" => LogLevel.INFO
+        case "warn" => LogLevel.WARN
+        case "error" => LogLevel.ERROR
+        case "fatal" => LogLevel.FATAL
+        case _ => return
+    }
+    let logDir = match (getVariable("HOME")) {
+        case Some(h) => h + "/.atelier"
+        case None => "/tmp/.atelier"
+    }
+    try { Directory.create(Path(logDir)) } catch (_) { () }
+    let logFile = try { File(logDir + "/atelier.log", OpenMode.Append) } catch (_) { return }
+    let logger = SimpleLogger(logFile)
+    logger.level = level
+    setGlobalLogger(logger)
 }
 
 func registerBuiltins(reg: ToolRegistry): Unit {

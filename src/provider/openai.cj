@@ -4,6 +4,7 @@ import stdx.net.http.*
 import stdx.net.tls.*
 import stdx.encoding.url.*
 import jsonvalue.*
+import stdx.log.*
 import std.io.InputStream
 import std.collection.*
 import atelier.message.*
@@ -20,7 +21,9 @@ public class OpenAIProvider <: Provider {
         this.provName = name
         this.baseURL = baseURL.trimEnd('/')
         this.apiKey = apiKey
-        let b = ClientBuilder()
+        let httpLogger = NoopLogger()
+        httpLogger.level = LogLevel.OFF
+        let b = ClientBuilder().logger(httpLogger)
             .readTimeout(30 * Duration.second)
         if (baseURL.startsWith("https://")) {
             var tlsCfg = TlsClientConfig()
@@ -175,7 +178,7 @@ func messagesToOpenAI(msgs: ArrayList<Message>): ArrayList<OpenAIMessage> {
                 for (tc in am.toolCalls()) {
                     let fn = HashMap<String, JsonValue>()
                     fn.add("name", JsonValue.String(tc.name))
-                    fn.add("arguments", tc.args)
+                    fn.add("arguments", JsonValue.String(toJsonString(tc.args)))
                     let item = HashMap<String, JsonValue>()
                     item.add("id", JsonValue.String(tc.id))
                     item.add("type", JsonValue.String("function"))
@@ -302,8 +305,14 @@ func buildContent(text: String, toolCalls: ArrayList<JsonValue>): ContentList {
             case Some(JsonValue.Map(m)) => match (m.get("arguments")) { case Some(v) => v; case _ => JsonValue.Null }
             case _ => JsonValue.Null
         }
+        // arguments from the API is a JSON string, parse it
+        let parsedArgs = match (fnArgs) {
+            case JsonValue.String(s) =>
+                try { JsonValue.parse(s) } catch (_) { fnArgs }
+            case _ => fnArgs
+        }
         if (id != "" && fnName != "") {
-            blocks.add(ContentBlock.ToolCall(ToolCallBlock(id, fnName, fnArgs)))
+            blocks.add(ContentBlock.ToolCall(ToolCallBlock(id, fnName, parsedArgs)))
         }
     }
     ContentList(blocks)

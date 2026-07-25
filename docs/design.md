@@ -969,10 +969,12 @@ interface AgentHooks {
 ### Phase 2：HTTP 服务 + 动态配置
 
 - [x] HTTP Server（registerRoutes 挂载模式）
+- [x] SSE 流式端点（POST /agent/stream，逐事件推送）
 - [x] AgentConfig 动态注册表（CRUD）
 - [x] 配置文件加载（TOML）
 - [x] 请求/响应 DTO（实现 JsonSerializable）
-- [x] 鉴权中间件
+- [x] 登录日志系统（SimpleLogger → 文件，可配级别）
+- [x] MCP Server TOML 配置 + 运行时自动连接
 - [ ] Anthropic Provider 扩展
 - [ ] Ollama Provider 扩展
 
@@ -980,8 +982,11 @@ interface AgentHooks {
 
 - [x] Skill 加载器（对齐 AgentSkills 规范，从 SKILL.md 目录加载）
 - [x] SKILL.md 格式校验器
+- [x] Skill 运行时注入（指令拼入 system prompt）
+- [x] MCP 工具运行时注册（McpManager：stdio + streamable-http）
 - [x] 斜杠命令系统
 - [x] 交互式 REPL
+- [x] CLI run 命令（单次执行）
 - [x] 会话导出（JSONL/HTML）
 
 ### Phase 4：增强

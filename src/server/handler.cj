@@ -3,28 +3,34 @@ package atelier.server
 import stdx.net.http.*
 import std.io.ByteBuffer
 import std.collection.*
+import std.core.Duration
 import jsonvalue.*
 import atelier.agent.*
 import atelier.message.*
 import atelier.provider.*
 import atelier.tool.*
 import atelier.session.*
+import atelier.skill.*
 import atelier.trust.*
 import atelier.util.{toJsonString, fromJsonString}
+import stdx.log.*
 
 public class AtelierHttpHandler {
     private let agentRegistry: AgentRegistry
     private let toolRegistry: ToolRegistry
     private let sessionStore: SessionStore
     private let trustManager: TrustManager
+    private let skillRegistry: SkillRegistry
     private var providerRegistry: ProviderRegistry
 
     public init(agentRegistry: AgentRegistry, toolRegistry: ToolRegistry,
-        sessionStore: SessionStore, trustManager: TrustManager) {
+        sessionStore: SessionStore, trustManager: TrustManager,
+        skillRegistry: SkillRegistry) {
         this.agentRegistry = agentRegistry
         this.toolRegistry = toolRegistry
         this.sessionStore = sessionStore
         this.trustManager = trustManager
+        this.skillRegistry = skillRegistry
         this.providerRegistry = ProviderRegistry()
     }
 
@@ -76,7 +82,7 @@ public class AtelierHttpHandler {
             if (m.role == "user") { msgs.add(UserMessage(ContentList.ofText(m.content), 0)) }
         }
         let provider = resolveProvider(agentCfg.model)
-        let runtime = AgentRuntime(agentCfg, provider, this.toolRegistry, this.sessionStore, this.trustManager)
+        let runtime = AgentRuntime(agentCfg, provider, this.toolRegistry, this.sessionStore, this.trustManager, this.skillRegistry)
         let eventStream = runtime.chat(msgs)
         let msgsResult = eventStream.result()
         let lastText = lastAssistantText(msgsResult)
@@ -84,7 +90,57 @@ public class AtelierHttpHandler {
     }
 
     private func handleAgentStream(ctx: HttpContext): Unit {
-        jsonResponse(ctx, 200, "{\"status\":\"SSE not yet implemented\"}")
+        let body = readBody(ctx)
+        let dto = try { fromJsonString<ChatRequestDTO>(body) } catch (_) {
+            jsonResponse(ctx, 400, "{\"error\":\"invalid JSON\"}"); return
+        }
+        let agentCfg = match (this.agentRegistry.get(dto.agent)) {
+            case Some(c) => c
+            case None => jsonResponse(ctx, 404, "{\"error\":\"agent not found\"}"); return
+        }
+        let msgs = ArrayList<Message>()
+        for (m in dto.messages) {
+            if (m.role == "user") { msgs.add(UserMessage(ContentList.ofText(m.content), 0)) }
+        }
+        let provider = resolveProvider(agentCfg.model)
+        let runtime = AgentRuntime(agentCfg, provider, this.toolRegistry, this.sessionStore, this.trustManager, this.skillRegistry)
+        let eventStream = runtime.chat(msgs)
+
+        let b = ctx.responseBuilder
+        b.status(UInt16(200))
+        b.header("content-type", "text/event-stream")
+        b.header("cache-control", "no-cache")
+        b.header("connection", "keep-alive")
+        b.header("transfer-encoding", "chunked")
+
+        try {
+            doSSEStream(ctx, eventStream)
+        } catch (e: Exception) {
+            let log = getGlobalLogger([("name", "SSE")])
+            log.error("sse error: ${e.message}", Array<Attr>())
+        }
+    }
+
+    private func doSSEStream(ctx: HttpContext, eventStream: LoopEventStream): Unit {
+        let writer = HttpResponseWriter(ctx)
+        var done = false
+        while (!done) {
+            match (eventStream.receive(30 * Duration.second)) {
+                case Some(ev) =>
+                    let sseData = sseFromEvent(ev)
+                    writer.write(sseData.toArray())
+                    match (ev) {
+                        case ae: AgentEndEvent => done = true
+                        case te: TurnEndEvent =>
+                            match (te.message.stopReason) {
+                                case StopReason.Error => done = true
+                                case _ => ()
+                            }
+                        case _ => ()
+                    }
+                case None => done = true
+            }
+        }
     }
 
     private func handleSessionSave(ctx: HttpContext): Unit {
@@ -160,6 +216,49 @@ func escapeJson(s: String): String {
     r = r.replace("\"", "\\\"")
     r = r.replace("\n", "\\n")
     r
+}
+
+func sseFromEvent(ev: AgentEvent): String {
+    let json = match (ev) {
+        case e: AgentStartEvent =>
+            "{\"type\":\"agent_start\",\"sessionId\":\"" + escapeJson(e.sessionId) + "\"}"
+        case e: AgentEndEvent =>
+            "{\"type\":\"agent_end\"}"
+        case _: TurnStartEvent =>
+            "{\"type\":\"turn_start\"}"
+        case e: TurnEndEvent =>
+            let stopStr = match (e.message.stopReason) {
+                case StopReason.ToolUse => "\"tool_use\""
+                case StopReason.Length => "\"length\""
+                case StopReason.Error => "\"error\""
+                case StopReason.Aborted => "\"aborted\""
+                case _ => "\"end_turn\""
+            }
+            let text = toText(e.message.content)
+            "{\"type\":\"turn_end\",\"stopReason\":" + stopStr + ",\"content\":\"" + escapeJson(text) + "\"}"
+        case e: MessageStartEvent =>
+            let role = match (e.message) {
+                case _: UserMessage => "\"user\""
+                case _: AssistantMessage => "\"assistant\""
+                case _: ToolResultMessage => "\"tool\""
+                case _ => "\"unknown\""
+            }
+            "{\"type\":\"message_start\",\"role\":" + role + "}"
+        case e: MessageUpdateEvent =>
+            "{\"type\":\"message_update\",\"delta\":\"" + escapeJson(e.delta) + "\"}"
+        case e: MessageEndEvent =>
+            "{\"type\":\"message_end\"}"
+        case e: ToolExecutionStartEvent =>
+            "{\"type\":\"tool_execution_start\",\"toolName\":\"" + escapeJson(e.toolName) + "\"}"
+        case e: ToolExecutionUpdateEvent =>
+            "{\"type\":\"tool_execution_update\",\"toolName\":\"" + escapeJson(e.toolCallId) + "\",\"progress\":\"" + escapeJson(e.progress) + "\"}"
+        case e: ToolExecutionEndEvent =>
+            "{\"type\":\"tool_execution_end\",\"toolName\":\"" + escapeJson(e.toolCallId) + "\",\"isError\":" + e.isError.toString() + ",\"result\":\"" + escapeJson(e.result) + "\"}"
+        case _: CompactionEvent =>
+            "{\"type\":\"compaction\"}"
+        case _ => "{\"type\":\"unknown\"}"
+    }
+    "data: " + json + "\n\n"
 }
 
 func configFromDTO(dto: AgentConfigDTO): AgentConfig {

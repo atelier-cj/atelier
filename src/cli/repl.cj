@@ -64,22 +64,12 @@ public class REPL {
         msgs.add(UserMessage(ContentList.ofText(line), 0))
         let stream = runtime.chat(msgs)
 
-        // Read streaming events until done
-        var done = false
-        while (!done) {
-            match (stream.receive(500 * Duration.millisecond)) {
-                case Some(ev) =>
-                    match (ev) {
-                        case te: TurnEndEvent => done = true
-                        case ae: AgentEndEvent => done = true
-                        case _ => ()
-                    }
-                case None => done = true
-            }
+        let allMsgs = try {
+            stream.result()
+        } catch (e: Exception) {
+            println("Error: " + e.message)
+            return
         }
-
-        // Get final result and print last assistant message
-        let allMsgs = try { stream.result() } catch (_) { return }
         let lastText = lastAssistantText(allMsgs)
         if (lastText != "") {
             println(lastText)
