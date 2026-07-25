@@ -20,3 +20,7 @@ link-option = "-luring"
 
 [target.x86_64-unknown-linux-gnu.bin-dependencies]
 path-option = [ "${CANGJIE_STDX_PATH}" ]
+
+[package.package-configuration."atelier.cli"]
+output-type = "executable"
+compile-option = "--static -Woff unused"

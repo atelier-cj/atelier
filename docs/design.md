@@ -952,34 +952,37 @@ interface AgentHooks {
 
 ### Phase 1：核心库
 
-- [ ] Agent Runtime 核心循环（Outer Loop + Inner Loop）
-- [ ] 事件流（Event Stream）类型定义与实现
-- [ ] Tool 接口与全部内置工具（read/write/edit/bash/grep/glob/todo）
-- [ ] MCP 工具适配器（通过 mcp-cj 的 McpClient）
-- [ ] Provider 接口 + OpenAI 兼容适配器（直接 REST API）
-- [ ] Message 数据模型（密封接口 + 4 种角色 + ContentBlock）
-- [ ] SessionStore 接口 + 内存实现（树形结构 + AppendBranch + PathToLeaf）
-- [ ] bstorm 持久化实现（默认后端）
-- [ ] 上下文压缩（Compaction）
-- [ ] 信任闸门（Trust Gate）
-- [ ] AgentConfig 定义 + 代码方式构建
-- [ ] 配套单元测试
+- [x] Agent Runtime 核心循环（Outer Loop + Inner Loop）
+- [x] 事件流（Event Stream）类型定义与实现
+- [x] Tool 接口与全部内置工具（read/write/edit/bash/grep/glob/todo）
+- [x] MCP 工具适配器（通过 mcp-cj 的 McpClient）
+- [x] Provider 接口 + OpenAI 兼容适配器（直接 REST API）
+- [x] Message 数据模型（密封接口 + 4 种角色 + ContentBlock）
+- [x] SessionStore 接口 + 内存实现（树形结构 + AppendBranch + PathToLeaf）
+- [x] bstorm 持久化实现（默认后端）
+- [x] 上下文压缩（Compaction）
+- [x] 信任闸门（Trust Gate）
+- [x] AgentConfig 定义 + 代码方式构建
+- [x] SchemaBuilder（替代手写 HashMap 造 JSON Schema）
+- [x] 配套单元测试（91 测试）
 
 ### Phase 2：HTTP 服务 + 动态配置
 
-- [ ] HTTP Server（SSE/JSON 接口）
-- [ ] AgentConfig 动态注册表（CRUD）
-- [ ] 配置文件加载（YAML/JSON）
+- [x] HTTP Server（registerRoutes 挂载模式）
+- [x] AgentConfig 动态注册表（CRUD）
+- [x] 配置文件加载（TOML）
+- [x] 请求/响应 DTO（实现 JsonSerializable）
+- [x] 鉴权中间件
 - [ ] Anthropic Provider 扩展
 - [ ] Ollama Provider 扩展
 
 ### Phase 3：Skill 系统 + CLI
 
-- [ ] Skill 加载器（对齐 AgentSkills 规范，从 SKILL.md 目录加载）
-- [ ] SKILL.md 格式校验器
-- [ ] 斜杠命令系统
-- [ ] 交互式 REPL
-- [ ] 会话导出（JSONL/HTML）
+- [x] Skill 加载器（对齐 AgentSkills 规范，从 SKILL.md 目录加载）
+- [x] SKILL.md 格式校验器
+- [x] 斜杠命令系统
+- [x] 交互式 REPL
+- [x] 会话导出（JSONL/HTML）
 
 ### Phase 4：增强
 
