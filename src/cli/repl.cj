@@ -2,6 +2,7 @@ package atelier.cli
 
 import std.env.*
 import std.collection.*
+import stdx.log.*
 import atelier.agent.*
 import atelier.message.*
 import atelier.provider.*
@@ -12,13 +13,21 @@ public class REPL {
     private let agentName: String
     private let registry: SlashCommandRegistry
     private let runtimeFactory: (String) -> AgentRuntime
+    private let sessionStore: SessionStore
     private var running: Bool = true
+    private var sessionId: String
+    private var messages: ArrayList<Message>
+    private var sessionCounter: Int64
 
     public init(agentName: String, registry: SlashCommandRegistry,
-        runtimeFactory: (String) -> AgentRuntime) {
+        runtimeFactory: (String) -> AgentRuntime, sessionStore: SessionStore) {
         this.agentName = agentName
         this.registry = registry
         this.runtimeFactory = runtimeFactory
+        this.sessionStore = sessionStore
+        this.sessionCounter = 1
+        this.messages = ArrayList<Message>()
+        this.sessionId = "sess_1"
     }
 
     public func run(): Unit {
@@ -30,6 +39,7 @@ public class REPL {
             if (line == "") { continue }
             handleInput(line)
         }
+        try { this.sessionStore.delete(this.sessionId) } catch (_) { () }
     }
 
     private func getLine(): String {
@@ -60,9 +70,8 @@ public class REPL {
         }
 
         let runtime = this.runtimeFactory(this.agentName)
-        let msgs = ArrayList<Message>()
-        msgs.add(UserMessage(ContentList.ofText(line), 0))
-        let stream = runtime.chat(msgs)
+        this.messages.add(UserMessage(ContentList.ofText(line), 0))
+        let stream = runtime.chat(this.messages)
 
         let allMsgs = try {
             stream.result()
@@ -70,6 +79,13 @@ public class REPL {
             println("Error: " + e.message)
             return
         }
+        this.messages = allMsgs
+        // Persist after each turn
+        try {
+            let header = SessionHeader(1, this.sessionId, 0, 0, "", "", "", None)
+            this.sessionStore.save(this.sessionId, header, this.messages)
+        } catch (_) { () }
+
         let lastText = lastAssistantText(allMsgs)
         if (lastText != "") {
             println(lastText)

@@ -32,6 +32,9 @@ public class SlashCommandRegistry {
                 "Untrusted: " + args[0]
             }
         })
+        register("session", "Show current session info", { args =>
+            "Session commands: /session (show current), /session new (create new)"
+        })
         register("clear", "Clear conversation history", { args => "Conversation cleared" })
         register("exit", "Exit the REPL", { args => "exit" })
         register("quit", "Alias for /exit", { args => "exit" })

@@ -25,15 +25,11 @@ main(): Int64 {
     let toolReg = ToolRegistry()
     registerBuiltins(toolReg)
 
-    let sessionStore: SessionStore = MemorySessionStore()
     let trustMgr = TrustManager()
     let skillReg = SkillRegistry()
 
     let agentReg = AgentRegistry()
     let providerReg = ProviderRegistry()
-
-    let handler = AtelierHttpHandler(agentReg, toolReg, sessionStore, trustMgr, skillReg)
-    handler.setProviderRegistry(providerReg)
 
     let providerRegForCli = providerReg
 
@@ -42,6 +38,14 @@ main(): Int64 {
         case Some(h) => h
         case None => "."
     }
+
+    // Persistent session store at ~/.atelier/sessions/
+    let sessionDir = configDir + "/.atelier/sessions"
+    try { Directory.create(Path(sessionDir)) } catch (_) { () }
+    let sessionStore: SessionStore = StormSessionStore(sessionDir)
+
+    let handler = AtelierHttpHandler(agentReg, toolReg, sessionStore, trustMgr, skillReg)
+    handler.setProviderRegistry(providerReg)
     let config = loadToml(configDir + "/.atelier.toml")
     initLogger(config.logging)
     try { skillReg.loadDirectory(configDir + "/.agents/skills") } catch (_) { () }
@@ -72,7 +76,7 @@ main(): Int64 {
                 }
                 let prov = resolveProviderFor(cfg, providerRegForCli)
                 AgentRuntime(cfg, prov, toolReg, sessionStore, trustMgr, skillReg, agentReg, providerRegForCli)
-            })
+            }, sessionStore)
             repl.run()
 
         case "run" =>
