@@ -991,8 +991,15 @@ interface AgentHooks {
 
 ### Phase 4：增强
 
+- [x] 多 Agent 协同（Agent-as-Tool：`agent_<name>` 前缀 + 子运行时）
 - [ ] 包管理器（安装/卸载 Skills/Tools）
-- [ ] 多 Agent 协同（Agent-as-Tool）
+- [ ] 信任管理完善
+  - [ ] HTTP 信任管理端点（`/trust` CRUD）
+  - [ ] 信任提示/申请流程（被拦截时向用户请求批准）
+- [ ] 会话管理完善
+  - [ ] 会话目录持久化（`~/.atelier/sessions/` 或可配路径）
+  - [ ] 多会话切换（REPL 内 `/session` 命令）
+  - [ ] 会话 fork/clone HTTP 端点
 
 ---
 
