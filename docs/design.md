@@ -996,6 +996,10 @@ interface AgentHooks {
 - [ ] 信任管理完善
   - [ ] HTTP 信任管理端点（`/trust` CRUD）
   - [ ] 信任提示/申请流程（被拦截时向用户请求批准）
+- [ ] 用户交互工具
+  - [ ] `ask_user` 内置工具：AI 主动向用户提问，runtime 暂停等待回答
+  - [ ] REPL 交互支持（暂停 → 显示问题 → 获取输入 → 恢复）
+  - [ ] HTTP 端点支持（poll/push 模式获取用户回答）
 - [ ] 会话管理完善
   - [ ] 会话目录持久化（`~/.atelier/sessions/` 或可配路径）
   - [ ] 多会话切换（REPL 内 `/session` 命令）
