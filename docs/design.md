@@ -992,6 +992,10 @@ interface AgentHooks {
 ### Phase 4：增强
 
 - [x] 多 Agent 协同（Agent-as-Tool：`agent_<name>` 前缀 + 子运行时）
+- [ ] 钩子系统（6 个钩子：beforeTurn/afterTurn/beforeTool/afterTool/beforeRun/afterRun，贯穿循环各阶段，作为 Skill 和 Plugin 的扩展基座）
+- [ ] 工具执行前防护链（超时/信任/配额/速率限制/并发限制五道闸门，当前仅信任闸门已实现）
+- [ ] 上下文压缩接入运行时（afterTurn 时判断是否超窗口，触发摘要压缩）
+- [ ] 会话导出与 HTML 回放（JSONL 导出 + 自足 HTML 页面）
 - [ ] 包管理器（安装/卸载 Skills/Tools）
 - [ ] 信任管理完善
   - [ ] HTTP 信任管理端点（`/trust` CRUD）
