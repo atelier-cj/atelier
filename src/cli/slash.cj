@@ -1,20 +1,37 @@
 package atelier.cli
 
 import std.collection.*
+import atelier.trust.*
 
 public type SlashHandler = (args: ArrayList<String>) -> String
 
 public class SlashCommandRegistry {
     public let commands = HashMap<String, SlashHandler>()
     public let helpTexts = HashMap<String, String>()
+    private let trustManager: TrustManager
 
-    public init() {
+    public init(trustManager: TrustManager) {
+        this.trustManager = trustManager
         register("help", "Show this help message", { args => showHelp(this) })
         register("model", "Show or change the current model", { args =>
             if (args.size == 0) { "Current model: (use /model <name> to change)" }
             else { "Model changed to: " + args[0] }
         })
         register("tools", "List available tools", { args => "(tool list)" })
+        register("trust", "Trust a directory: /trust <path>. Parallel(read-only) tools always allowed, sequential(side-effect) tools need trust.", { args =>
+            if (args.size == 0) { "Usage: /trust <directory-path>" }
+            else {
+                trustManager.setTrust(args[0], TrustState.Trusted)
+                "Trusted: " + args[0] + ". Sequential tools in this directory will now be allowed."
+            }
+        })
+        register("untrust", "Revoke trust for a directory: /untrust <path>", { args =>
+            if (args.size == 0) { "Usage: /untrust <path>" }
+            else {
+                trustManager.setTrust(args[0], TrustState.Untrusted)
+                "Untrusted: " + args[0]
+            }
+        })
         register("clear", "Clear conversation history", { args => "Conversation cleared" })
         register("exit", "Exit the REPL", { args => "exit" })
         register("quit", "Alias for /exit", { args => "exit" })

@@ -64,14 +64,14 @@ main(): Int64 {
 
         case "repl" =>
             let agentName = if (args.size > 2) { args[2] } else { "default" }
-            let slashReg = SlashCommandRegistry()
+            let slashReg = SlashCommandRegistry(trustMgr)
             let repl = REPL(agentName, slashReg, { name =>
                 let cfg = match (agentReg.get(name)) {
                     case Some(c) => c
                     case None => AgentConfig.default()
                 }
                 let prov = resolveProviderFor(cfg, providerRegForCli)
-                AgentRuntime(cfg, prov, toolReg, sessionStore, trustMgr, skillReg)
+                AgentRuntime(cfg, prov, toolReg, sessionStore, trustMgr, skillReg, agentReg, providerRegForCli)
             })
             repl.run()
 
@@ -106,7 +106,7 @@ main(): Int64 {
                     c
             }
             let prov = resolveProviderFor(cfg, providerRegForCli)
-            let runtime = AgentRuntime(cfg, prov, toolReg, sessionStore, trustMgr, skillReg)
+            let runtime = AgentRuntime(cfg, prov, toolReg, sessionStore, trustMgr, skillReg, agentReg, providerRegForCli)
             let msgs = ArrayList<Message>()
             msgs.add(UserMessage(ContentList.ofText(prompt), 0))
             let stream = runtime.chat(msgs)
