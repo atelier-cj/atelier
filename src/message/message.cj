@@ -37,6 +37,25 @@ public class AssistantMessage <: Message {
     public let stopReason: StopReason
     public let usage: TokenUsage
     public let timestamp: Int64
+    public let reasoningContent: String
+
+    public init(
+        content: ContentList,
+        model: String,
+        provider: String,
+        stopReason: StopReason,
+        usage: TokenUsage,
+        timestamp: Int64,
+        reasoningContent: String
+    ) {
+        this.content = content
+        this.model = model
+        this.provider = provider
+        this.stopReason = stopReason
+        this.usage = usage
+        this.timestamp = timestamp
+        this.reasoningContent = reasoningContent
+    }
 
     public init(
         content: ContentList,
@@ -52,6 +71,7 @@ public class AssistantMessage <: Message {
         this.stopReason = stopReason
         this.usage = usage
         this.timestamp = timestamp
+        this.reasoningContent = ""
     }
 
     public func role(): MessageRole {

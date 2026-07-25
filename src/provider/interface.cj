@@ -9,16 +9,19 @@ public struct ChatRequest {
     public let messages: ArrayList<Message>
     public let temperature: Float64
     public let maxTokens: Int64
+    public let reasoningEffort: Option<String>
 
-    public init(model: String, messages: ArrayList<Message>, temperature: Float64, maxTokens: Int64) {
+    public init(model: String, messages: ArrayList<Message>,
+        temperature: Float64, maxTokens: Int64,
+        reasoningEffort: Option<String>) {
         this.model = model; this.messages = messages
         this.temperature = temperature; this.maxTokens = maxTokens
+        this.reasoningEffort = reasoningEffort
     }
 }
 
 public struct ChatResponse {
     public let message: AssistantMessage
-
     public init(message: AssistantMessage) {
         this.message = message
     }
@@ -32,9 +35,16 @@ public interface Provider {
 
 public struct ChatDelta {
     public let delta: String
+    public let reasoningDelta: String
     public let finishReason: Option<StopReason>
 
-    public init(delta: String, finishReason: Option<StopReason>) {
-        this.delta = delta; this.finishReason = finishReason
+    public init(delta: String, reasoningDelta: String,
+        finishReason: Option<StopReason>) {
+        this.delta = delta; this.reasoningDelta = reasoningDelta
+        this.finishReason = finishReason
+    }
+
+    public static func text(delta: String): ChatDelta {
+        ChatDelta(delta, "", None)
     }
 }

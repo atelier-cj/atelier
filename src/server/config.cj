@@ -20,7 +20,22 @@ public class TomlConfig <: Serializable<TomlConfig> {
 
     public static func deserialize(dm: DataModel): TomlConfig {
         let dms = match (dm) { case s: DataModelStruct => s; case _ => throw Exception("expected struct") }
-        TomlConfig()
+        let r = TomlConfig()
+        match (dms.get("agent")) {
+            case seq: DataModelSeq =>
+                for (elem in seq.getItems()) {
+                    r.agent.add(TomlAgent.deserialize(elem))
+                }
+            case _ => ()
+        }
+        match (dms.get("provider")) {
+            case seq: DataModelSeq =>
+                for (elem in seq.getItems()) {
+                    r.provider.add(TomlProvider.deserialize(elem))
+                }
+            case _ => ()
+        }
+        r
     }
 }
 
@@ -45,12 +60,18 @@ public class TomlAgent <: Serializable<TomlAgent> {
     public static func deserialize(dm: DataModel): TomlAgent {
         let dms = match (dm) { case s: DataModelStruct => s; case _ => throw Exception("expected struct") }
         let r = TomlAgent()
-        r.name = String.deserialize(dms.get("name"))
-        r.model = String.deserialize(dms.get("model"))
-        r.systemPrompt = String.deserialize(dms.get("systemPrompt"))
-        r.description = String.deserialize(dms.get("description"))
-        r.provider = String.deserialize(dms.get("provider"))
-        r.tools = ArrayList<String>.deserialize(dms.get("tools"))
+        r.name = match (dms.get("name")) { case s: DataModelString => s.getValue(); case _ => "" }
+        r.model = match (dms.get("model")) { case s: DataModelString => s.getValue(); case _ => "" }
+        r.systemPrompt = match (dms.get("systemPrompt")) { case s: DataModelString => s.getValue(); case _ => "" }
+        r.description = match (dms.get("description")) { case s: DataModelString => s.getValue(); case _ => "" }
+        r.provider = match (dms.get("provider")) { case s: DataModelString => s.getValue(); case _ => "" }
+        match (dms.get("tools")) {
+            case seq: DataModelSeq =>
+                for (e in seq.getItems()) {
+                    match (e) { case s: DataModelString => r.tools.add(s.getValue()); case _ => () }
+                }
+            case _ => ()
+        }
         r
     }
 }
@@ -71,9 +92,9 @@ public class TomlProvider <: Serializable<TomlProvider> {
     public static func deserialize(dm: DataModel): TomlProvider {
         let dms = match (dm) { case s: DataModelStruct => s; case _ => throw Exception("expected struct") }
         let r = TomlProvider()
-        r.name = String.deserialize(dms.get("name"))
-        r.baseURL = String.deserialize(dms.get("baseURL"))
-        r.apiKey = String.deserialize(dms.get("apiKey"))
+        r.name = match (dms.get("name")) { case s: DataModelString => s.getValue(); case _ => "" }
+        r.baseURL = match (dms.get("baseURL")) { case s: DataModelString => s.getValue(); case _ => "" }
+        r.apiKey = match (dms.get("apiKey")) { case s: DataModelString => s.getValue(); case _ => "" }
         r
     }
 }

@@ -27,6 +27,8 @@ main(): Int64 {
     let handler = AtelierHttpHandler(agentReg, toolReg, sessionStore, trustMgr)
     handler.setProviderRegistry(providerReg)
 
+    let providerRegForCli = providerReg
+
     // Load ~/.atelier.toml config
     let configDir = match (getVariable("HOME")) {
         case Some(h) => h
@@ -53,7 +55,7 @@ main(): Int64 {
                     case Some(c) => c
                     case None => AgentConfig.default()
                 }
-                let prov = resolveDefault(cfg.model)
+                let prov = resolveProviderFor(cfg, providerRegForCli)
                 AgentRuntime(cfg, prov, toolReg, sessionStore, trustMgr)
             })
             repl.run()
@@ -75,7 +77,7 @@ main(): Int64 {
                     agentReg.create("default", c)
                     c
             }
-            let prov = resolveDefault(cfg.model)
+            let prov = resolveProviderFor(cfg, providerRegForCli)
             let runtime = AgentRuntime(cfg, prov, toolReg, sessionStore, trustMgr)
             let msgs = ArrayList<Message>()
             msgs.add(UserMessage(ContentList.ofText(prompt), 0))
@@ -105,9 +107,20 @@ func registerBuiltins(reg: ToolRegistry): Unit {
     reg.register(TodoTool())
 }
 
-func resolveDefault(model: String): Provider {
-    let cfg = resolveProvider(model)
-    OpenAIProvider(cfg.name, cfg.baseURL, cfg.apiKey)
+func resolveProviderFor(cfg: AgentConfig, reg: ProviderRegistry): Provider {
+    let providerName = match (cfg.provider) { case Some(v) => v; case None => "default" }
+    match (reg.get(providerName)) {
+        case Some(p) => p
+        case None =>
+            // Fallback: create from env
+            let baseURL = match (getVariable("OPENAI_BASE_URL")) {
+                case Some(v) => v; case None => "https://api.openai.com/v1"
+            }
+            let apiKey = match (getVariable("OPENAI_API_KEY")) {
+                case Some(v) => v; case None => ""
+            }
+            OpenAIProvider(providerName, baseURL, apiKey)
+    }
 }
 
 func serve(handler: AtelierHttpHandler, port: String): Unit {
