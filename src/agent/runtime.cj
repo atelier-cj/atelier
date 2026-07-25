@@ -23,6 +23,24 @@ public class AgentRuntime {
     private let agentRegistry: AgentRegistry
     private let providerRegistry: ProviderRegistry
     private let toolExecutor: ToolExecutor
+    private let hooks: ArrayList<Hook>
+
+    public init(config: AgentConfig, provider: Provider,
+        toolRegistry: ToolRegistry, sessionStore: SessionStore,
+        trustManager: TrustManager, skillRegistry: SkillRegistry,
+        agentRegistry: AgentRegistry, providerRegistry: ProviderRegistry,
+        hooks: ArrayList<Hook>) {
+        this.config = config
+        this.provider = provider
+        this.toolRegistry = toolRegistry
+        this.sessionStore = sessionStore
+        this.trustManager = trustManager
+        this.skillRegistry = skillRegistry
+        this.agentRegistry = agentRegistry
+        this.providerRegistry = providerRegistry
+        this.toolExecutor = ToolExecutor(this.toolRegistry)
+        this.hooks = hooks
+    }
 
     public init(config: AgentConfig, provider: Provider,
         toolRegistry: ToolRegistry, sessionStore: SessionStore,
@@ -37,6 +55,7 @@ public class AgentRuntime {
         this.agentRegistry = agentRegistry
         this.providerRegistry = providerRegistry
         this.toolExecutor = ToolExecutor(this.toolRegistry)
+        this.hooks = ArrayList<Hook>()
     }
 
     public func chat(messages: ArrayList<Message>): EventStream<AgentEvent, ArrayList<Message>> {
@@ -49,6 +68,7 @@ public class AgentRuntime {
             try {
                 stream.emit(AgentStartEvent(sessionId))
                 log.info("agent start: ${this.config.name}", Array<Attr>())
+                callHooks("beforeRun", 0, ArrayList<ToolCallBlock>(), ArrayList<ToolResultMessage>())
 
                 // Build system prompt with skill instructions
                 let systemText = buildSystemPrompt(this.config, this.skillRegistry)
@@ -64,6 +84,7 @@ public class AgentRuntime {
                     stream.emit(TurnStartEvent())
                     turnCount++
                     log.info("turn ${turnCount} start", Array<Attr>())
+                    callHooks("beforeTurn", turnCount, ArrayList<ToolCallBlock>(), ArrayList<ToolResultMessage>())
 
                     stream.emit(MessageStartEvent(currentMessages[0]))
                     let actualModel = this.pickModel(this.config.model)
@@ -125,6 +146,7 @@ public class AgentRuntime {
                                 }
                                 idx++
                             }
+                            callHooks("beforeTool", turnCount, toolCalls, ArrayList<ToolResultMessage>())
                             let results = try {
                                 this.toolExecutor.executeBatch(batch)
                             } catch (e: Exception) {
@@ -134,30 +156,38 @@ public class AgentRuntime {
                                 continue
                             }
                             var resIdx: Int64 = 0
+                            let toolResults = ArrayList<ToolResultMessage>()
                             for (i in 0..toolCalls.size) {
                                 let tc = toolCalls[Int64(i)]
                                 match (skipResults.get(Int64(i))) {
                                     case Some(msg) =>
-                                        currentMessages.add(ToolResultMessage(tc.id, tc.name, ContentList.ofText(msg), false, 0))
+                                        let tr = ToolResultMessage(tc.id, tc.name, ContentList.ofText(msg), false, 0)
+                                        currentMessages.add(tr)
+                                        toolResults.add(tr)
                                     case None =>
                                         if (resIdx < results.size) {
                                             let r = results[Int64(resIdx)]
                                             log.info("tool ${tc.name} done: err=${r.isError}", Array<Attr>())
-                                            currentMessages.add(ToolResultMessage(tc.id, tc.name, ContentList.ofText(r.text), r.isError, 0))
+                                            let tr = ToolResultMessage(tc.id, tc.name, ContentList.ofText(r.text), r.isError, 0)
+                                            currentMessages.add(tr)
+                                            toolResults.add(tr)
                                             resIdx++
                                         }
                                 }
                             }
+                            callHooks("afterTool", turnCount, toolCalls, toolResults)
                             stream.emit(TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
 
                         case _ =>
                             log.info("turn finished", Array<Attr>())
+                            callHooks("afterTurn", turnCount, ArrayList<ToolCallBlock>(), ArrayList<ToolResultMessage>())
                             stream.emit(TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
                             finished = true
                     }
                 }
 
                 log.info("agent end, total turns=${turnCount}", Array<Attr>())
+                callHooks("afterRun", turnCount, ArrayList<ToolCallBlock>(), ArrayList<ToolResultMessage>())
                 stream.setResult(currentMessages)
                 stream.emit(AgentEndEvent(currentMessages))
             } catch (e: Exception) {
@@ -215,6 +245,29 @@ public class AgentRuntime {
         match (this.providerRegistry.get(provName)) {
             case Some(p) => p
             case None => this.provider
+        }
+    }
+
+    private func callHooks(phase: String, turnCount: Int64,
+        toolCalls: ArrayList<ToolCallBlock>,
+        toolResults: ArrayList<ToolResultMessage>): Unit {
+        let ctx = HookContext(this.config, this.toolRegistry, turnCount,
+            toolCalls, toolResults)
+        for (h in this.hooks) {
+            try {
+                match (phase) {
+                    case "beforeRun" => h.beforeRun(ctx)
+                    case "afterRun" => h.afterRun(ctx)
+                    case "beforeTurn" => h.beforeTurn(ctx)
+                    case "afterTurn" => h.afterTurn(ctx)
+                    case "beforeTool" => h.beforeTool(ctx)
+                    case "afterTool" => h.afterTool(ctx)
+                    case _ => ()
+                }
+            } catch (e: Exception) {
+                let log = getGlobalLogger([("name", "AgentRuntime")])
+                log.warn("hook ${phase} error: ${e.message}", Array<Attr>())
+            }
         }
     }
 }
