@@ -1,6 +1,8 @@
 package atelier.provider
 
 import stdx.net.http.*
+import stdx.net.tls.*
+import stdx.encoding.url.*
 import std.io.InputStream
 import std.collection.*
 import atelier.message.*
@@ -19,6 +21,12 @@ public class OpenAIProvider <: Provider {
         this.apiKey = apiKey
         let b = ClientBuilder()
             .readTimeout(30 * Duration.second)
+        if (baseURL.startsWith("https://")) {
+            var tlsCfg = TlsClientConfig()
+            let parsed = URL.parse(baseURL)
+            tlsCfg.serverName = Some(parsed.hostName)
+            b.tlsConfig(tlsCfg)
+        }
         this.httpClient = b.build()
     }
 
