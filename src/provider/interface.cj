@@ -2,7 +2,7 @@ package atelier.provider
 
 import std.collection.*
 import atelier.message.*
-import atelier.agent.EventStream
+import atelier.event.EventStream
 
 public struct ChatRequest {
     public let model: String

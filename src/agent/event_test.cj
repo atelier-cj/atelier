@@ -2,7 +2,7 @@ package atelier.agent
 
 import std.collection.*
 import atelier.message.*
-import jsonvalue.*
+import atelier.event.EventStream
 
 func makeMsgContent(text: String): ContentList {
     let blocks = ArrayList<ContentBlock>()

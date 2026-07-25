@@ -5,7 +5,8 @@ import atelier.tool.*
 import atelier.provider.*
 import atelier.session.*
 import atelier.trust.*
-import atelier.util.{toJsonString, fromJsonString}
+import atelier.event.EventStream
+import jsonvalue.*
 import std.collection.*
 
 public class AgentRuntime {
@@ -28,17 +29,18 @@ public class AgentRuntime {
     }
 
     public func chat(messages: ArrayList<Message>): EventStream<AgentEvent, ArrayList<Message>> {
-        let stream = EventStream<AgentEvent, ArrayList<Message>>(0)
+        let stream = EventStream<AgentEvent, ArrayList<Message>>()
         let ctx = ToolContext(".")
-        let sessionId = "sess_${Int64(0)}"
+        let sessionId = "sess_0"
 
         spawn {
-            // Outer loop: Run
             stream.emit(AgentStartEvent(sessionId))
 
-            // Save initial messages as session
+            let provName = match (this.config.provider) {
+                case Some(v) => v; case None => ""
+            }
             let header = SessionHeader(1, sessionId, 0, 0,
-                this.config.model, this.config.provider.getOr(""), this.config.systemPrompt, None)
+                this.config.model, provName, this.config.systemPrompt, None)
             this.sessionStore.save(sessionId, header, messages)
 
             var currentMessages = ArrayList<Message>(messages)
@@ -46,51 +48,45 @@ public class AgentRuntime {
             var finished = false
 
             while (!finished && turnCount < Int64(this.config.maxTurns)) {
-                // Turn start
                 stream.emit(TurnStartEvent())
                 turnCount++
 
-                // 1. Build request and call provider
                 stream.emit(MessageStartEvent(currentMessages[0]))
                 let chatReq = ChatRequest(this.config.model, currentMessages,
-                    this.config.temperature, Int64(this.config.maxOutputTokens))
+                    Float64(this.config.temperature), Int64(this.config.maxOutputTokens))
 
-                // 2. Stream from provider
                 let chatStream = this.provider.chatStreaming(chatReq)
                 var collectedDelta = StringBuilder()
                 var finishReason: Option<StopReason> = None
 
-                loop {
-                    match (chatStream.receive()) {
+                var running = true
+                while (running) {
+                    match (chatStream.receive(1 * Duration.second)) {
                         case Some(delta) =>
                             collectedDelta.append(delta.delta)
                             stream.emit(MessageUpdateEvent(currentMessages[0], delta.delta))
                             finishReason = delta.finishReason
-                        case None => break
+                        case None => running = false
                     }
                 }
 
-                // Build assistant message
+                let fs = finishReason ?? StopReason.EndTurn
                 let assistantMsg = AssistantMessage(
                     ContentList.ofText(collectedDelta.toString()),
-                    this.config.model, this.config.provider.getOr(""),
-                    finishReason.getOr(StopReason.EndTurn),
-                    TokenUsage(0, 0), 0)
+                    this.config.model, provName, fs, TokenUsage(0, 0), 0)
                 stream.emit(MessageEndEvent(assistantMsg))
                 currentMessages.add(assistantMsg)
 
-                // 3. Check stop reason
                 match (finishReason) {
                     case Some(StopReason.ToolUse) =>
-                        // Execute tools
                         let toolCalls = assistantMsg.toolCalls()
                         let batch = ArrayList<(String, ToolContext, JsonValue)>()
-                        for (tc in toolCalls) {
-                            match (tc) {
-                                case ToolCallBlock(id, name, args) =>
-                                    batch.add((name, ctx, args))
-                                case _ => ()
-                            }
+                        var idx: Int64 = 0
+                        while (idx < toolCalls.size) {
+                            let tc = toolCalls[idx]
+                            let t = (tc.name, ctx, tc.args)
+                            batch.add(t)
+                            idx++
                         }
                         let results = this.toolExecutor.executeBatch(batch)
                         for (r in results) {
@@ -98,31 +94,12 @@ public class AgentRuntime {
                         }
                         stream.emit(TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
 
-                    case Some(StopReason.EndTurn) =>
-                        stream.emit(TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
-                        finished = true
-
-                    case Some(StopReason.Length) =>
-                        stream.emit(TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
-
-                    case Some(StopReason.Error) =>
-                        stream.emit(TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
-                        finished = true
-
-                    case Some(StopReason.Aborted) =>
-                        stream.emit(TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
-                        finished = true
-
-                    case None =>
+                    case _ =>
                         stream.emit(TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
                         finished = true
                 }
-
-                // Check follow-up steering messages
-                // TODO: implement steering
             }
 
-            // End of run
             stream.setResult(currentMessages)
             stream.emit(AgentEndEvent(currentMessages))
         }

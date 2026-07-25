@@ -1,6 +1,5 @@
 package atelier.trust
 
-import std.fs.*
 import std.collection.*
 
 public enum TrustState {
@@ -16,14 +15,14 @@ public class TrustManager {
     public init() {}
 
     public func setTrust(path: String, state: TrustState): Unit {
-        // Normalize path
-        let p = normalize(path)
-        this.states[p] = state
+        this.states[normalize(path)] = state
     }
 
     public func getTrust(path: String): TrustState {
-        let p = normalize(path)
-        this.states.get(p).getOr(TrustState.Undecided)
+        match (this.states.get(normalize(path))) {
+            case Some(v) => v
+            case None => TrustState.Undecided
+        }
     }
 
     public func setSessionTrust(path: String, state: TrustState): Unit {
@@ -32,12 +31,10 @@ public class TrustManager {
 
     public func getEffectiveTrust(path: String): TrustState {
         let p = normalize(path)
-        // Check session trust first
         match (this.sessionTrusts.get(p)) {
             case Some(s) => return s
             case None => ()
         }
-        // Walk up the directory tree looking for trust decisions
         var current = p
         while (current != "") {
             match (this.states.get(current)) {
@@ -52,12 +49,17 @@ public class TrustManager {
 }
 
 func normalize(path: String): String {
-    let p = Path(path).toString()
-    if (p.endsWith("/") && p.size > 1) { p.substring(0, p.size - 1) } else { p }
+    path
 }
 
 func parentDir(path: String): String {
-    let p = Path(path)
-    let parent = p.parent
-    parent.toString()
+    let parts = path.split("/")
+    if (parts.size <= 1) { "" } else {
+        let sb = StringBuilder()
+        for (i in 0..(parts.size - 1)) {
+            if (i > 0) { sb.append("/") }
+            sb.append(parts[Int64(i)])
+        }
+        sb.toString()
+    }
 }

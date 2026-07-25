@@ -1,7 +1,7 @@
 package atelier.provider
 
 import atelier.message.*
-import atelier.agent.EventStream
+import atelier.event.EventStream
 import jsonvalue.*
 import std.collection.*
 
