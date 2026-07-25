@@ -27,6 +27,19 @@ main(): Int64 {
     let handler = AtelierHttpHandler(agentReg, toolReg, sessionStore, trustMgr)
     handler.setProviderRegistry(providerReg)
 
+    // Load ~/.atelier.toml config
+    let configDir = match (getVariable("HOME")) {
+        case Some(h) => h
+        case None => "."
+    }
+    let config = loadToml(configDir + "/.atelier.toml")
+    for (a in config.agent) {
+        try { agentReg.create(a.name, agentConfigFrom(a)) } catch (_) { () }
+    }
+    for (p in config.provider) {
+        providerReg.register(p.name, OpenAIProvider(p.name, p.baseURL, p.apiKey))
+    }
+
     match (cmd) {
         case "serve" =>
             let port = if (args.size > 2) { args[2] } else { "8080" }
