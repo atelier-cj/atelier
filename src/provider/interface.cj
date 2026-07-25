@@ -1,5 +1,6 @@
 package atelier.provider
 
+import jsonvalue.*
 import std.collection.*
 import atelier.message.*
 import atelier.event.EventStream
@@ -10,13 +11,16 @@ public struct ChatRequest {
     public let temperature: Float64
     public let maxTokens: Int64
     public let reasoningEffort: Option<String>
+    public let tools: ArrayList<OpenAITool>
 
     public init(model: String, messages: ArrayList<Message>,
         temperature: Float64, maxTokens: Int64,
-        reasoningEffort: Option<String>) {
+        reasoningEffort: Option<String>,
+        tools: ArrayList<OpenAITool>) {
         this.model = model; this.messages = messages
         this.temperature = temperature; this.maxTokens = maxTokens
         this.reasoningEffort = reasoningEffort
+        this.tools = tools
     }
 }
 
@@ -42,9 +46,5 @@ public struct ChatDelta {
         finishReason: Option<StopReason>) {
         this.delta = delta; this.reasoningDelta = reasoningDelta
         this.finishReason = finishReason
-    }
-
-    public static func text(delta: String): ChatDelta {
-        ChatDelta(delta, "", None)
     }
 }

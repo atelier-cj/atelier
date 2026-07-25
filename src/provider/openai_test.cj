@@ -11,7 +11,7 @@ func openai_syncChat() {
         "524dc2ca-17c8-11f1-8b4e-6f93fd1a458a")
     let msgs = ArrayList<Message>()
     msgs.add(UserMessage(ContentList.ofText("Say hello in one word"), 0))
-    let req = ChatRequest("qwen3.5-2b", msgs, 0.7, 100, None)
+    let req = ChatRequest("qwen3.5-2b", msgs, 0.7, 100, None, ArrayList<OpenAITool>())
     let resp = provider.chat(req)
     @Expect(resp.message.content.blocks().size > 0, true)
 }
@@ -24,7 +24,7 @@ func openai_streamingChat() {
         "524dc2ca-17c8-11f1-8b4e-6f93fd1a458a")
     let msgs = ArrayList<Message>()
     msgs.add(UserMessage(ContentList.ofText("Count to 3"), 0))
-    let req = ChatRequest("qwen3.5-2b", msgs, 0.7, 200, None)
+    let req = ChatRequest("qwen3.5-2b", msgs, 0.7, 200, None, ArrayList<OpenAITool>())
     let stream = provider.chatStreaming(req)
     var deltaCount: Int64 = 0
     while (true) {

@@ -62,15 +62,28 @@ main(): Int64 {
 
         case "run" =>
             if (args.size < 3) {
-                println("Usage: atelier run <prompt>")
+                println("Usage: atelier run [agent] <prompt>")
+                return 1
+            }
+            var startIdx: Int64 = 2
+            let agentName: String
+            if (agentReg.has(args[2])) {
+                agentName = args[2]
+                startIdx = 3
+            } else {
+                agentName = "default"
+                startIdx = 2
+            }
+            if (startIdx >= args.size) {
+                println("Usage: atelier run [agent] <prompt>")
                 return 1
             }
             var prompt = ""
-            for (i in 2..args.size) {
-                if (i > 2) { prompt = prompt + " " }
+            for (i in startIdx..args.size) {
+                if (i > startIdx) { prompt = prompt + " " }
                 prompt = prompt + args[Int64(i)]
             }
-            let cfg = match (agentReg.get("default")) {
+            let cfg = match (agentReg.get(agentName)) {
                 case Some(c) => c
                 case None =>
                     let c = AgentConfig.default()

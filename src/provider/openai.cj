@@ -3,6 +3,7 @@ package atelier.provider
 import stdx.net.http.*
 import stdx.net.tls.*
 import stdx.encoding.url.*
+import jsonvalue.*
 import std.io.InputStream
 import std.collection.*
 import atelier.message.*
@@ -70,7 +71,8 @@ public class OpenAIProvider <: Provider {
 
 func buildRequest(req: ChatRequest, stream: Bool): OpenAIRequest {
     OpenAIRequest(req.model, messagesToOpenAI(req.messages), stream,
-        req.temperature, req.maxTokens, req.reasoningEffort)
+        req.temperature, req.maxTokens, req.reasoningEffort,
+        req.tools)
 }
 
 func doStreamRequest(client: Client, baseURL: String, apiKey: String,
@@ -95,6 +97,8 @@ func doStreamRequest(client: Client, baseURL: String, apiKey: String,
         var buf = Array<Byte>(4096, repeat: 0)
         var lineBuf = ArrayList<Byte>()
         var streamDone = false
+        var lastFinishReason = ""
+        var toolCallAccum = ArrayList<JsonValue>()
 
         while (!streamDone) {
             let n: Int64
@@ -131,11 +135,15 @@ func doStreamRequest(client: Client, baseURL: String, apiKey: String,
                         reasoningBuilder.append(sc.delta.reasoningContent)
                         let sReason: Option<StopReason> = match (sc.finishReason) {
                             case Some(s) =>
+                                lastFinishReason = s
                                 streamDone = true
                                 Some(stopReasonFromStr(s))
                             case None => Option<StopReason>.None
                         }
                         stream.emit(ChatDelta(sc.delta.content, sc.delta.reasoningContent, sReason))
+                        if (sc.delta.toolCalls.size > 0) {
+                            mergeToolCalls(toolCallAccum, sc.delta.toolCalls)
+                        }
                     }
                 } else {
                     lineBuf.add(b)
@@ -144,9 +152,10 @@ func doStreamRequest(client: Client, baseURL: String, apiKey: String,
         }
         let finalText = contentBuilder.toString()
         let reasoningText = reasoningBuilder.toString()
+        let finalStopReason = if (lastFinishReason != "") { stopReasonFromStr(lastFinishReason) } else { StopReason.EndTurn }
         let assistantMsg = AssistantMessage(
-            ContentList.ofText(finalText), "", "",
-            StopReason.EndTurn, TokenUsage(0, 0), 0,
+            buildContent(finalText, toolCallAccum), "", "",
+            finalStopReason, TokenUsage(0, 0), 0,
             reasoningText)
         stream.setResult(assistantMsg)
     } catch (e: Exception) {
@@ -159,14 +168,26 @@ func messagesToOpenAI(msgs: ArrayList<Message>): ArrayList<OpenAIMessage> {
     for (m in msgs) {
         match (m) {
             case um: UserMessage =>
-                result.add(OpenAIMessage("user", contentToText(um.content), Option<String>.None))
+                result.add(OpenAIMessage("user", contentToText(um.content), Option<String>.None, "", ArrayList<JsonValue>()))
             case am: AssistantMessage =>
                 let rc: Option<String> = if (am.reasoningContent != "") { Some(am.reasoningContent) } else { Option<String>.None }
-                result.add(OpenAIMessage("assistant", contentToText(am.content), rc))
+                let tcs = ArrayList<JsonValue>()
+                for (tc in am.toolCalls()) {
+                    let fn = HashMap<String, JsonValue>()
+                    fn.add("name", JsonValue.String(tc.name))
+                    fn.add("arguments", tc.args)
+                    let item = HashMap<String, JsonValue>()
+                    item.add("id", JsonValue.String(tc.id))
+                    item.add("type", JsonValue.String("function"))
+                    item.add("function", JsonValue.Map(fn))
+                    tcs.add(JsonValue.Map(item))
+                }
+                result.add(OpenAIMessage("assistant", contentToText(am.content), rc, "", tcs))
             case tm: ToolResultMessage =>
-                result.add(OpenAIMessage("tool", contentToText(tm.content), Option<String>.None))
+                result.add(OpenAIMessage("tool", contentToText(tm.content), Option<String>.None,
+                    tm.toolCallId, ArrayList<JsonValue>()))
             case cm: CompactionMessage =>
-                result.add(OpenAIMessage("user", "[Summary: " + cm.summary + "]", Option<String>.None))
+                result.add(OpenAIMessage("user", "[Summary: " + cm.summary + "]", Option<String>.None, "", ArrayList<JsonValue>()))
             case _ => ()
         }
     }
@@ -205,4 +226,85 @@ func readAll(input: InputStream): String {
     let raw = Array<Byte>(all.size, repeat: 0)
     for (i in 0..all.size) { raw[i] = all[i] }
     String.fromUtf8(raw)
+}
+
+func mergeToolCalls(acc: ArrayList<JsonValue>, incoming: ArrayList<JsonValue>): Unit {
+    for (tc in incoming) {
+        let idx: Int64 = match (tc["index"]) {
+            case Some(JsonValue.Number(n)) => Int64(n)
+            case _ => -1
+        }
+        if (idx < 0) { continue }
+        var found = false
+        for (j in 0..acc.size) {
+            let existing = acc[Int64(j)]
+            let eIdx: Int64 = match (existing["index"]) {
+                case Some(JsonValue.Number(n)) => Int64(n)
+                case _ => -1
+            }
+            if (eIdx == idx) {
+                found = true
+                match (existing) {
+                    case JsonValue.Map(exMap) =>
+                        match (tc) {
+                            case JsonValue.Map(inMap) =>
+                                let merged = HashMap<String, JsonValue>()
+                                for ((k, v) in exMap) { merged.add(k, v) }
+                                for ((k, v) in inMap) {
+                                    match (merged.get(k)) {
+                                        case Some(JsonValue.Map(oldM)) =>
+                                            match (v) {
+                                                case JsonValue.Map(newM) =>
+                                                    let mergedSub = HashMap<String, JsonValue>()
+                                                    for ((sk, sv) in oldM) { mergedSub.add(sk, sv) }
+                                                    for ((sk, sv) in newM) {
+                                                        // Special: concatenate function.arguments
+                                                        if (k == "function" && sk == "arguments") {
+                                                            let oldArgs = match (oldM.get("arguments")) {
+                                                                case Some(JsonValue.String(s)) => s; case _ => ""
+                                                            }
+                                                            let newArgs = match (sv) {
+                                                                case JsonValue.String(s) => s; case _ => ""
+                                                            }
+                                                            mergedSub.add(sk, JsonValue.String(oldArgs + newArgs))
+                                                        } else {
+                                                            mergedSub.add(sk, sv)
+                                                        }
+                                                    }
+                                                    merged.add(k, JsonValue.Map(mergedSub))
+                                                case _ => merged.add(k, v)
+                                            }
+                                        case _ => merged.add(k, v)
+                                    }
+                                }
+                                acc[Int64(j)] = JsonValue.Map(merged)
+                            case _ => ()
+                        }
+                    case _ => ()
+                }
+                break
+            }
+        }
+        if (!found) { acc.add(tc) }
+    }
+}
+
+func buildContent(text: String, toolCalls: ArrayList<JsonValue>): ContentList {
+    let blocks = ArrayList<ContentBlock>()
+    blocks.add(ContentBlock.TextBlock(text))
+    for (tc in toolCalls) {
+        let id = match (tc["id"]) { case Some(JsonValue.String(s)) => s; case _ => "" }
+        let fnName = match (tc["function"]) {
+            case Some(JsonValue.Map(m)) => match (m.get("name")) { case Some(JsonValue.String(s)) => s; case _ => "" }
+            case _ => ""
+        }
+        let fnArgs = match (tc["function"]) {
+            case Some(JsonValue.Map(m)) => match (m.get("arguments")) { case Some(v) => v; case _ => JsonValue.Null }
+            case _ => JsonValue.Null
+        }
+        if (id != "" && fnName != "") {
+            blocks.add(ContentBlock.ToolCall(ToolCallBlock(id, fnName, fnArgs)))
+        }
+    }
+    ContentList(blocks)
 }

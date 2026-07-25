@@ -11,13 +11,16 @@ public struct OpenAIRequest <: JsonSerializable {
     public let temperature: Float64
     public let maxTokens: Int64
     public let reasoningEffort: Option<String>
+    public let tools: ArrayList<OpenAITool>
 
     public init(model: String, messages: ArrayList<OpenAIMessage>,
         stream: Bool, temperature: Float64, maxTokens: Int64,
-        reasoningEffort: Option<String>) {
+        reasoningEffort: Option<String>,
+        tools: ArrayList<OpenAITool>) {
         this.model = model; this.messages = messages; this.stream = stream
         this.temperature = temperature; this.maxTokens = maxTokens
         this.reasoningEffort = reasoningEffort
+        this.tools = tools
     }
 
     public func toJson(w: JsonWriter): Unit {
@@ -30,6 +33,32 @@ public struct OpenAIRequest <: JsonSerializable {
             case Some(v) => w.writeName("reasoning_effort").writeValue(v)
             case None => w.writeName("temperature").writeValue(this.temperature)
         }
+        if (this.tools.size > 0) {
+            w.writeName("tools").writeValue(this.tools)
+        }
+        w.endObject()
+    }
+}
+
+public struct OpenAITool <: JsonSerializable {
+    public let name: String
+    public let description: String
+    public let parameters: JsonValue
+
+    public init(name: String, description: String, parameters: JsonValue) {
+        this.name = name; this.description = description; this.parameters = parameters
+    }
+
+    public func toJson(w: JsonWriter): Unit {
+        w.startObject()
+        w.writeName("type").writeValue("function")
+        w.writeName("function").startObject()
+        w.writeName("name").writeValue(this.name)
+        if (this.description != "") {
+            w.writeName("description").writeValue(this.description)
+        }
+        w.writeName("parameters").writeValue(this.parameters)
+        w.endObject()
         w.endObject()
     }
 }
@@ -38,18 +67,28 @@ public struct OpenAIMessage <: JsonSerializable {
     public let role: String
     public let content: String
     public let reasoningContent: Option<String>
+    public let toolCallId: String
+    public let toolCalls: ArrayList<JsonValue>
 
-    public init(role: String, content: String, reasoningContent: Option<String>) {
+    public init(role: String, content: String, reasoningContent: Option<String>,
+        toolCallId: String, toolCalls: ArrayList<JsonValue>) {
         this.role = role; this.content = content; this.reasoningContent = reasoningContent
+        this.toolCallId = toolCallId; this.toolCalls = toolCalls
     }
 
     public func toJson(w: JsonWriter): Unit {
         w.startObject()
         w.writeName("role").writeValue(this.role)
+        if (this.role == "tool") {
+            w.writeName("tool_call_id").writeValue(this.toolCallId)
+        }
         w.writeName("content").writeValue(this.content)
         match (this.reasoningContent) {
             case Some(v) => w.writeName("reasoning_content").writeValue(v)
             case None => ()
+        }
+        if (this.role == "assistant" && this.toolCalls.size > 0) {
+            w.writeName("tool_calls").writeValue(this.toolCalls)
         }
         w.endObject()
     }
@@ -107,7 +146,11 @@ public struct OpenAIMessageData <: JsonDeserializable<OpenAIMessageData> {
                 case "role" => res.role = r.readValue<String>()
                 case "content" => res.content = if (r.peek() != JsonNull) { r.readValue<String>() } else { r.skip(); "" }
                 case "reasoning_content" => res.reasoningContent = r.readValue<String>()
-                case "tool_calls" => res.toolCalls = r.readValue<ArrayList<JsonValue>>()
+                case "tool_calls" =>
+                    match (r.readValue<JsonValue>()) {
+                        case JsonValue.Array(arr) => res.toolCalls = arr
+                        case _ => r.skip()
+                    }
                 case _ => r.skip()
             }
         }
@@ -177,6 +220,7 @@ public struct OpenAIDelta <: JsonDeserializable<OpenAIDelta> {
     public var content: String = ""
     public var reasoningContent: String = ""
     public var role: String = ""
+    public var toolCalls: ArrayList<JsonValue> = ArrayList()
 
     public static func fromJson(r: JsonReader): OpenAIDelta {
         var res = OpenAIDelta()
@@ -186,6 +230,11 @@ public struct OpenAIDelta <: JsonDeserializable<OpenAIDelta> {
                 case "content" => res.content = if (r.peek() != Some(JsonNull)) { r.readValue<String>() } else { r.skip(); "" }
                 case "reasoning_content" => res.reasoningContent = r.readValue<String>()
                 case "role" => res.role = r.readValue<String>()
+                case "tool_calls" =>
+                    match (r.readValue<JsonValue>()) {
+                        case JsonValue.Array(arr) => res.toolCalls = arr
+                        case _ => r.skip()
+                    }
                 case _ => r.skip()
             }
         }

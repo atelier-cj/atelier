@@ -54,9 +54,10 @@ public class AgentRuntime {
 
                 stream.emit(MessageStartEvent(currentMessages[0]))
                 let actualModel = this.pickModel(this.config.model)
+                let tools = resolveTools(this.config.tools, this.toolRegistry)
                 let chatReq = ChatRequest(actualModel, currentMessages,
                     Float64(this.config.temperature), Int64(this.config.maxOutputTokens),
-                    this.config.thinkingLevel)
+                    this.config.thinkingLevel, tools)
 
                 let chatStream = this.provider.chatStreaming(chatReq)
                 var assistantMsg: AssistantMessage
@@ -82,8 +83,11 @@ public class AgentRuntime {
                             idx++
                         }
                         let results = this.toolExecutor.executeBatch(batch)
+                        idx = 0
                         for (r in results) {
-                            currentMessages.add(ToolResultMessage("", "", ContentList.ofText(r.text), r.isError, 0))
+                            let tcId = if (idx < toolCalls.size) { toolCalls[idx].id } else { "" }
+                            currentMessages.add(ToolResultMessage(tcId, toolCalls[idx].name, ContentList.ofText(r.text), r.isError, 0))
+                            idx++
                         }
                         stream.emit(TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
 
@@ -106,4 +110,16 @@ public class AgentRuntime {
         if (envModel != "") { return envModel }
         "gpt-4o"
     }
+}
+
+func resolveTools(names: ArrayList<String>, reg: ToolRegistry): ArrayList<OpenAITool> {
+    let result = ArrayList<OpenAITool>()
+    for (name in names) {
+        match (reg.get(name)) {
+            case Some(t) =>
+                result.add(OpenAITool(t.name(), t.description(), t.schema()))
+            case None => ()
+        }
+    }
+    result
 }
