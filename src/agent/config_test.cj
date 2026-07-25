@@ -16,7 +16,7 @@ func config_createWithAllFields() {
         "gpt-4o", Some("openai"),
         tools, skills,
         UInt32(10), Float32(0.3), UInt32(8192), Some("low"),
-        true, UInt32(20000), UInt32(30000),
+        true, UInt32(20000), UInt32(30000), UInt32(30),
         tags, Some("admin"), Int64(1000), Int64(2000))
 
     @Expect(cfg.name, "data-assistant")
@@ -30,6 +30,7 @@ func config_createWithAllFields() {
     @Expect(cfg.compactionEnabled, true)
     @Expect(cfg.compactionReserveTokens, UInt32(20000))
     @Expect(cfg.keepRecentTokens, UInt32(30000))
+    @Expect(cfg.maxToolCalls, UInt32(30))
     @Expect(cfg.tags.size, 2); @Expect(cfg.createdBy, Some("admin"))
     @Expect(cfg.createdAt, Int64(1000)); @Expect(cfg.updatedAt, Int64(2000))
 }
@@ -41,7 +42,7 @@ func config_withOptionalsNone() {
         "claude-3-haiku", None,
         ArrayList(), ArrayList(),
         UInt32(5), Float32(1.0), UInt32(2048), None,
-        false, UInt32(8192), UInt32(10000),
+        false, UInt32(8192), UInt32(10000), UInt32(50),
         ArrayList(), None, Int64(0), Int64(0))
 
     @Expect(cfg.name, "minimal"); @Expect(cfg.description, None)
@@ -53,6 +54,7 @@ func config_withOptionalsNone() {
     @Expect(cfg.compactionEnabled, false)
     @Expect(cfg.compactionReserveTokens, UInt32(8192))
     @Expect(cfg.keepRecentTokens, UInt32(10000))
+    @Expect(cfg.maxToolCalls, UInt32(50))
     @Expect(cfg.tags.size, 0); @Expect(cfg.createdBy, None)
 }
 
@@ -68,6 +70,7 @@ func config_defaultValues() {
     @Expect(cfg.compactionEnabled, true)
     @Expect(cfg.compactionReserveTokens, UInt32(16384))
     @Expect(cfg.keepRecentTokens, UInt32(20000))
+    @Expect(cfg.maxToolCalls, UInt32(50))
     @Expect(cfg.tags.size, 0); @Expect(cfg.createdBy, None)
     @Expect(cfg.createdAt, Int64(0)); @Expect(cfg.updatedAt, Int64(0))
 }
@@ -84,7 +87,7 @@ func config_jsonRoundTrip_allFields() {
         "gpt-4o-mini", Some("openai"),
         tools, skills,
         UInt32(15), Float32(0.5), UInt32(2048), Some("medium"),
-        true, UInt32(16384), UInt32(25000),
+        true, UInt32(16384), UInt32(25000), UInt32(50),
         tags, Some("tester"), Int64(100), Int64(200))
 
     let v = JsonValue.fromObject(original)
@@ -135,7 +138,7 @@ func config_jsonRoundTrip_withOptionals() {
         "deepseek-chat", None,
         ArrayList(), ArrayList(),
         UInt32(5), Float32(1.0), UInt32(1024), None,
-        false, UInt32(4096), UInt32(8000),
+        false, UInt32(4096), UInt32(8000), UInt32(50),
         ArrayList(), None, Int64(0), Int64(0))
 
     let v = JsonValue.fromObject(original)

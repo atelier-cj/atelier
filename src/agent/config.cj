@@ -19,6 +19,7 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
     public let compactionEnabled: Bool
     public let compactionReserveTokens: UInt32
     public let keepRecentTokens: UInt32
+    public let maxToolCalls: UInt32
     public let tags: ArrayList<String>
     public let createdBy: Option<String>
     public let createdAt: Int64
@@ -32,6 +33,7 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
         maxTurns: UInt32, temperature: Float32, maxOutputTokens: UInt32,
         thinkingLevel: Option<String>,
         compactionEnabled: Bool, compactionReserveTokens: UInt32, keepRecentTokens: UInt32,
+        maxToolCalls: UInt32,
         tags: ArrayList<String>,
         createdBy: Option<String>, createdAt: Int64, updatedAt: Int64
     ) {
@@ -43,6 +45,7 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
         this.thinkingLevel = thinkingLevel
         this.compactionEnabled = compactionEnabled
         this.compactionReserveTokens = compactionReserveTokens; this.keepRecentTokens = keepRecentTokens
+        this.maxToolCalls = maxToolCalls
         this.tags = tags
         this.createdBy = createdBy; this.createdAt = createdAt; this.updatedAt = updatedAt
     }
@@ -52,7 +55,7 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
             "", None, "", None, "", None,
             ArrayList(), ArrayList(),
             UInt32(20), Float32(0.7), UInt32(4096), None,
-            true, UInt32(16384), UInt32(20000),
+            true, UInt32(16384), UInt32(20000), UInt32(50),
             ArrayList(), None, Int64(0), Int64(0))
     }
 
@@ -67,6 +70,7 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
         w.writeName("compactionEnabled").writeValue(this.compactionEnabled)
         w.writeName("compactionReserveTokens").writeValue(Int64(this.compactionReserveTokens))
         w.writeName("keepRecentTokens").writeValue(Int64(this.keepRecentTokens))
+        w.writeName("maxToolCalls").writeValue(Int64(this.maxToolCalls))
         w.writeName("createdAt").writeValue(this.createdAt)
         w.writeName("updatedAt").writeValue(this.updatedAt)
         w.writeName("description").writeValue(this.description)
@@ -89,6 +93,7 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
         var thinkingLevel: Option<String> = None
         var compactionEnabled = true
         var compactionReserveTokens = UInt32(16384); var keepRecentTokens = UInt32(20000)
+        var maxToolCalls = UInt32(50)
         var tags = ArrayList<String>()
         var createdBy: Option<String> = None; var createdAt = Int64(0); var updatedAt = Int64(0)
 
@@ -110,6 +115,7 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
                 case "compactionEnabled" => compactionEnabled = r.readValue<Bool>()
                 case "compactionReserveTokens" => compactionReserveTokens = UInt32(r.readValue<Int64>())
                 case "keepRecentTokens" => keepRecentTokens = UInt32(r.readValue<Int64>())
+                case "maxToolCalls" => maxToolCalls = UInt32(r.readValue<Int64>())
                 case "tags" => tags = r.readValue<ArrayList<String>>()
                 case "createdBy" => createdBy = r.readValue<Option<String>>()
                 case "createdAt" => createdAt = r.readValue<Int64>()
@@ -122,7 +128,7 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
         AgentConfig(name, description, systemPrompt, userPromptTemplate,
             model, provider, tools, skills,
             maxTurns, temperature, maxOutputTokens, thinkingLevel,
-            compactionEnabled, compactionReserveTokens, keepRecentTokens,
+            compactionEnabled, compactionReserveTokens, keepRecentTokens, maxToolCalls,
             tags, createdBy, createdAt, updatedAt)
     }
 

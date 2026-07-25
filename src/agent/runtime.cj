@@ -6,6 +6,7 @@ import atelier.provider.*
 import atelier.skill.*
 import atelier.session.*
 import atelier.trust.*
+import atelier.context.compactMessages
 import atelier.event.EventStream
 import jsonvalue.*
 import std.collection.*
@@ -78,6 +79,7 @@ public class AgentRuntime {
                 }
                 for (m in messages) { currentMessages.add(m) }
                 var turnCount: Int64 = 0
+                var toolCallCount: Int64 = 0
                 var finished = false
 
                 while (!finished && turnCount < Int64(this.config.maxTurns)) {
@@ -128,6 +130,31 @@ public class AgentRuntime {
                         case StopReason.ToolUse =>
                             let toolCalls = assistantMsg.toolCalls()
                             log.info("tool calls: ${toolCalls.size}", Array<Attr>())
+                            let maxCalls = Int64(this.config.maxToolCalls)
+                            if (toolCallCount >= maxCalls) {
+                                log.warn("max tool calls (${maxCalls}) reached", Array<Attr>())
+                                currentMessages.add(ToolResultMessage("", "", ContentList.ofText("Max tool calls (${maxCalls}) reached, skipping"), true, 0))
+                                stream.emit(TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
+                                finished = true
+                                break
+                            }
+                            if (toolCallCount + toolCalls.size > maxCalls) {
+                                let allowed = maxCalls - toolCallCount
+                                log.warn("tool calls ${toolCalls.size} exceeds remaining ${allowed}", Array<Attr>())
+                                // Only allow up to the limit
+                                let trimmed = ArrayList<ToolCallBlock>()
+                                for (j in 0..allowed) { trimmed.add(toolCalls[Int64(j)]) }
+                                // Replace full list with trimmed
+                                let original = ArrayList<ToolCallBlock>(toolCalls)
+                                toolCalls.clear()
+                                for (j in 0..allowed) { toolCalls.add(trimmed[Int64(j)]) }
+                                // Store skipped tool names for rejection
+                                var skipIdx = allowed
+                                while (skipIdx < original.size) {
+                                    currentMessages.add(ToolResultMessage(original[Int64(skipIdx)].id, original[Int64(skipIdx)].name, ContentList.ofText("Skipped: max tool calls limit"), true, 0))
+                                    skipIdx++
+                                }
+                            }
                             let batch = ArrayList<(String, ToolContext, JsonValue)>()
                             let skipResults = HashMap<Int64, String>()
                             var idx: Int64 = 0
@@ -176,11 +203,18 @@ public class AgentRuntime {
                                 }
                             }
                             callHooks("afterTool", turnCount, toolCalls, toolResults)
+                            toolCallCount += toolCalls.size
                             stream.emit(TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
 
                         case _ =>
                             log.info("turn finished", Array<Attr>())
                             callHooks("afterTurn", turnCount, ArrayList<ToolCallBlock>(), ArrayList<ToolResultMessage>())
+                            if (this.config.compactionEnabled) {
+                                currentMessages = compactMessages(currentMessages,
+                                    Int64(this.config.maxOutputTokens) * 8,
+                                    Int64(this.config.compactionReserveTokens),
+                                    Int64(this.config.keepRecentTokens))
+                            }
                             stream.emit(TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
                             finished = true
                     }
