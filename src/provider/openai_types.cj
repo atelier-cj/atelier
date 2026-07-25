@@ -95,7 +95,7 @@ public struct OpenAIMessageData <: JsonDeserializable<OpenAIMessageData> {
         while (r.peek() != EndObject) {
             match (r.readName()) {
                 case "role" => res.role = r.readValue<String>()
-                case "content" => res.content = r.readValue<String>()
+                case "content" => res.content = if (r.peek() != JsonNull) { r.readValue<String>() } else { r.skip(); "" }
                 case "tool_calls" => res.toolCalls = r.readValue<ArrayList<JsonValue>>()
                 case _ => r.skip()
             }
@@ -171,7 +171,7 @@ public struct OpenAIDelta <: JsonDeserializable<OpenAIDelta> {
         r.startObject()
         while (r.peek() != EndObject) {
             match (r.readName()) {
-                case "content" => res.content = r.readValue<String>()
+                case "content" => res.content = if (r.peek() != Some(JsonNull)) { r.readValue<String>() } else { r.skip(); "" }
                 case "role" => res.role = r.readValue<String>()
                 case _ => r.skip()
             }

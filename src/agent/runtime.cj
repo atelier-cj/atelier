@@ -57,8 +57,28 @@ public class AgentRuntime {
                 let chatReq = ChatRequest(actualModel, currentMessages,
                     Float64(this.config.temperature), Int64(this.config.maxOutputTokens))
 
-                let response = this.provider.chat(chatReq)
-                let assistantMsg = response.message
+                let chatStream = this.provider.chatStreaming(chatReq)
+                // Read deltas available so far, then wait for final result
+                var deltaCount: Int64 = 0
+                while (true) {
+                    match (chatStream.receive(100 * Duration.millisecond)) {
+                        case Some(delta) =>
+                            stream.emit(MessageUpdateEvent(currentMessages[0], delta.delta))
+                            deltaCount++
+                        case None =>
+                            // No more deltas ready yet — try to get result
+                            break
+                    }
+                }
+                // Wait for final result (blocks until provider finishes)
+                var assistantMsg: AssistantMessage
+                try {
+                    assistantMsg = chatStream.result()
+                } catch (_) {
+                    stream.emit(TurnEndEvent(AssistantMessage(ContentList.ofText(""), "", "", StopReason.Error, TokenUsage(0, 0), 0), ArrayList<ToolResultMessage>()))
+                    finished = true
+                    break
+                }
                 stream.emit(MessageEndEvent(assistantMsg))
                 currentMessages.add(assistantMsg)
 
