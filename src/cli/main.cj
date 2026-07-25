@@ -93,11 +93,8 @@ func registerBuiltins(reg: ToolRegistry): Unit {
 }
 
 func resolveDefault(model: String): Provider {
-    if (model == "" || model == "default") {
-        OpenAIProvider("default", "http://localhost:8089", "")
-    } else {
-        OpenAIProvider("default", "http://localhost:8089", "")
-    }
+    let cfg = resolveProvider(model)
+    OpenAIProvider(cfg.name, cfg.baseURL, cfg.apiKey)
 }
 
 func serve(handler: AtelierHttpHandler, port: String): Unit {
