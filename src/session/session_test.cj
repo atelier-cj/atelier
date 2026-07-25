@@ -2,6 +2,7 @@ package atelier.session
 
 import atelier.message.*
 import std.collection.*
+import std.fs.*
 
 func makeMsg(text: String): Message {
     UserMessage(ContentList.ofText(text), Int64(0))
@@ -19,6 +20,16 @@ func addSession(store: MemorySessionStore, id: String, texts: ArrayList<String>)
 
 func count(store: MemorySessionStore): Int64 {
     store.list().size
+}
+
+func stormStore(): StormSessionStore {
+    let dir = Directory.createTemp(Path("/tmp"))
+    StormSessionStore(dir.toString())
+}
+
+func closeAndClean(store: StormSessionStore): Unit {
+    try { store.close() } catch (_) { () }
+    try { remove(Path("/tmp"), recursive: true) } catch (_) { () }
 }
 
 @Test
@@ -54,4 +65,63 @@ func memory_pathToLeaf() {
     @Expect(path.size, 3)
     @Expect(path[0].id, "e1")
     @Expect(path[2].id, "e3")
+}
+
+@Test
+func storm_saveAndLoad() {
+    let store = stormStore()
+    let msgs = ArrayList<Message>()
+    msgs.add(makeMsg("hello"))
+    msgs.add(makeMsg("world"))
+    store.save("test_s1", makeHeader("test_s1"), msgs)
+    let loaded = store.load("test_s1")
+    @Expect(loaded.size, 2)
+    closeAndClean(store)
+}
+
+@Test
+func storm_list() {
+    let store = stormStore()
+    store.save("l1", makeHeader("l1"), ArrayList<Message>())
+    store.save("l2", makeHeader("l2"), ArrayList<Message>())
+    @Expect(store.list().size, 2)
+    closeAndClean(store)
+}
+
+@Test
+func storm_delete() {
+    let store = stormStore()
+    store.save("d1", makeHeader("d1"), ArrayList<Message>())
+    store.delete("d1")
+    @Expect(store.list().size, 0)
+    closeAndClean(store)
+}
+
+@Test
+func storm_appendBranch() {
+    let store = stormStore()
+    let msgs = ArrayList<Message>()
+    msgs.add(makeMsg("first"))
+    store.save("ab1", makeHeader("ab1"), msgs)
+    let data = store.loadEntries("ab1")
+    let leafId = data.entries[0].id
+    let more = ArrayList<Message>()
+    more.add(makeMsg("second"))
+    store.appendBranch("ab1", leafId, more)
+    @Expect(store.load("ab1").size, 2)
+    closeAndClean(store)
+}
+
+@Test
+func storm_fork() {
+    let store = stormStore()
+    let msgs = ArrayList<Message>()
+    msgs.add(makeMsg("root"))
+    msgs.add(makeMsg("child"))
+    store.save("fk1", makeHeader("fk1"), msgs)
+    let data = store.loadEntries("fk1")
+    let leafId = data.entries[1].id
+    let fork = store.fork("fk1", leafId)
+    @Expect(fork.entries.size, 2)
+    closeAndClean(store)
 }

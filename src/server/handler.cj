@@ -82,7 +82,7 @@ public class AtelierHttpHandler {
             if (m.role == "user") { msgs.add(UserMessage(ContentList.ofText(m.content), 0)) }
         }
         let provider = resolveProvider(agentCfg.model)
-        let runtime = AgentRuntime(agentCfg, provider, this.toolRegistry, this.sessionStore, this.trustManager, this.skillRegistry)
+        let runtime = AgentRuntime(agentCfg, provider, this.toolRegistry, this.sessionStore, this.trustManager, this.skillRegistry, this.agentRegistry, this.providerRegistry)
         let eventStream = runtime.chat(msgs)
         let msgsResult = eventStream.result()
         let lastText = lastAssistantText(msgsResult)
@@ -103,7 +103,7 @@ public class AtelierHttpHandler {
             if (m.role == "user") { msgs.add(UserMessage(ContentList.ofText(m.content), 0)) }
         }
         let provider = resolveProvider(agentCfg.model)
-        let runtime = AgentRuntime(agentCfg, provider, this.toolRegistry, this.sessionStore, this.trustManager, this.skillRegistry)
+        let runtime = AgentRuntime(agentCfg, provider, this.toolRegistry, this.sessionStore, this.trustManager, this.skillRegistry, this.agentRegistry, this.providerRegistry)
         let eventStream = runtime.chat(msgs)
 
         let b = ctx.responseBuilder
@@ -144,7 +144,34 @@ public class AtelierHttpHandler {
     }
 
     private func handleSessionSave(ctx: HttpContext): Unit {
-        jsonResponse(ctx, 200, "{\"status\":\"session saved\"}")
+        let body = readBody(ctx)
+        let v = try { JsonValue.parse(body) } catch (_) {
+            jsonResponse(ctx, 400, "{\"error\":\"invalid JSON\"}"); return
+        }
+        let id = match (v["sessionId"]) { case Some(JsonValue.String(s)) => s; case _ => "" }
+        if (id == "") { jsonResponse(ctx, 400, "{\"error\":\"missing sessionId\"}"); return }
+        let headerJson = match (v["header"]) { case Some(j) => j.stringify(); case _ => "{}" }
+        let msgsJson = match (v["messages"]) { case Some(j) => j.stringify(); case _ => "[]" }
+        try {
+            let header = fromJsonString<SessionHeader>(headerJson)
+            let msgsArr = ArrayList<Message>()
+            // Parse messages from JSON array
+            match (JsonValue.parse(msgsJson)) {
+                case JsonValue.Array(arr) =>
+                    for (item in arr) {
+                        let role = match (item["role"]) { case Some(JsonValue.String(s)) => s; case _ => "" }
+                        let content = match (item["content"]) { case Some(JsonValue.String(s)) => s; case _ => "" }
+                        if (role == "user") {
+                            msgsArr.add(UserMessage(ContentList.ofText(content), 0))
+                        }
+                    }
+                case _ => ()
+            }
+            this.sessionStore.save(id, header, msgsArr)
+            jsonResponse(ctx, 200, "{\"status\":\"saved\"}")
+        } catch (e: Exception) {
+            jsonResponse(ctx, 500, "{\"error\":\"" + escapeJson(e.message) + "\"}")
+        }
     }
 
     private func handleSessionLoad(ctx: HttpContext): Unit {
