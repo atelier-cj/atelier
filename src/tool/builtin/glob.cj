@@ -18,23 +18,9 @@ public class GlobTool <: Tool {
     }
 
     public func schema(): JsonValue {
-        let obj = HashMap<String, JsonValue>()
-        obj.add("type", JsonValue.String("object"))
-
-        let properties = HashMap<String, JsonValue>()
-
-        let patternProp = HashMap<String, JsonValue>()
-        patternProp.add("type", JsonValue.String("string"))
-        patternProp.add("description", JsonValue.String("Glob pattern to match files"))
-        properties.add("pattern", JsonValue.Map(patternProp))
-
-        obj.add("properties", JsonValue.Map(properties))
-
-        let required = ArrayList<JsonValue>()
-        required.add(JsonValue.String("pattern"))
-        obj.add("required", JsonValue.Array(required))
-
-        JsonValue.Map(obj)
+        SchemaBuilder()
+            .addString("pattern", "Glob pattern to match files", required: true)
+            .build()
     }
 
     public func execute(ctx: ToolContext, args: JsonValue): ToolResult {

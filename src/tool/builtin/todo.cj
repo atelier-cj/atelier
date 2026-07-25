@@ -26,29 +26,11 @@ public class TodoTool <: Tool {
     }
 
     public func schema(): JsonValue {
-        let obj = HashMap<String, JsonValue>()
-        obj.add("type", JsonValue.String("object"))
-
-        let properties = HashMap<String, JsonValue>()
-
-        let actionProp = HashMap<String, JsonValue>()
-        actionProp.add("type", JsonValue.String("string"))
-        actionProp.add("description", JsonValue.String("Action to perform: list, add, complete, or remove"))
-        actionProp.add("enum", createEnumArray())
-        properties.add("action", JsonValue.Map(actionProp))
-
-        let itemProp = HashMap<String, JsonValue>()
-        itemProp.add("type", JsonValue.String("string"))
-        itemProp.add("description", JsonValue.String("Item text (required for add, complete, remove actions)"))
-        properties.add("item", JsonValue.Map(itemProp))
-
-        obj.add("properties", JsonValue.Map(properties))
-
-        let required = ArrayList<JsonValue>()
-        required.add(JsonValue.String("action"))
-        obj.add("required", JsonValue.Array(required))
-
-        JsonValue.Map(obj)
+        SchemaBuilder()
+            .addEnum("action", "Action to perform: list, add, complete, or remove",
+                ArrayList<String>(["list", "add", "complete", "remove"]), required: true)
+            .addString("item", "Item text (required for add, complete, remove actions)")
+            .build()
     }
 
     public func execute(ctx: ToolContext, args: JsonValue): ToolResult {
@@ -77,15 +59,6 @@ public class TodoTool <: Tool {
 
     public func executionMode(): ToolExecutionMode {
         ToolExecutionMode.Sequential
-    }
-
-    func createEnumArray(): JsonValue {
-        let arr = ArrayList<JsonValue>()
-        arr.add(JsonValue.String("list"))
-        arr.add(JsonValue.String("add"))
-        arr.add(JsonValue.String("complete"))
-        arr.add(JsonValue.String("remove"))
-        JsonValue.Array(arr)
     }
 
     func handleList(): ToolResult {

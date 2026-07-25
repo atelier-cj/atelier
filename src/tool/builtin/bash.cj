@@ -22,28 +22,10 @@ public class BashTool <: Tool {
     }
 
     public func schema(): JsonValue {
-        let obj = HashMap<String, JsonValue>()
-        obj.add("type", JsonValue.String("object"))
-
-        let properties = HashMap<String, JsonValue>()
-
-        let commandProp = HashMap<String, JsonValue>()
-        commandProp.add("type", JsonValue.String("string"))
-        commandProp.add("description", JsonValue.String("Shell command to execute"))
-        properties.add("command", JsonValue.Map(commandProp))
-
-        let timeoutProp = HashMap<String, JsonValue>()
-        timeoutProp.add("type", JsonValue.String("integer"))
-        timeoutProp.add("description", JsonValue.String("Timeout in milliseconds (optional)"))
-        properties.add("timeout", JsonValue.Map(timeoutProp))
-
-        obj.add("properties", JsonValue.Map(properties))
-
-        let required = ArrayList<JsonValue>()
-        required.add(JsonValue.String("command"))
-        obj.add("required", JsonValue.Array(required))
-
-        JsonValue.Map(obj)
+        SchemaBuilder()
+            .addString("command", "Shell command to execute", required: true)
+            .addInteger("timeout", "Timeout in milliseconds (optional)")
+            .build()
     }
 
     public func execute(ctx: ToolContext, args: JsonValue): ToolResult {

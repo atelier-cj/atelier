@@ -20,35 +20,11 @@ public class EditFileTool <: Tool {
     }
 
     public func schema(): JsonValue {
-        let obj = HashMap<String, JsonValue>()
-        obj.add("type", JsonValue.String("object"))
-
-        let properties = HashMap<String, JsonValue>()
-
-        let pathProp = HashMap<String, JsonValue>()
-        pathProp.add("type", JsonValue.String("string"))
-        pathProp.add("description", JsonValue.String("File path to edit (relative to working directory)"))
-        properties.add("path", JsonValue.Map(pathProp))
-
-        let oldStringProp = HashMap<String, JsonValue>()
-        oldStringProp.add("type", JsonValue.String("string"))
-        oldStringProp.add("description", JsonValue.String("Text to replace"))
-        properties.add("oldString", JsonValue.Map(oldStringProp))
-
-        let newStringProp = HashMap<String, JsonValue>()
-        newStringProp.add("type", JsonValue.String("string"))
-        newStringProp.add("description", JsonValue.String("Replacement text"))
-        properties.add("newString", JsonValue.Map(newStringProp))
-
-        obj.add("properties", JsonValue.Map(properties))
-
-        let required = ArrayList<JsonValue>()
-        required.add(JsonValue.String("path"))
-        required.add(JsonValue.String("oldString"))
-        required.add(JsonValue.String("newString"))
-        obj.add("required", JsonValue.Array(required))
-
-        JsonValue.Map(obj)
+        SchemaBuilder()
+            .addString("path", "File path to edit (relative to working directory)", required: true)
+            .addString("oldString", "Text to replace", required: true)
+            .addString("newString", "Replacement text", required: true)
+            .build()
     }
 
     public func execute(ctx: ToolContext, args: JsonValue): ToolResult {

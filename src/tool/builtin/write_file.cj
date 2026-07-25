@@ -19,29 +19,10 @@ public class WriteFileTool <: Tool {
     }
 
     public func schema(): JsonValue {
-        let obj = HashMap<String, JsonValue>()
-        obj.add("type", JsonValue.String("object"))
-
-        let properties = HashMap<String, JsonValue>()
-
-        let pathProp = HashMap<String, JsonValue>()
-        pathProp.add("type", JsonValue.String("string"))
-        pathProp.add("description", JsonValue.String("File path to write (relative to working directory)"))
-        properties.add("path", JsonValue.Map(pathProp))
-
-        let contentProp = HashMap<String, JsonValue>()
-        contentProp.add("type", JsonValue.String("string"))
-        contentProp.add("description", JsonValue.String("Content to write to the file"))
-        properties.add("content", JsonValue.Map(contentProp))
-
-        obj.add("properties", JsonValue.Map(properties))
-
-        let required = ArrayList<JsonValue>()
-        required.add(JsonValue.String("path"))
-        required.add(JsonValue.String("content"))
-        obj.add("required", JsonValue.Array(required))
-
-        JsonValue.Map(obj)
+        SchemaBuilder()
+            .addString("path", "File path to write (relative to working directory)", required: true)
+            .addString("content", "Content to write to the file", required: true)
+            .build()
     }
 
     public func execute(ctx: ToolContext, args: JsonValue): ToolResult {

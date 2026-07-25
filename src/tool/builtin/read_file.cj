@@ -19,33 +19,11 @@ public class ReadFileTool <: Tool {
     }
 
     public func schema(): JsonValue {
-        let obj = HashMap<String, JsonValue>()
-        obj.add("type", JsonValue.String("object"))
-
-        let properties = HashMap<String, JsonValue>()
-
-        let pathProp = HashMap<String, JsonValue>()
-        pathProp.add("type", JsonValue.String("string"))
-        pathProp.add("description", JsonValue.String("File path to read (relative to working directory)"))
-        properties.add("path", JsonValue.Map(pathProp))
-
-        let offsetProp = HashMap<String, JsonValue>()
-        offsetProp.add("type", JsonValue.String("integer"))
-        offsetProp.add("description", JsonValue.String("Line number to start from (0-indexed)"))
-        properties.add("offset", JsonValue.Map(offsetProp))
-
-        let limitProp = HashMap<String, JsonValue>()
-        limitProp.add("type", JsonValue.String("integer"))
-        limitProp.add("description", JsonValue.String("Maximum number of lines to return"))
-        properties.add("limit", JsonValue.Map(limitProp))
-
-        obj.add("properties", JsonValue.Map(properties))
-
-        let required = ArrayList<JsonValue>()
-        required.add(JsonValue.String("path"))
-        obj.add("required", JsonValue.Array(required))
-
-        JsonValue.Map(obj)
+        SchemaBuilder()
+            .addString("path", "File path to read (relative to working directory)", required: true)
+            .addInteger("offset", "Line number to start from (0-indexed)")
+            .addInteger("limit", "Maximum number of lines to return")
+            .build()
     }
 
     public func execute(ctx: ToolContext, args: JsonValue): ToolResult {
