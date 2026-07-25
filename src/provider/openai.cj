@@ -29,7 +29,7 @@ public class OpenAIProvider <: Provider {
         let oaiReq = OpenAIRequest(req.model, messagesToOpenAI(req.messages), false, req.temperature, req.maxTokens)
         let bodyJson = toJsonString(oaiReq)
         let httpReq = HttpRequestBuilder()
-            .url(this.baseURL + "/v1/chat/completions")
+            .url(this.baseURL + "/chat/completions")
             .header("content-type", "application/json")
             .header("authorization", "Bearer " + this.apiKey)
             .body(bodyJson)
@@ -62,7 +62,7 @@ public class OpenAIProvider <: Provider {
 func doStreamRequest(client: Client, baseURL: String, apiKey: String, bodyJson: String, stream: EventStream<ChatDelta, AssistantMessage>): Unit {
     try {
         let httpReq = HttpRequestBuilder()
-            .url(baseURL + "/v1/chat/completions")
+            .url(baseURL + "/chat/completions")
             .header("content-type", "application/json")
             .header("authorization", "Bearer " + apiKey)
             .body(bodyJson)
