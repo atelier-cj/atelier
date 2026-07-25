@@ -48,7 +48,9 @@ public class AtelierHttpHandler {
                 for ((k, _) in agents) { arr.add(JsonValue.String(k)) }
                 jsonResponse(ctx, 200, JsonValue.Array(arr).stringify())
             case "POST" =>
-                let dto = parseAgentConfigDTO(readBody(ctx))
+                let dto = try { fromJsonString<AgentConfigDTO>(readBody(ctx)) } catch (_) {
+                    jsonResponse(ctx, 400, "{\"error\":\"invalid JSON\"}"); return
+                }
                 let cfg = configFromDTO(dto)
                 try {
                     this.agentRegistry.create(dto.name, cfg)
@@ -61,16 +63,18 @@ public class AtelierHttpHandler {
     }
 
     private func handleAgentRun(ctx: HttpContext): Unit {
-        let v = try { JsonValue.parse(readBody(ctx)) } catch (_) {
+        let body = readBody(ctx)
+        let dto = try { fromJsonString<ChatRequestDTO>(body) } catch (_) {
             jsonResponse(ctx, 400, "{\"error\":\"invalid JSON\"}"); return
         }
-        let agentName = match (v["agent"]) { case Some(JsonValue.String(s)) => s; case _ => "" }
-        if (agentName == "") { jsonResponse(ctx, 400, "{\"error\":\"missing agent\"}"); return }
-        let agentCfg = match (this.agentRegistry.get(agentName)) {
+        let agentCfg = match (this.agentRegistry.get(dto.agent)) {
             case Some(c) => c
             case None => jsonResponse(ctx, 404, "{\"error\":\"agent not found\"}"); return
         }
-        let msgs = parseMessages(v["messages"])
+        let msgs = ArrayList<Message>()
+        for (m in dto.messages) {
+            if (m.role == "user") { msgs.add(UserMessage(ContentList.ofText(m.content), 0)) }
+        }
         let provider = resolveProvider(agentCfg.model)
         let runtime = AgentRuntime(agentCfg, provider, this.toolRegistry, this.sessionStore, this.trustManager)
         let eventStream = runtime.chat(msgs)
@@ -156,55 +160,6 @@ func escapeJson(s: String): String {
     r = r.replace("\"", "\\\"")
     r = r.replace("\n", "\\n")
     r
-}
-
-func parseAgentConfigDTO(body: String): AgentConfigDTO {
-    let v = JsonValue.parse(body)
-    AgentConfigDTO(
-        strField(v, "name"),
-        optStrField(v, "description"),
-        strField(v, "systemPrompt"),
-        strField(v, "model"),
-        optStrField(v, "provider"),
-        strListField(v, "tools"),
-        strListField(v, "skills"),
-        intField(v, "maxTurns", 20),
-        floatField(v, "temperature", 0.7))
-}
-
-func strField(v: JsonValue, key: String): String {
-    match (v[key]) { case Some(JsonValue.String(s)) => s; case _ => "" }
-}
-
-func optStrField(v: JsonValue, key: String): Option<String> {
-    match (v[key]) { case Some(JsonValue.String(s)) => Some(s); case _ => None }
-}
-
-func intField(v: JsonValue, key: String, def: Int64): Int64 {
-    match (v[key]) { case Some(JsonValue.Number(n)) => Int64(n); case _ => def }
-}
-
-func floatField(v: JsonValue, key: String, def: Float64): Float64 {
-    match (v[key]) { case Some(JsonValue.Number(n)) => n; case _ => def }
-}
-
-func strListField(v: JsonValue, key: String): ArrayList<String> {
-    let result = ArrayList<String>()
-    match (v[key]) { case Some(JsonValue.Array(a)) =>
-        for (item in a) { match (item) { case JsonValue.String(s) => result.add(s); case _ => () } }
-    case _ => () }
-    result
-}
-
-func parseMessages(v: ?JsonValue): ArrayList<Message> {
-    let result = ArrayList<Message>()
-    let arr = match (v) { case Some(JsonValue.Array(a)) => a; case _ => return result }
-    for (item in arr) {
-        let r = match (item["role"]) { case Some(JsonValue.String(s)) => s; case _ => "" }
-        let c = match (item["content"]) { case Some(JsonValue.String(s)) => s; case _ => "" }
-        if (r == "user") { result.add(UserMessage(ContentList.ofText(c), 0)) }
-    }
-    result
 }
 
 func configFromDTO(dto: AgentConfigDTO): AgentConfig {
