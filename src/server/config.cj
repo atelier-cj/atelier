@@ -45,6 +45,13 @@ public func resolveProvider(model: String): ProviderConfig {
     ProviderConfig("default", baseURL, apiKey)
 }
 
+public func resolveModel(cfgModel: String): String {
+    let fromEnv = getEnv("OPENAI_MODEL", "")
+    if (cfgModel != "") { cfgModel }
+    else if (fromEnv != "") { fromEnv }
+    else { "gpt-4o" }
+}
+
 func getEnv(key: String, def: String): String {
     match (getVariable(key)) {
         case Some(v) => v

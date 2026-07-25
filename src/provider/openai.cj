@@ -68,7 +68,7 @@ func doStreamRequest(client: Client, baseURL: String, apiKey: String, bodyJson: 
             .build()
         let resp = client.send(httpReq)
         if (resp.status != 200) {
-            stream.setError(Exception("OpenAI API error: " + resp.status.toString()))
+            stream.setError(Exception("OpenAI API error: " + resp.status.toString() + " " + readAll(resp.body)))
             return
         }
         let body = resp.body
@@ -94,8 +94,9 @@ func doStreamRequest(client: Client, baseURL: String, apiKey: String, bodyJson: 
             }
         }
 
+        let finalText = contentBuilder.toString()
         let assistantMsg = AssistantMessage(
-            ContentList.ofText(contentBuilder.toString()), "", "", StopReason.EndTurn,
+            ContentList.ofText(finalText), "", "", StopReason.EndTurn,
             TokenUsage(0, 0), 0)
         stream.setResult(assistantMsg)
     } catch (e: Exception) {

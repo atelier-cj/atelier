@@ -8,6 +8,7 @@ import atelier.trust.*
 import atelier.event.EventStream
 import jsonvalue.*
 import std.collection.*
+import std.env.getVariable
 
 public class AgentRuntime {
     private let config: AgentConfig
@@ -52,33 +53,17 @@ public class AgentRuntime {
                 turnCount++
 
                 stream.emit(MessageStartEvent(currentMessages[0]))
-                let chatReq = ChatRequest(this.config.model, currentMessages,
+                let actualModel = this.pickModel(this.config.model)
+                let chatReq = ChatRequest(actualModel, currentMessages,
                     Float64(this.config.temperature), Int64(this.config.maxOutputTokens))
 
-                let chatStream = this.provider.chatStreaming(chatReq)
-                var collectedDelta = StringBuilder()
-                var finishReason: Option<StopReason> = None
-
-                var running = true
-                while (running) {
-                    match (chatStream.receive(1 * Duration.second)) {
-                        case Some(delta) =>
-                            collectedDelta.append(delta.delta)
-                            stream.emit(MessageUpdateEvent(currentMessages[0], delta.delta))
-                            finishReason = delta.finishReason
-                        case None => running = false
-                    }
-                }
-
-                let fs = finishReason ?? StopReason.EndTurn
-                let assistantMsg = AssistantMessage(
-                    ContentList.ofText(collectedDelta.toString()),
-                    this.config.model, provName, fs, TokenUsage(0, 0), 0)
+                let response = this.provider.chat(chatReq)
+                let assistantMsg = response.message
                 stream.emit(MessageEndEvent(assistantMsg))
                 currentMessages.add(assistantMsg)
 
-                match (finishReason) {
-                    case Some(StopReason.ToolUse) =>
+                match (assistantMsg.stopReason) {
+                    case StopReason.ToolUse =>
                         let toolCalls = assistantMsg.toolCalls()
                         let batch = ArrayList<(String, ToolContext, JsonValue)>()
                         var idx: Int64 = 0
@@ -105,5 +90,12 @@ public class AgentRuntime {
         }
 
         stream
+    }
+
+    private func pickModel(m: String): String {
+        if (m != "") { return m }
+        let envModel = match (getVariable("OPENAI_MODEL")) { case Some(v) => v; case None => "" }
+        if (envModel != "") { return envModel }
+        "gpt-4o"
     }
 }
