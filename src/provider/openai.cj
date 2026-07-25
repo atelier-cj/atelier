@@ -18,7 +18,9 @@ public class OpenAIProvider <: Provider {
         this.provName = name
         this.baseURL = baseURL.trimEnd('/')
         this.apiKey = apiKey
-        this.httpClient = ClientBuilder().build()
+        this.httpClient = ClientBuilder()
+            .readTimeout(120 * Duration.second)
+            .build()
     }
 
     public func name(): String { this.provName }
