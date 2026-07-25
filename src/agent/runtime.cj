@@ -108,11 +108,21 @@ public class AgentRuntime {
                             let toolCalls = assistantMsg.toolCalls()
                             log.info("tool calls: ${toolCalls.size}", Array<Attr>())
                             let batch = ArrayList<(String, ToolContext, JsonValue)>()
+                            let skipResults = HashMap<Int64, String>()
                             var idx: Int64 = 0
                             while (idx < toolCalls.size) {
                                 let tc = toolCalls[idx]
-                                let t = (tc.name, ctx, tc.args)
-                                batch.add(t)
+                                match (this.toolRegistry.get(tc.name)) {
+                                    case Some(t) =>
+                                        if (shouldAllow(t, ctx.workDir, this.trustManager)) {
+                                            batch.add((tc.name, ctx, tc.args))
+                                        } else {
+                                            skipResults[idx] = "Tool not allowed: workDir not trusted"
+                                            log.warn("tool ${tc.name} blocked by trust gate", Array<Attr>())
+                                        }
+                                    case None =>
+                                        skipResults[idx] = "Tool not found: " + tc.name
+                                }
                                 idx++
                             }
                             let results = try {
@@ -123,12 +133,20 @@ public class AgentRuntime {
                                 stream.emit(TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
                                 continue
                             }
-                            idx = 0
-                            for (r in results) {
-                                let tcId = if (idx < toolCalls.size) { toolCalls[idx].id } else { "" }
-                                log.info("tool ${toolCalls[idx].name} done: err=${r.isError}", Array<Attr>())
-                                currentMessages.add(ToolResultMessage(tcId, toolCalls[idx].name, ContentList.ofText(r.text), r.isError, 0))
-                                idx++
+                            var resIdx: Int64 = 0
+                            for (i in 0..toolCalls.size) {
+                                let tc = toolCalls[Int64(i)]
+                                match (skipResults.get(Int64(i))) {
+                                    case Some(msg) =>
+                                        currentMessages.add(ToolResultMessage(tc.id, tc.name, ContentList.ofText(msg), false, 0))
+                                    case None =>
+                                        if (resIdx < results.size) {
+                                            let r = results[Int64(resIdx)]
+                                            log.info("tool ${tc.name} done: err=${r.isError}", Array<Attr>())
+                                            currentMessages.add(ToolResultMessage(tc.id, tc.name, ContentList.ofText(r.text), r.isError, 0))
+                                            resIdx++
+                                        }
+                                }
                             }
                             stream.emit(TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
 

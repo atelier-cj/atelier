@@ -68,17 +68,22 @@ public class McpManager {
 
 func createTransport(cfg: McpServerConfig): Option<Transport> {
     let log = getGlobalLogger([("name", "McpManager")])
-    if (cfg.transport == "stdio") {
-        if (cfg.command == "") { log.warn("mcp ${cfg.name}: missing command", Array<Attr>()); return Option<Transport>.None }
-        Option<Transport>.Some(StdioClientTransport(cfg.command))
-    } else if (cfg.transport == "streamable-http") {
-        if (cfg.url == "") { log.warn("mcp ${cfg.name}: missing url", Array<Attr>()); return Option<Transport>.None }
-        Option<Transport>.Some(StatelessHttpClientTransport(cfg.url))
-    } else if (cfg.transport == "session-http") {
-        if (cfg.url == "") { log.warn("mcp ${cfg.name}: missing url", Array<Attr>()); return Option<Transport>.None }
-        Option<Transport>.Some(SessionHttpClientTransport(cfg.url))
-    } else {
-        log.warn("mcp ${cfg.name}: unknown transport ${cfg.transport}", Array<Attr>())
+    try {
+        if (cfg.transport == "stdio") {
+            if (cfg.command == "") { log.warn("mcp ${cfg.name}: missing command", Array<Attr>()); return Option<Transport>.None }
+            Option<Transport>.Some(StdioClientTransport(cfg.command))
+        } else if (cfg.transport == "streamable-http") {
+            if (cfg.url == "") { log.warn("mcp ${cfg.name}: missing url", Array<Attr>()); return Option<Transport>.None }
+            Option<Transport>.Some(StatelessHttpClientTransport(cfg.url))
+        } else if (cfg.transport == "session-http") {
+            if (cfg.url == "") { log.warn("mcp ${cfg.name}: missing url", Array<Attr>()); return Option<Transport>.None }
+            Option<Transport>.Some(SessionHttpClientTransport(cfg.url))
+        } else {
+            log.warn("mcp ${cfg.name}: unknown transport ${cfg.transport}", Array<Attr>())
+            Option<Transport>.None
+        }
+    } catch (e: Exception) {
+        log.error("mcp ${cfg.name}: transport creation failed: ${e.message}", Array<Attr>())
         Option<Transport>.None
     }
 }
