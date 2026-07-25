@@ -11,7 +11,9 @@ import atelier.event.EventStream
 import jsonvalue.*
 import std.collection.*
 import std.core.Duration
+import std.core.sleep
 import std.env.getVariable
+import std.time.MonoTime
 import stdx.log.*
 
 public class AgentRuntime {
@@ -80,6 +82,7 @@ public class AgentRuntime {
                 for (m in messages) { currentMessages.add(m) }
                 var turnCount: Int64 = 0
                 var toolCallCount: Int64 = 0
+                var lastToolTime: MonoTime = MonoTime.now()
                 var finished = false
 
                 while (!finished && turnCount < Int64(this.config.maxTurns)) {
@@ -173,6 +176,13 @@ public class AgentRuntime {
                                 }
                                 idx++
                             }
+                            let minIntervalMs = Int64(this.config.minToolInterval)
+                            if (minIntervalMs > 0) {
+                                let elapsed = (MonoTime.now() - lastToolTime).toMilliseconds()
+                                if (elapsed < minIntervalMs) {
+                                    sleep(Duration.millisecond * (minIntervalMs - elapsed))
+                                }
+                            }
                             callHooks("beforeTool", turnCount, toolCalls, ArrayList<ToolResultMessage>())
                             let results = try {
                                 this.toolExecutor.executeBatch(batch)
@@ -204,6 +214,7 @@ public class AgentRuntime {
                             }
                             callHooks("afterTool", turnCount, toolCalls, toolResults)
                             toolCallCount += toolCalls.size
+                            lastToolTime = MonoTime.now()
                             stream.emit(TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
 
                         case _ =>
