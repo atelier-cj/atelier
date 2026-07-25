@@ -1,7 +1,7 @@
 package atelier.message
 
 import std.collection.*
-import stdx.encoding.json.*
+import jsonvalue.*
 
 func makeTextContent(text: String): ContentList {
     let blocks = ArrayList<ContentBlock>()
@@ -64,7 +64,7 @@ func assistantMessage_toolCalls_empty() {
 
 @Test
 func assistantMessage_toolCalls_delegates() {
-    let tc = ToolCallBlock("call_1", "get_weather", JsonString("{}"))
+    let tc = ToolCallBlock("call_1", "get_weather", JsonValue.String("{}"))
     let blocks = ArrayList<ContentBlock>()
     blocks.add(ContentBlock.ToolCall(tc))
     let content = ContentList(blocks)

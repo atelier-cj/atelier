@@ -1,12 +1,12 @@
 package atelier.tool
 
 import std.collection.*
-import stdx.encoding.json.*
+import jsonvalue.*
 
 // ── Helper: create a MockTool ────────────────────────────────
 
 func makeMockTool(name: String, description: String, mode: ToolExecutionMode): MockTool {
-    let schema = JsonObject()
+    let schema = JsonValue.Map(HashMap<String, JsonValue>())
     let result = ToolResult("done", None, false, false)
     return MockTool(name, description, schema, mode, result)
 }
@@ -103,7 +103,7 @@ func registry_registerDuplicate_overwrites() {
     let tool1 = MockTool(
         "duplicate",
         "First version",
-        JsonObject(),
+        JsonValue.Map(HashMap<String, JsonValue>()),
         ToolExecutionMode.Sequential,
         ToolResult("v1", None, false, false)
     )
@@ -112,7 +112,7 @@ func registry_registerDuplicate_overwrites() {
     let tool2 = MockTool(
         "duplicate",
         "Second version",
-        JsonObject(),
+        JsonValue.Map(HashMap<String, JsonValue>()),
         ToolExecutionMode.Parallel,
         ToolResult("v2", None, false, false)
     )

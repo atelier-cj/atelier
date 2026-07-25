@@ -1,7 +1,7 @@
 package atelier.message
 
 import std.collection.*
-import stdx.encoding.json.*
+import jsonvalue.*
 
 @Test
 func contentBlock_textBlock() {
@@ -14,7 +14,7 @@ func contentBlock_textBlock() {
 
 @Test
 func contentBlock_toolCall() {
-    let tc = ToolCallBlock("call_1", "get_weather", JsonString("{}"))
+    let tc = ToolCallBlock("call_1", "get_weather", JsonValue.String("{}"))
     let block = ContentBlock.ToolCall(tc)
     match (block) {
         case ToolCall(t) => @Expect(t.id, "call_1")
@@ -60,8 +60,8 @@ func contentList_toolCalls_empty() {
 
 @Test
 func contentList_toolCalls_with_tools() {
-    let tc1 = ToolCallBlock("call_1", "get_weather", JsonString("{}"))
-    let tc2 = ToolCallBlock("call_2", "get_time", JsonString("{}"))
+    let tc1 = ToolCallBlock("call_1", "get_weather", JsonValue.String("{}"))
+    let tc2 = ToolCallBlock("call_2", "get_time", JsonValue.String("{}"))
     let blocks = ArrayList<ContentBlock>()
     blocks.add(ContentBlock.TextBlock("hello"))
     blocks.add(ContentBlock.ToolCall(tc1))

@@ -1,6 +1,6 @@
 package atelier.tool
 
-import stdx.encoding.json.*
+import jsonvalue.*
 
 /**
  * Execution mode for a tool.

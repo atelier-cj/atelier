@@ -2,7 +2,7 @@ package atelier.agent
 
 import std.collection.*
 import atelier.message.*
-import stdx.encoding.json.*
+import jsonvalue.*
 
 func makeMsgContent(text: String): ContentList {
     let blocks = ArrayList<ContentBlock>()

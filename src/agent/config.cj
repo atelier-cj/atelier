@@ -1,7 +1,7 @@
 package atelier.agent
 
 import std.collection.*
-import stdx.encoding.json.*
+import jsonvalue.*
 
 /**
  * AgentConfig defines what an Agent is: its identity, model, tools,
@@ -121,24 +121,24 @@ public struct AgentConfig {
      * Serialize this AgentConfig to a JsonValue.
      */
     public func toJson(): JsonValue {
-        let obj = JsonObject()
+        let obj = HashMap<String, JsonValue>()
 
         // String fields
-        obj.put("name", JsonString(this.name))
-        obj.put("systemPrompt", JsonString(this.systemPrompt))
-        obj.put("model", JsonString(this.model))
+        obj.add("name", JsonValue.String(this.name))
+        obj.add("systemPrompt", JsonValue.String(this.systemPrompt))
+        obj.add("model", JsonValue.String(this.model))
 
         // Numeric fields
-        obj.put("maxTurns", JsonInt(Int64(this.maxTurns)))
-        obj.put("temperature", JsonFloat(Float64(this.temperature)))
-        obj.put("maxOutputTokens", JsonInt(Int64(this.maxOutputTokens)))
-        obj.put("compactionReserveTokens", JsonInt(Int64(this.compactionReserveTokens)))
-        obj.put("keepRecentTokens", JsonInt(Int64(this.keepRecentTokens)))
-        obj.put("createdAt", JsonInt(this.createdAt))
-        obj.put("updatedAt", JsonInt(this.updatedAt))
+        obj.add("maxTurns", JsonValue.Number(Float64(this.maxTurns)))
+        obj.add("temperature", JsonValue.Number(Float64(this.temperature)))
+        obj.add("maxOutputTokens", JsonValue.Number(Float64(this.maxOutputTokens)))
+        obj.add("compactionReserveTokens", JsonValue.Number(Float64(this.compactionReserveTokens)))
+        obj.add("keepRecentTokens", JsonValue.Number(Float64(this.keepRecentTokens)))
+        obj.add("createdAt", JsonValue.Number(Float64(this.createdAt)))
+        obj.add("updatedAt", JsonValue.Number(Float64(this.updatedAt)))
 
         // Bool fields
-        obj.put("compactionEnabled", JsonBool(this.compactionEnabled))
+        obj.add("compactionEnabled", JsonValue.Boolean(this.compactionEnabled))
 
         // Option<String> fields
         putOptionString(obj, "description", this.description)
@@ -148,18 +148,21 @@ public struct AgentConfig {
         putOptionString(obj, "createdBy", this.createdBy)
 
         // ArrayList<String> fields
-        obj.put("tools", stringListToJsonArray(this.tools))
-        obj.put("skills", stringListToJsonArray(this.skills))
-        obj.put("tags", stringListToJsonArray(this.tags))
+        obj.add("tools", stringListToJsonArray(this.tools))
+        obj.add("skills", stringListToJsonArray(this.skills))
+        obj.add("tags", stringListToJsonArray(this.tags))
 
-        return obj
+        return JsonValue.Map(obj)
     }
 
     /**
      * Deserialize a JsonValue into an AgentConfig.
      */
     public static func fromJson(jv: JsonValue): AgentConfig {
-        let obj = jv.asObject()
+        let obj = match (jv) {
+            case JsonValue.Map(m) => m
+            case _ => throw Exception("expected object")
+        }
 
         // Required String fields
         let name = getRequiredString(obj, "name")
@@ -231,90 +234,111 @@ public struct AgentConfig {
 // ── 内部辅助函数 ──────────────────────────────────────────
 
 /**
- * Put an Option<String> into a JsonObject, using null for None.
+ * Put an Option<String> into a HashMap, using null for None.
  */
-func putOptionString(obj: JsonObject, key: String, value: Option<String>): Unit {
+func putOptionString(obj: HashMap<String, JsonValue>, key: String, value: Option<String>): Unit {
     match (value) {
-        case Some(v) => obj.put(key, JsonString(v))
-        case None => obj.put(key, JsonNull())
+        case Some(v) => obj.add(key, JsonValue.String(v))
+        case None => obj.add(key, JsonValue.Null)
     }
 }
 
 /**
- * Convert an ArrayList<String> to a JsonArray of JsonString.
+ * Convert an ArrayList<String> to a JsonValue array.
  */
-func stringListToJsonArray(list: ArrayList<String>): JsonArray {
-    let arr = JsonArray()
+func stringListToJsonArray(list: ArrayList<String>): JsonValue {
+    let arr = ArrayList<JsonValue>()
     for (s in list) {
-        arr.add(JsonString(s))
+        arr.add(JsonValue.String(s))
     }
-    return arr
+    return JsonValue.Array(arr)
 }
 
 /**
- * Convert a JsonArray of JsonString to an ArrayList<String>.
+ * Convert a JsonValue array to an ArrayList<String>.
  */
-func jsonArrayToStringList(arr: JsonArray): ArrayList<String> {
-    let items = arr.getItems()
-    let result = ArrayList<String>(items.size)
+func jsonArrayToStringList(jv: JsonValue): ArrayList<String> {
+    let items = match (jv) {
+        case JsonValue.Array(arr) => arr
+        case _ => throw Exception("expected array")
+    }
+    let result = ArrayList<String>()
     for (v in items) {
-        result.add(v.asString().getValue())
+        match (v) {
+            case JsonValue.String(s) => result.add(s)
+            case _ => throw Exception("expected string in array")
+        }
     }
     return result
 }
 
 /**
- * Get a required String field from a JsonObject.
+ * Get a required String field from a HashMap.
  */
-func getRequiredString(obj: JsonObject, key: String): String {
-    return obj[key].asString().getValue()
-}
-
-/**
- * Get a required Int64 field from a JsonObject.
- */
-func getRequiredInt(obj: JsonObject, key: String): Int64 {
-    return obj[key].asInt().getValue()
-}
-
-/**
- * Get a required Bool field from a JsonObject.
- */
-func getRequiredBool(obj: JsonObject, key: String): Bool {
-    return obj[key].asBool().getValue()
-}
-
-/**
- * Get a required JsonArray field from a JsonObject.
- */
-func getRequiredArray(obj: JsonObject, key: String): JsonArray {
-    return obj[key].asArray()
-}
-
-/**
- * Get a Float64 value from a JsonObject field, handling both JsonFloat and JsonInt.
- */
-func getNumberAsFloat64(obj: JsonObject, key: String): Float64 {
-    let jv = obj[key]
-    match (jv.kind()) {
-        case JsFloat => jv.asFloat().getValue()
-        case JsInt => Float64(jv.asInt().getValue())
-        case _ => throw JsonException("${key} must be a number")
+func getRequiredString(obj: HashMap<String, JsonValue>, key: String): String {
+    match (obj.get(key)) {
+        case Some(JsonValue.String(s)) => s
+        case Some(_) => throw Exception("${key} must be a string")
+        case None => throw Exception("${key} is required")
     }
 }
 
 /**
- * Get an optional String field from a JsonObject.
- * Returns None for missing or null fields.
+ * Get a required Int64 field from a HashMap.
  */
-func getOptionalString(obj: JsonObject, key: String): Option<String> {
+func getRequiredInt(obj: HashMap<String, JsonValue>, key: String): Int64 {
+    match (obj.get(key)) {
+        case Some(JsonValue.Number(n)) => Int64(n)
+        case Some(_) => throw Exception("${key} must be a number")
+        case None => throw Exception("${key} is required")
+    }
+}
+
+/**
+ * Get a required Bool field from a HashMap.
+ */
+func getRequiredBool(obj: HashMap<String, JsonValue>, key: String): Bool {
+    match (obj.get(key)) {
+        case Some(JsonValue.Boolean(b)) => b
+        case Some(_) => throw Exception("${key} must be a boolean")
+        case None => throw Exception("${key} is required")
+    }
+}
+
+/**
+ * Get a required JsonValue array field from a HashMap.
+ */
+func getRequiredArray(obj: HashMap<String, JsonValue>, key: String): JsonValue {
     match (obj.get(key)) {
         case Some(jv) =>
-            match (jv.kind()) {
-                case JsNull => None
-                case JsString => Some(jv.asString().getValue())
-                case _ => throw JsonException("${key} must be a string or null")
+            match (jv) {
+                case JsonValue.Array(_) => jv
+                case _ => throw Exception("${key} must be an array")
             }
+        case None => throw Exception("${key} is required")
+    }
+}
+
+/**
+ * Get a Float64 value from a HashMap, handling JsonValue.Number.
+ */
+func getNumberAsFloat64(obj: HashMap<String, JsonValue>, key: String): Float64 {
+    match (obj.get(key)) {
+        case Some(JsonValue.Number(n)) => n
+        case Some(_) => throw Exception("${key} must be a number")
+        case None => throw Exception("${key} is required")
+    }
+}
+
+/**
+ * Get an optional String field from a HashMap.
+ * Returns None for missing or null fields.
+ */
+func getOptionalString(obj: HashMap<String, JsonValue>, key: String): Option<String> {
+    match (obj.get(key)) {
+        case Some(JsonValue.Null) => None
+        case Some(JsonValue.String(s)) => Some(s)
+        case Some(_) => throw Exception("${key} must be a string or null")
         case None => None
     }
 }

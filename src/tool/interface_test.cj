@@ -1,7 +1,7 @@
 package atelier.tool
 
 import std.collection.*
-import stdx.encoding.json.*
+import jsonvalue.*
 
 // ── Helper: MockTool for testing ─────────────────────────────
 
@@ -63,14 +63,17 @@ func toolResult_defaultSuccess() {
 
 @Test
 func toolResult_withDetails() {
-    let details = JsonObject()
-    details.put("key", JsonString("value"))
+    let detailsObj = HashMap<String, JsonValue>()
+    detailsObj.add("key", JsonValue.String("value"))
+    let details = JsonValue.Map(detailsObj)
     let result = ToolResult("data processed", Some(details), false, false)
     @Expect(result.text, "data processed")
     match (result.details) {
         case Some(jv) =>
-            let obj = jv.asObject()
-            @Expect(obj["key"].asString().getValue(), "value")
+            match (jv["key"]) {
+                case Some(JsonValue.String(s)) => @Expect(s, "value")
+                case _ => @Fail("expected string value")
+            }
         case None => @Fail("expected Some details")
     }
     @Expect(result.isError, false)
@@ -111,7 +114,7 @@ func toolContext_emptyWorkDir() {
 
 @Test
 func mockTool_name() {
-    let schema = JsonObject()
+    let schema = JsonValue.Map(HashMap<String, JsonValue>())
     let result = ToolResult("ok", None, false, false)
     let tool = MockTool("get_weather", "Get current weather", schema, ToolExecutionMode.Sequential, result)
     @Expect(tool.name(), "get_weather")
@@ -119,7 +122,7 @@ func mockTool_name() {
 
 @Test
 func mockTool_description() {
-    let schema = JsonObject()
+    let schema = JsonValue.Map(HashMap<String, JsonValue>())
     let result = ToolResult("ok", None, false, false)
     let tool = MockTool("get_time", "Get the current time", schema, ToolExecutionMode.Parallel, result)
     @Expect(tool.description(), "Get the current time")
@@ -127,18 +130,21 @@ func mockTool_description() {
 
 @Test
 func mockTool_schema() {
-    let schema = JsonObject()
-    schema.put("type", JsonString("object"))
+    let schemaObj = HashMap<String, JsonValue>()
+    schemaObj.add("type", JsonValue.String("object"))
+    let schema = JsonValue.Map(schemaObj)
     let result = ToolResult("ok", None, false, false)
     let tool = MockTool("echo", "Echo input", schema, ToolExecutionMode.Sequential, result)
     let gotSchema = tool.schema()
-    let obj = gotSchema.asObject()
-    @Expect(obj["type"].asString().getValue(), "object")
+    match (gotSchema["type"]) {
+        case Some(JsonValue.String(s)) => @Expect(s, "object")
+        case _ => @Fail("expected type string")
+    }
 }
 
 @Test
 func mockTool_executionMode() {
-    let schema = JsonObject()
+    let schema = JsonValue.Map(HashMap<String, JsonValue>())
     let result = ToolResult("ok", None, false, false)
     let tool = MockTool("parallel_tool", "A parallel tool", schema, ToolExecutionMode.Parallel, result)
     match (tool.executionMode()) {
@@ -149,7 +155,7 @@ func mockTool_executionMode() {
 
 @Test
 func mockTool_sequentialExecutionMode() {
-    let schema = JsonObject()
+    let schema = JsonValue.Map(HashMap<String, JsonValue>())
     let result = ToolResult("ok", None, false, false)
     let tool = MockTool("sequential_tool", "A sequential tool", schema, ToolExecutionMode.Sequential, result)
     match (tool.executionMode()) {
@@ -160,11 +166,11 @@ func mockTool_sequentialExecutionMode() {
 
 @Test
 func mockTool_execute() {
-    let schema = JsonObject()
+    let schema = JsonValue.Map(HashMap<String, JsonValue>())
     let expectedResult = ToolResult("hello world", None, false, false)
     let tool = MockTool("greet", "Greets the user", schema, ToolExecutionMode.Sequential, expectedResult)
     let ctx = ToolContext("/tmp")
-    let args = JsonObject()
+    let args = JsonValue.Map(HashMap<String, JsonValue>())
     let result = tool.execute(ctx, args)
     @Expect(result.text, "hello world")
     @Expect(result.isError, false)

@@ -1,7 +1,7 @@
 package atelier.message
 
 import std.collection.*
-import stdx.encoding.json.*
+import jsonvalue.*
 
 public class ToolCallBlock {
     public let id: String

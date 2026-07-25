@@ -1,7 +1,7 @@
 package atelier.agent
 
 import std.collection.*
-import stdx.encoding.json.*
+import jsonvalue.*
 
 // ── Test 1: AgentConfig creation with all fields ────────────
 
@@ -225,10 +225,10 @@ func config_jsonRoundTrip_allFields() {
 
     // Serialize
     let json = original.toJson()
-    let jsonStr = json.toString()
+    let jsonStr = json.stringify()
 
     // Deserialize
-    let parsed = JsonValue.fromStr(jsonStr)
+    let parsed = JsonValue.parse(jsonStr)
     let restored = AgentConfig.fromJson(parsed)
 
     // Verify round-trip preserved all fields
@@ -298,10 +298,10 @@ func config_jsonRoundTrip_minimal() {
 
     // Serialize
     let json = original.toJson()
-    let jsonStr = json.toString()
+    let jsonStr = json.stringify()
 
     // Deserialize
-    let parsed = JsonValue.fromStr(jsonStr)
+    let parsed = JsonValue.parse(jsonStr)
     let restored = AgentConfig.fromJson(parsed)
 
     // Verify defaults
@@ -356,8 +356,8 @@ func config_jsonRoundTrip_withOptionals() {
     )
 
     let json = original.toJson()
-    let jsonStr = json.toString()
-    let parsed = JsonValue.fromStr(jsonStr)
+    let jsonStr = json.stringify()
+    let parsed = JsonValue.parse(jsonStr)
     let restored = AgentConfig.fromJson(parsed)
 
     @Expect(restored.name, "optionals-test")
