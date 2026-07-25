@@ -43,9 +43,10 @@ public class McpManager {
                 match (client.listTools()) {
                     case Result.Ok(result) =>
                         for (toolDef in result.tools) {
-                            let wrapper = MCPToolWrapper(client, toolDef)
+                            let prefixed = "mcp_" + cfg.name + "_" + toolDef.name
+                            let wrapper = MCPToolWrapper(client, toolDef, toolName: prefixed)
                             reg.register(wrapper)
-                            log.info("mcp ${cfg.name}: registered tool ${toolDef.name}", Array<Attr>())
+                            log.info("mcp ${cfg.name}: registered ${prefixed}", Array<Attr>())
                         }
                     case Result.Err(e) =>
                         log.error("mcp ${cfg.name} listTools failed: ${e}", Array<Attr>())

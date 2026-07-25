@@ -20,17 +20,22 @@ public class AgentRuntime {
     private let sessionStore: SessionStore
     private let trustManager: TrustManager
     private let skillRegistry: SkillRegistry
+    private let agentRegistry: AgentRegistry
+    private let providerRegistry: ProviderRegistry
     private let toolExecutor: ToolExecutor
 
     public init(config: AgentConfig, provider: Provider,
         toolRegistry: ToolRegistry, sessionStore: SessionStore,
-        trustManager: TrustManager, skillRegistry: SkillRegistry) {
+        trustManager: TrustManager, skillRegistry: SkillRegistry,
+        agentRegistry: AgentRegistry, providerRegistry: ProviderRegistry) {
         this.config = config
         this.provider = provider
         this.toolRegistry = toolRegistry
         this.sessionStore = sessionStore
         this.trustManager = trustManager
         this.skillRegistry = skillRegistry
+        this.agentRegistry = agentRegistry
+        this.providerRegistry = providerRegistry
         this.toolExecutor = ToolExecutor(this.toolRegistry)
     }
 
@@ -62,7 +67,7 @@ public class AgentRuntime {
 
                     stream.emit(MessageStartEvent(currentMessages[0]))
                     let actualModel = this.pickModel(this.config.model)
-                    let tools = resolveTools(this.config.tools, this.toolRegistry)
+                    let tools = this.resolveTools()
                     let chatReq = ChatRequest(actualModel, currentMessages,
                         Float64(this.config.temperature), Int64(this.config.maxOutputTokens),
                         this.config.thinkingLevel, tools)
@@ -152,18 +157,48 @@ public class AgentRuntime {
         if (envModel != "") { return envModel }
         "gpt-4o"
     }
-}
 
-func resolveTools(names: ArrayList<String>, reg: ToolRegistry): ArrayList<OpenAITool> {
-    let result = ArrayList<OpenAITool>()
-    for (name in names) {
-        match (reg.get(name)) {
-            case Some(t) =>
-                result.add(OpenAITool(t.name(), t.description(), t.schema()))
-            case None => ()
+    private func resolveTools(): ArrayList<OpenAITool> {
+        let result = ArrayList<OpenAITool>()
+        for (name in this.config.tools) {
+            if (name.startsWith("agent_")) {
+                let agentName = name[6..]
+                match (this.agentRegistry.get(agentName)) {
+                    case Some(cfg) =>
+                        let prov = this.resolveSubProvider(cfg)
+                        let tool = AgentTool(agentName, cfg, prov,
+                            this.toolRegistry, this.sessionStore,
+                            this.trustManager, this.skillRegistry,
+                            this.agentRegistry, this.providerRegistry)
+                        this.toolRegistry.register(tool)
+                        result.add(OpenAITool(tool.name(), tool.description(), tool.schema()))
+                    case None => ()
+                }
+            } else if (name.endsWith("_*")) {
+                let prefix = name[0..name.size - 2]
+                for (t in this.toolRegistry.list()) {
+                    if (t.name().startsWith(prefix)) {
+                        result.add(OpenAITool(t.name(), t.description(), t.schema()))
+                    }
+                }
+            } else {
+                match (this.toolRegistry.get(name)) {
+                    case Some(t) =>
+                        result.add(OpenAITool(t.name(), t.description(), t.schema()))
+                    case None => ()
+                }
+            }
+        }
+        result
+    }
+
+    private func resolveSubProvider(cfg: AgentConfig): Provider {
+        let provName = match (cfg.provider) { case Some(v) => v; case None => "default" }
+        match (this.providerRegistry.get(provName)) {
+            case Some(p) => p
+            case None => this.provider
         }
     }
-    result
 }
 
 func buildSystemPrompt(config: AgentConfig, skills: SkillRegistry): String {

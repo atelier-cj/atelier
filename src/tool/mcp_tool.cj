@@ -11,14 +11,16 @@ public class MCPToolWrapper <: Tool {
     private let client: McpClient
     private let toolDef: McpToolDef
     private let execMode: ToolExecutionMode
+    private let toolName: String
 
-    public init(client: McpClient, toolDef: McpToolDef, execMode!: ToolExecutionMode = ToolExecutionMode.Parallel) {
+    public init(client: McpClient, toolDef: McpToolDef, toolName!: String = "", execMode!: ToolExecutionMode = ToolExecutionMode.Parallel) {
         this.client = client
         this.toolDef = toolDef
         this.execMode = execMode
+        this.toolName = if (toolName != "") { toolName } else { toolDef.name }
     }
 
-    public func name(): String { this.toolDef.name }
+    public func name(): String { this.toolName }
 
     public func description(): String { this.toolDef.description }
 
