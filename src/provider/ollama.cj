@@ -11,6 +11,7 @@ import atelier.util.{toJsonString, fromJsonString}
 import stdx.encoding.json.stream.*
 import stdx.encoding.url.*
 import std.core.Duration
+import stdx.log.*
 
 public class OllamaProvider <: Provider {
     private let provName: String
@@ -140,30 +141,28 @@ func doOllamaStream(client: Client, baseURL: String,
                     lineBuf.clear()
                     if (line == "") { continue }
                     let chunk = fromJsonString<OllamaStreamChunk>(line)
-                    let thinking = chunk.message.thinking
-                    let content = chunk.message.content
-                    if (content != "") {
-                        contentBuilder.append(content)
-                        stream.emit(ChatDelta(content, thinking, Option<StopReason>.None))
-                    } else if (thinking != "") {
-                        stream.emit(ChatDelta("", thinking, Option<StopReason>.None))
+                    let msg = chunk.message
+                    if (msg.content != "") {
+                        contentBuilder.append(msg.content)
                     }
-                    if (chunk.done) {
+                    let sReason: Option<StopReason> = if (chunk.done) {
                         done = true
                         doneReason = chunk.doneReason
                         model = chunk.model
-                        if (content == "" && thinking == "") {
-                            stream.emit(ChatDelta("", "", Some(ollamaDoneReason(chunk.doneReason))))
-                        }
+                        Some(ollamaDoneReason(chunk.doneReason))
+                    } else {
+                        Option<StopReason>.None
                     }
+                    stream.emit(ChatDelta(msg.content, msg.thinking, sReason))
                 } else {
                     lineBuf.add(b)
                 }
             }
         }
         let finalStop = if (doneReason != "") { ollamaDoneReason(doneReason) } else { StopReason.EndTurn }
+        let finalText = contentBuilder.toString()
         let assistantMsg = AssistantMessage(
-            ContentList.ofText(contentBuilder.toString()),
+            ContentList.ofText(finalText),
             model, "", finalStop, TokenUsage(0, 0), 0)
         stream.setResult(assistantMsg)
     } catch (e: Exception) {

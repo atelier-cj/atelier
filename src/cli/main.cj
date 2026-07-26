@@ -9,7 +9,6 @@ import stdx.logger.*
 import atelier.message.*
 import atelier.agent.*
 import atelier.provider.*
-import atelier.provider.OllamaProvider
 import atelier.tool.*
 import atelier.tool.builtin.*
 import atelier.session.*

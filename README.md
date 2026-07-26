@@ -18,9 +18,8 @@ Atelier 是一个纯仓颉实现的 Agent 运行时，定位为**成品工坊**�
 ## 安装
 
 ```bash
-git clone https://github.com/anomalyco/atelier
+git clone https://atomgit.com/ystyle/atelier
 cd atelier
-eval "$(cjvs env zsh)" && eval "$(cjvs stdx-env zsh)"
 cjpm build -j 16
 ```
 

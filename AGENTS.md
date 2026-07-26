@@ -6,6 +6,7 @@
 - 在提示语法错误时使用 `cangjie-mem` 加载语言级记忆
 - `match` 的 `case` 后不能接 `{}`，case 后直接写多行表达式
 - 有固定结构的类不要使用jsonvalue手动解析，实现json.stream的序列化接口
+- 除非实在没固定结构的类，否则禁止使用jsonvalue动态获取
 
 ## 任务指南
 
