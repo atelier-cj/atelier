@@ -110,6 +110,64 @@ class MySessionStore <: SessionStore {
 let store = MySessionStore()
 ```
 
+## 会话环境
+
+每个会话可关联一个环境，包含工作目录和自定义上下文：
+
+```cangjie
+struct SessionEnvironment {
+    directory: String                // 工作目录
+    context: HashMap<String, String> // 扩展上下文
+}
+```
+
+### 工作目录
+
+会话的 `directory` 决定工具执行的工作目录：
+
+```bash
+# REPL 指定工作目录
+atelier repl --workdir /home/user/project
+
+# HTTP API
+POST /session/new
+{
+  "directory": "/home/user/project"
+}
+```
+
+自动加载 `directory/AGENTS.md` 中的项目规则，拼入 system prompt。
+
+### 上下文信息
+
+`context` 携带会话级扩展信息，自动注入 system prompt，工具通过 `ctx.env` 读取：
+
+```http
+POST /agent/run
+{
+  "agent": "assistant",
+  "messages": [...],
+  "context": {
+    "current_page": "/orders/123",
+    "user_role": "admin"
+  }
+}
+```
+
+System prompt 中自动注入：
+
+```
+[Session Context]
+current_page = /orders/123
+user_role = admin
+```
+
+### 继承规则
+
+- Session fork 时继承父 session 的 environment
+- 子 session 可覆盖 `directory` 和 `context`
+- 未指定时使用当前目录 + 空上下文
+
 ## 导出
 
 支持导出为 JSONL 和 HTML 回放：

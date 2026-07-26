@@ -54,6 +54,21 @@ command = "npx @playwright/mcp"
 # url = "http://localhost:3100"
 ```
 
+### 会话环境
+
+`~/.atelier.toml` 中可设置默认会话环境：
+
+```toml
+[server.env]
+directory = "/data/projects/default"
+
+[server.env.context]
+current_page = "/"
+user_role = "guest"
+```
+
+会话级可覆盖。参见 [会话管理](sessions.md#会话环境)。
+
 ### 环境变量
 
 | 变量 | 说明 | 默认值 |
