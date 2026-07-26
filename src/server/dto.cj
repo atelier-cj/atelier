@@ -327,6 +327,27 @@ public struct MessageItemDTO <: JsonDeserializable<MessageItemDTO> {
     }
 }
 
+public struct SessionExportDTO <: JsonDeserializable<SessionExportDTO> {
+    public let sessionId: String
+    public let format: String
+
+    public init(sessionId: String, format: String) { this.sessionId = sessionId; this.format = format }
+
+    public static func fromJson(r: JsonReader): SessionExportDTO {
+        var sessionId = ""; var format = "jsonl"
+        r.startObject()
+        while (r.peek() != EndObject) {
+            match (r.readName()) {
+                case "sessionId" => sessionId = r.readValue<String>()
+                case "format" => format = r.readValue<String>()
+                case _ => r.skip()
+            }
+        }
+        r.endObject()
+        SessionExportDTO(sessionId, format)
+    }
+}
+
 public struct AgentListResponse <: JsonSerializable {
     public let agents: ArrayList<String>
 

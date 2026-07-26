@@ -8,6 +8,7 @@ import atelier.message.*
 import atelier.provider.*
 import atelier.tool.*
 import atelier.session.*
+import atelier.session.{exportToJsonl, exportToHtml}
 import atelier.skill.*
 import atelier.trust.*
 import atelier.util.{toJsonString, fromJsonString}
@@ -43,6 +44,7 @@ public class AtelierHttpHandler {
         distributor.register("/session/save", { ctx => h.handleSessionSave(ctx) })
         distributor.register("/session/load", { ctx => h.handleSessionLoad(ctx) })
         distributor.register("/session/fork", { ctx => h.handleSessionFork(ctx) })
+        distributor.register("/session/export", { ctx => h.handleSessionExport(ctx) })
         distributor.register("/sessions", { ctx => h.handleSessionList(ctx) })
         distributor.register("/trust", { ctx => h.handleTrust(ctx) })
         distributor.register("/health", { ctx => h.handleHealth(ctx) })
@@ -229,6 +231,25 @@ public class AtelierHttpHandler {
                 text = text + p
             }
             jsonResponse(ctx, 200, toJsonString(ContentResponse(text)))
+        } catch (_) {
+            jsonResponse(ctx, 404, toJsonString(ErrorResponse("session not found")))
+        }
+    }
+
+    private func handleSessionExport(ctx: HttpContext): Unit {
+        let dto = try { readJson<SessionExportDTO>(ctx) } catch (_) {
+            jsonResponse(ctx, 400, toJsonString(ErrorResponse("invalid JSON"))); return
+        }
+        if (dto.sessionId == "") { jsonResponse(ctx, 400, toJsonString(ErrorResponse("missing sessionId"))); return }
+        try {
+            let msgs = this.sessionStore.load(dto.sessionId)
+            let text = if (dto.format == "html") { exportToHtml(msgs) } else { exportToJsonl(msgs) }
+            let contentType = if (dto.format == "html") { "text/html" } else { "application/jsonl" }
+            let b = ctx.responseBuilder
+            b.status(UInt16(200))
+            b.header("content-type", contentType)
+            b.header("content-disposition", "attachment; filename=\"" + dto.sessionId + "." + dto.format + "\"")
+            b.body(text)
         } catch (_) {
             jsonResponse(ctx, 404, toJsonString(ErrorResponse("session not found")))
         }

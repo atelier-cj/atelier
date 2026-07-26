@@ -999,7 +999,7 @@ interface AgentHooks {
 
 ### Phase 4：增强
 
-- [ ] 会话导出与 HTML 回放（JSONL 导出 + 自足 HTML 页面）
+- [x] 会话导出与 HTML 回放（JSONL 导出 + 自足 HTML 页面，REPL + HTTP 端点）
 - [ ] 包管理器（安装/卸载 Skills/Tools）
 - [x] HTTP 信任管理端点（`/trust` POST，支持 get/set/reset）
 - [x] HTTP 会话管理端点（`/sessions` 列表 + `/session/fork` 克隆）

@@ -2,6 +2,7 @@ package atelier.cli
 
 import std.env.*
 import std.collection.*
+import std.fs.{File, Path}
 import stdx.log.*
 import atelier.agent.*
 import atelier.message.*
@@ -9,6 +10,8 @@ import atelier.provider.*
 import atelier.tool.*
 import atelier.tool.builtin.*
 import atelier.session.*
+import atelier.session.exportToJsonl
+import atelier.session.exportToHtml
 import atelier.trust.*
 import atelier.skill.*
 import opencj::ulid.nextId
@@ -227,11 +230,41 @@ public class REPL {
                     case _ => ()
                 }
             }
+        } else if (cmd == "export" && parts.size > 3) {
+            let targetId = parts[2]
+            let fmt = parts[3]
+            let msgs = this.loadSessionMessages(targetId)
+            if (msgs.size == 0) {
+                println("Session not found: " + targetId)
+                return
+            }
+            if (fmt == "jsonl") {
+                let text = exportToJsonl(msgs)
+                try {
+                    let path = this.sessionId + "_" + targetId + ".jsonl"
+                    File.writeTo(Path(path), text.toArray())
+                    println("Exported to: " + path)
+                } catch (e: Exception) {
+                    println("Export failed: " + e.message)
+                }
+            } else if (fmt == "html") {
+                let text = exportToHtml(msgs)
+                try {
+                    let path = this.sessionId + "_" + targetId + ".html"
+                    File.writeTo(Path(path), text.toArray())
+                    println("Exported to: " + path)
+                } catch (e: Exception) {
+                    println("Export failed: " + e.message)
+                }
+            } else {
+                println("Unknown format: " + fmt + " (use jsonl or html)")
+            }
         } else {
             println("Usage: /session          Show current session")
             println("       /session new      Create new session")
             println("       /session list     List all sessions")
             println("       /session switch <id>  Switch to session")
+            println("       /session export <id> <jsonl|html>  Export session")
         }
     }
 
