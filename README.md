@@ -24,6 +24,37 @@ eval "$(cjvs env zsh)" && eval "$(cjvs stdx-env zsh)"
 cjpm build -j 16
 ```
 
+## 集成方式
+
+**库模式** — 在 `cjpm.toml` 添加依赖，调用 `AgentRuntime.chat()`：
+
+```cangjie
+import atelier.*
+let runtime = AgentRuntime(config, provider, toolReg, ...)
+let stream = runtime.chat(messages)
+for (event in stream) { ... }
+```
+
+**HTTP 挂载** — 路由挂到既有 HTTP 服务：
+
+```cangjie
+let atelier = AtelierHttpHandler(...)
+atelier.registerRoutes(server.distributor)
+```
+
+**独立服务** — 一键启动：
+
+```bash
+atelier serve 8080
+```
+
+**CLI** — 交互式或单次运行：
+
+```bash
+atelier repl
+atelier run "你好"
+```
+
 ## 快速开始
 
 ```bash
