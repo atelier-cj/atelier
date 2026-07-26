@@ -7,26 +7,46 @@ import atelier.agent.*
 import atelier.message.*
 import atelier.provider.*
 import atelier.tool.*
+import atelier.tool.builtin.*
 import atelier.session.*
+import atelier.trust.*
+import atelier.skill.*
 
 public class REPL {
     private let agentName: String
     private let registry: SlashCommandRegistry
-    private let runtimeFactory: (String) -> AgentRuntime
+    private let agentConfig: AgentConfig
+    private let provider: Provider
+    private let toolRegistry: ToolRegistry
     private let sessionStore: SessionStore
+    private let trustManager: TrustManager
+    private let skillRegistry: SkillRegistry
+    private let agentRegistry: AgentRegistry
+    private let providerRegistry: ProviderRegistry
     private var running: Bool = true
     private var sessionId: String
     private var messages: ArrayList<Message>
     private var sessionCounter: Int64
+    private var modelOverride: String
 
     public init(agentName: String, registry: SlashCommandRegistry,
-        runtimeFactory: (String) -> AgentRuntime, sessionStore: SessionStore,
+        agentConfig: AgentConfig, provider: Provider,
+        toolRegistry: ToolRegistry, sessionStore: SessionStore,
+        trustManager: TrustManager, skillRegistry: SkillRegistry,
+        agentRegistry: AgentRegistry, providerRegistry: ProviderRegistry,
         resumeSessionId: String) {
         this.agentName = agentName
         this.registry = registry
-        this.runtimeFactory = runtimeFactory
+        this.agentConfig = agentConfig
+        this.provider = provider
+        this.toolRegistry = toolRegistry
         this.sessionStore = sessionStore
+        this.trustManager = trustManager
+        this.skillRegistry = skillRegistry
+        this.agentRegistry = agentRegistry
+        this.providerRegistry = providerRegistry
         this.sessionCounter = 1
+        this.modelOverride = ""
         if (resumeSessionId != "") {
             this.sessionId = resumeSessionId
             this.messages = try { this.sessionStore.load(resumeSessionId) } catch (_) { ArrayList<Message>() }
@@ -34,6 +54,27 @@ public class REPL {
             this.sessionId = "sess_1"
             this.messages = ArrayList<Message>()
         }
+    }
+
+    private func makeRuntime(): AgentRuntime {
+        let model = if (this.modelOverride != "") { this.modelOverride } else { this.agentConfig.model }
+        let cfg = AgentConfig(
+            this.agentConfig.name, this.agentConfig.description,
+            this.agentConfig.systemPrompt, this.agentConfig.userPromptTemplate,
+            model, this.agentConfig.provider,
+            this.agentConfig.tools, this.agentConfig.skills,
+            this.agentConfig.maxTurns, this.agentConfig.temperature,
+            this.agentConfig.maxOutputTokens, this.agentConfig.thinkingLevel,
+            this.agentConfig.compactionEnabled,
+            this.agentConfig.compactionReserveTokens,
+            this.agentConfig.keepRecentTokens,
+            this.agentConfig.maxToolCalls,
+            this.agentConfig.toolTimeout,
+            this.agentConfig.minToolInterval,
+            this.agentConfig.tags, this.agentConfig.createdBy,
+            this.agentConfig.createdAt, this.agentConfig.updatedAt)
+        AgentRuntime(cfg, this.provider, this.toolRegistry, this.sessionStore,
+            this.trustManager, this.skillRegistry, this.agentRegistry, this.providerRegistry)
     }
 
     public func run(): Unit {
@@ -88,7 +129,7 @@ public class REPL {
             return
         }
 
-        let runtime = this.runtimeFactory(this.agentName)
+        let runtime = this.makeRuntime()
         this.messages.add(UserMessage(ContentList.ofText(line), 0))
         let stream = runtime.chat(this.messages)
 
@@ -162,8 +203,7 @@ public class REPL {
     }
 
     private func handleToolsCommand(): Unit {
-        let runtime = this.runtimeFactory(this.agentName)
-        let tools = runtime.toolNames()
+        let tools = this.agentConfig.tools
         if (tools.size == 0) {
             println("No tools configured for agent: " + this.agentName)
         } else {
@@ -176,10 +216,13 @@ public class REPL {
 
     private func handleModelCommand(line: String): Unit {
         let parts = line.split(" ")
+        let currentModel = if (this.modelOverride != "") { this.modelOverride } else { this.agentConfig.model }
         if (parts.size == 1) {
-            println("Model switching is not supported at runtime. Configure model in ~/.atelier.toml")
+            println("Current model: " + currentModel)
+            println("Usage: /model <name>  to switch model")
         } else {
-            println("Model switching is not supported at runtime. Edit ~/.atelier.toml to change model")
+            this.modelOverride = parts[1]
+            println("Model switched to: " + parts[1])
         }
     }
 }
