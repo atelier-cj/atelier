@@ -14,13 +14,22 @@ public enum ToolExecutionMode {
 
 /**
  * Context passed to tool execution.
- * Provides runtime information such as working directory.
+ * Provides runtime information such as working directory and user interaction.
  */
+public type AskUserFn = (String) -> String
+
 public struct ToolContext {
     public let workDir: String
+    public let askUser: AskUserFn
 
     public init(workDir: String) {
         this.workDir = workDir
+        this.askUser = { q => "" }
+    }
+
+    public init(workDir: String, askUser: AskUserFn) {
+        this.workDir = workDir
+        this.askUser = askUser
     }
 }
 

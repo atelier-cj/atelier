@@ -97,7 +97,12 @@ public class REPL {
             this.agentConfig.tags, this.agentConfig.createdBy,
             this.agentConfig.createdAt, this.agentConfig.updatedAt)
         AgentRuntime(cfg, this.provider, this.toolRegistry, this.sessionStore,
-            this.trustManager, this.skillRegistry, this.agentRegistry, this.providerRegistry)
+            this.trustManager, this.skillRegistry, this.agentRegistry, this.providerRegistry,
+            ArrayList<Hook>(), { q =>
+                println("\n[Ask User] " + q)
+                print("> ")
+                readLine()
+            })
     }
 
     public func run(): Unit {
@@ -312,4 +317,21 @@ func textFromContent(cl: ContentList): String {
         match (b) { case ContentBlock.TextBlock(t) => r = r + t; case _ => () }
     }
     r
+}
+
+func readLine(): String {
+    try {
+        let input = getStdIn()
+        let buf = Array<Byte>(1, repeat: 0)
+        let chars = ArrayList<Byte>()
+        while (true) {
+            let n = input.read(buf)
+            if (n <= 0) { break }
+            if (buf[0] == 10) { break }
+            chars.add(buf[0])
+        }
+        let raw = Array<Byte>(chars.size, repeat: 0)
+        for (i in 0..chars.size) { raw[i] = chars[i] }
+        String.fromUtf8(raw)
+    } catch (_) { "" }
 }

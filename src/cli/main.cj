@@ -167,6 +167,7 @@ func registerBuiltins(reg: ToolRegistry): Unit {
     reg.register(GrepTool())
     reg.register(GlobTool())
     reg.register(TodoTool())
+    reg.register(AskUserTool())
 }
 
 func resolveProviderFor(cfg: AgentConfig, reg: ProviderRegistry): Provider {

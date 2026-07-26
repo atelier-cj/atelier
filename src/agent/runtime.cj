@@ -27,12 +27,13 @@ public class AgentRuntime {
     private let providerRegistry: ProviderRegistry
     private let toolExecutor: ToolExecutor
     private let hooks: ArrayList<Hook>
+    private let askUser: AskUserFn
 
     public init(config: AgentConfig, provider: Provider,
         toolRegistry: ToolRegistry, sessionStore: SessionStore,
         trustManager: TrustManager, skillRegistry: SkillRegistry,
         agentRegistry: AgentRegistry, providerRegistry: ProviderRegistry,
-        hooks: ArrayList<Hook>) {
+        hooks: ArrayList<Hook>, askUser: AskUserFn) {
         this.config = config
         this.provider = provider
         this.toolRegistry = toolRegistry
@@ -43,6 +44,7 @@ public class AgentRuntime {
         this.providerRegistry = providerRegistry
         this.toolExecutor = ToolExecutor(this.toolRegistry)
         this.hooks = hooks
+        this.askUser = askUser
     }
 
     public init(config: AgentConfig, provider: Provider,
@@ -59,11 +61,12 @@ public class AgentRuntime {
         this.providerRegistry = providerRegistry
         this.toolExecutor = ToolExecutor(this.toolRegistry)
         this.hooks = ArrayList<Hook>()
+        this.askUser = { q => "" }
     }
 
     public func chat(messages: ArrayList<Message>): EventStream<AgentEvent, ArrayList<Message>> {
         let stream = EventStream<AgentEvent, ArrayList<Message>>()
-        let ctx = ToolContext(".")
+        let ctx = ToolContext(".", this.askUser)
         let sessionId = "sess_0"
 
         spawn {
@@ -168,8 +171,15 @@ public class AgentRuntime {
                                         if (shouldAllow(t, ctx.workDir, this.trustManager)) {
                                             batch.add((tc.name, ctx, tc.args))
                                         } else {
-                                            skipResults[idx] = "Tool not allowed: workDir not trusted"
-                                            log.warn("tool ${tc.name} blocked by trust gate", Array<Attr>())
+                                            let answer = this.askUser("Tool '" + tc.name + "' needs your approval to run in directory '" + ctx.workDir + "'. Allow? (yes/no)")
+                                            if (answer == "yes" || answer == "y") {
+                                                this.trustManager.setTrust(ctx.workDir, TrustState.Trusted)
+                                                batch.add((tc.name, ctx, tc.args))
+                                                log.info("tool ${tc.name} approved by user", Array<Attr>())
+                                            } else {
+                                                skipResults[idx] = "Tool not allowed: workDir not trusted"
+                                                log.warn("tool ${tc.name} blocked by trust gate", Array<Attr>())
+                                            }
                                         }
                                     case None =>
                                         skipResults[idx] = "Tool not found: " + tc.name
