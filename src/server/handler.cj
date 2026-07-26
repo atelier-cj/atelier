@@ -43,6 +43,9 @@ public class AtelierHttpHandler {
         distributor.register("/agent/stream", { ctx => h.handleAgentStream(ctx) })
         distributor.register("/session/save", { ctx => h.handleSessionSave(ctx) })
         distributor.register("/session/load", { ctx => h.handleSessionLoad(ctx) })
+        distributor.register("/session/fork", { ctx => h.handleSessionFork(ctx) })
+        distributor.register("/sessions", { ctx => h.handleSessionList(ctx) })
+        distributor.register("/trust", { ctx => h.handleTrust(ctx) })
         distributor.register("/health", { ctx => h.handleHealth(ctx) })
     }
 
@@ -140,6 +143,55 @@ public class AtelierHttpHandler {
                     }
                 case None => done = true
             }
+        }
+    }
+
+    private func handleTrust(ctx: HttpContext): Unit {
+        let body = readBody(ctx)
+        let dto = try { fromJsonString<TrustRequestDTO>(body) } catch (_) {
+            jsonResponse(ctx, 400, "{\"error\":\"invalid JSON\"}"); return
+        }
+        if (dto.action == "set") {
+            let trust = if (dto.trust == "trusted") { TrustState.Trusted }
+            else if (dto.trust == "untrusted") { TrustState.Untrusted }
+            else { jsonResponse(ctx, 400, "{\"error\":\"trust must be 'trusted' or 'untrusted'\"}"); return }
+            this.trustManager.setTrust(dto.path, trust)
+            jsonResponse(ctx, 200, "{\"status\":\"ok\",\"path\":\"" + escapeJson(dto.path) + "\",\"trust\":\"" + dto.trust + "\"}")
+        } else if (dto.action == "reset") {
+            this.trustManager.setTrust(dto.path, TrustState.Undecided)
+            jsonResponse(ctx, 200, "{\"status\":\"reset\",\"path\":\"" + escapeJson(dto.path) + "\"}")
+        } else {
+            let state = this.trustManager.getEffectiveTrust(dto.path)
+            let name = match (state) {
+                case TrustState.Trusted => "trusted"
+                case TrustState.Untrusted => "untrusted"
+                case _ => "undecided"
+            }
+            jsonResponse(ctx, 200, "{\"path\":\"" + escapeJson(dto.path) + "\",\"trust\":\"" + name + "\"}")
+        }
+    }
+
+    private func handleSessionList(ctx: HttpContext): Unit {
+        let sessions = try { this.sessionStore.list() } catch (_) {
+            jsonResponse(ctx, 500, "{\"error\":\"failed to list sessions\"}"); return
+        }
+        let parts = ArrayList<String>()
+        for (s in sessions) {
+            parts.add("{\"id\":\"" + escapeJson(s.id) + "\",\"model\":\"" + escapeJson(s.model) + "\"}")
+        }
+        jsonResponse(ctx, 200, "{\"sessions\":[" + joinStrings(parts, ",") + "]}")
+    }
+
+    private func handleSessionFork(ctx: HttpContext): Unit {
+        let body = readBody(ctx)
+        let dto = try { fromJsonString<SessionForkDTO>(body) } catch (_) {
+            jsonResponse(ctx, 400, "{\"error\":\"invalid JSON\"}"); return
+        }
+        try {
+            let fork = this.sessionStore.fork(dto.sourceId, dto.leafId)
+            jsonResponse(ctx, 200, "{\"status\":\"forked\",\"entries\":" + fork.entries.size.toString() + "}")
+        } catch (e: Exception) {
+            jsonResponse(ctx, 500, "{\"error\":\"" + escapeJson(e.message) + "\"}")
         }
     }
 
@@ -314,4 +366,13 @@ func lastAssistantText(msgs: ArrayList<Message>): String {
         i--
     }
     ""
+}
+
+func joinStrings(items: ArrayList<String>, sep: String): String {
+    var r = ""
+    for (i in 0..items.size) {
+        if (i > 0) { r = r + sep }
+        r = r + items[Int64(i)]
+    }
+    r
 }

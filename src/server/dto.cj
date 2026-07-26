@@ -119,3 +119,51 @@ public struct SSEEvent {
         this.id = id; this.event = event; this.data = data
     }
 }
+
+public struct TrustRequestDTO <: JsonDeserializable<TrustRequestDTO> {
+    public let action: String
+    public let path: String
+    public let trust: String
+
+    public init(action: String, path: String, trust: String) {
+        this.action = action; this.path = path; this.trust = trust
+    }
+
+    public static func fromJson(r: JsonReader): TrustRequestDTO {
+        var action = "get"; var path = "."; var trust = ""
+        r.startObject()
+        while (r.peek() != EndObject) {
+            match (r.readName()) {
+                case "action" => action = r.readValue<String>()
+                case "path" => path = r.readValue<String>()
+                case "trust" => trust = r.readValue<String>()
+                case _ => r.skip()
+            }
+        }
+        r.endObject()
+        TrustRequestDTO(action, path, trust)
+    }
+}
+
+public struct SessionForkDTO <: JsonDeserializable<SessionForkDTO> {
+    public let sourceId: String
+    public let leafId: String
+
+    public init(sourceId: String, leafId: String) {
+        this.sourceId = sourceId; this.leafId = leafId
+    }
+
+    public static func fromJson(r: JsonReader): SessionForkDTO {
+        var sourceId = ""; var leafId = ""
+        r.startObject()
+        while (r.peek() != EndObject) {
+            match (r.readName()) {
+                case "sourceId" => sourceId = r.readValue<String>()
+                case "leafId" => leafId = r.readValue<String>()
+                case _ => r.skip()
+            }
+        }
+        r.endObject()
+        SessionForkDTO(sourceId, leafId)
+    }
+}
