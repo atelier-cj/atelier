@@ -70,7 +70,7 @@ main(): Int64 {
     }
     let mcpMgr = McpManager()
     for (ms in config.mcpServer) {
-        let cfg = McpServerConfig(ms.name, ms.transport, ms.command, ms.url)
+        let cfg = ms.toMcpServerConfig()
         mcpMgr.addServer(toolReg, cfg)
     }
 

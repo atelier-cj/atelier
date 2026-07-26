@@ -15,9 +15,14 @@ public struct McpServerConfig {
     public let transport: String
     public let command: String
     public let url: String
+    public let headers: HashMap<String, String>
 
     public init(name: String, transport: String, command: String, url: String) {
-        this.name = name; this.transport = transport; this.command = command; this.url = url
+        this.name = name; this.transport = transport; this.command = command; this.url = url; this.headers = HashMap()
+    }
+
+    public init(name: String, transport: String, command: String, url: String, headers: HashMap<String, String>) {
+        this.name = name; this.transport = transport; this.command = command; this.url = url; this.headers = headers
     }
 }
 
@@ -74,10 +79,14 @@ func createTransport(cfg: McpServerConfig): Option<Transport> {
             Option<Transport>.Some(StdioClientTransport(cfg.command))
         } else if (cfg.transport == "streamable-http") {
             if (cfg.url == "") { log.warn("mcp ${cfg.name}: missing url", Array<Attr>()); return Option<Transport>.None }
-            Option<Transport>.Some(StatelessHttpClientTransport(cfg.url))
+            let t = StatelessHttpClientTransport(cfg.url)
+            if (cfg.headers.size > 0) { t.setCustomHeaders(cfg.headers) }
+            Option<Transport>.Some(t)
         } else if (cfg.transport == "session-http") {
             if (cfg.url == "") { log.warn("mcp ${cfg.name}: missing url", Array<Attr>()); return Option<Transport>.None }
-            Option<Transport>.Some(SessionHttpClientTransport(cfg.url))
+            let t = if (cfg.headers.size > 0) { SessionHttpClientTransport(cfg.url, cfg.headers) }
+                else { SessionHttpClientTransport(cfg.url) }
+            Option<Transport>.Some(t)
         } else {
             log.warn("mcp ${cfg.name}: unknown transport ${cfg.transport}", Array<Attr>())
             Option<Transport>.None

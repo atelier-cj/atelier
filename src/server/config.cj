@@ -1,6 +1,7 @@
 package atelier.server
 
 import atelier.agent.*
+import atelier.tool.McpServerConfig
 import tomlcj.*
 import stdx.serialization.serialization.*
 import std.collection.*
@@ -205,6 +206,7 @@ public class TomlProvider <: Serializable<TomlProvider> {
     public var providerType: String = "openai"
     public var baseURL: String = ""
     public var apiKey: String = ""
+    public var headers: ArrayList<String> = ArrayList()
     public init() {}
 
     public func serialize(): DataModel {
@@ -213,6 +215,7 @@ public class TomlProvider <: Serializable<TomlProvider> {
             .add(field<String>("type", providerType))
             .add(field<String>("baseURL", baseURL))
             .add(field<String>("apiKey", apiKey))
+            .add(field<ArrayList<String>>("headers", headers))
     }
 
     public static func deserialize(dm: DataModel): TomlProvider {
@@ -222,6 +225,13 @@ public class TomlProvider <: Serializable<TomlProvider> {
         r.providerType = match (dms.get("type")) { case s: DataModelString => s.getValue(); case _ => "openai" }
         r.baseURL = match (dms.get("baseURL")) { case s: DataModelString => s.getValue(); case _ => "" }
         r.apiKey = match (dms.get("apiKey")) { case s: DataModelString => s.getValue(); case _ => "" }
+        match (dms.get("headers")) {
+            case seq: DataModelSeq =>
+                for (e in seq.getItems()) {
+                    match (e) { case s: DataModelString => r.headers.add(s.getValue()); case _ => () }
+                }
+            case _ => ()
+        }
         r
     }
 }
@@ -231,6 +241,7 @@ public class TomlMcpServer <: Serializable<TomlMcpServer> {
     public var transport: String = ""
     public var command: String = ""
     public var url: String = ""
+    public var headerList: ArrayList<String> = ArrayList()
     public init() {}
 
     public func serialize(): DataModel {
@@ -239,6 +250,7 @@ public class TomlMcpServer <: Serializable<TomlMcpServer> {
             .add(field<String>("transport", transport))
             .add(field<String>("command", command))
             .add(field<String>("url", url))
+            .add(field<ArrayList<String>>("headers", headerList))
     }
 
     public static func deserialize(dm: DataModel): TomlMcpServer {
@@ -248,8 +260,38 @@ public class TomlMcpServer <: Serializable<TomlMcpServer> {
         r.transport = match (dms.get("transport")) { case s: DataModelString => s.getValue(); case _ => "" }
         r.command = match (dms.get("command")) { case s: DataModelString => s.getValue(); case _ => "" }
         r.url = match (dms.get("url")) { case s: DataModelString => s.getValue(); case _ => "" }
+        match (dms.get("headers")) {
+            case seq: DataModelSeq =>
+                for (e in seq.getItems()) {
+                    match (e) { case s: DataModelString => r.headerList.add(s.getValue()); case _ => () }
+                }
+            case _ => ()
+        }
         r
     }
+
+    public func toMcpServerConfig(): McpServerConfig {
+        let hdrs = HashMap<String, String>()
+        for (h in this.headerList) {
+            let colonIdx = h.indexOf(":")
+            match (colonIdx) {
+                case Some(idx) =>
+                    let key = trimStr(h[0..idx])
+                    let val = trimStr(h[(idx + 1)..])
+                    hdrs[key] = val
+                case None => ()
+            }
+        }
+        McpServerConfig(this.name, this.transport, this.command, this.url, hdrs)
+    }
+}
+
+func trimStr(s: String): String {
+    var start: Int64 = 0
+    var end = s.size - 1
+    while (start < s.size && s[start] <= 32) { start++ }
+    while (end > start && s[end] <= 32) { end-- }
+    if (start == 0 && end == s.size - 1) { s } else { s[start..(end + 1)] }
 }
 
 public class TomlLogging <: Serializable<TomlLogging> {
