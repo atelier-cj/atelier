@@ -28,7 +28,11 @@ curl -X POST http://localhost:8080/agent/config \
     "name": "assistant",
     "systemPrompt": "你是一个有用的助手",
     "model": "gpt-4o",
-    "tools": ["bash", "read_file", "grep"]
+    "provider": "default",
+    "tools": ["bash", "read_file", "grep"],
+    "skills": [],
+    "maxTurns": 20,
+    "temperature": 0.7
   }'
 # {"status":"created"}
 ```
@@ -89,13 +93,13 @@ curl -X POST http://localhost:8080/agent/run \
 ### 流式
 
 ```
-GET /agent/stream
+POST /agent/stream
 ```
 
 使用 SSE 实时推送事件：
 
 ```bash
-curl -N http://localhost:8080/agent/stream \
+curl -N -X POST http://localhost:8080/agent/stream \
   -H "Content-Type: application/json" \
   -d '{
     "agent": "assistant",
@@ -138,13 +142,15 @@ curl -X POST http://localhost:8080/v1/chat/completions \
     "model": "assistant",
     "messages": [{"role": "user", "content": "你好"}]
   }'
-# {"id":"chatcmpl-0","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"你好！"},"finish_reason":"stop"}]}
+# {"id":"chatcmpl-0","object":"chat.completion",
+#  "choices":[{"index":0,"message":{"role":"assistant","content":"你好！"},"finish_reason":"stop"}],
+#  "usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}
 ```
 
 流式（`stream: true`）：
 
 ```bash
-curl -N http://localhost:8080/v1/chat/completions \
+curl -N -X POST http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "assistant",
@@ -169,6 +175,7 @@ curl -X POST http://localhost:8080/session/save \
   -H "Content-Type: application/json" \
   -d '{
     "sessionId": "sess_abc123",
+    "header": "{\"version\":1,\"id\":\"sess_abc123\",\"createdAt\":0,\"updatedAt\":0,\"model\":\"gpt-4o\",\"provider\":\"\",\"systemPrompt\":\"\",\"parentSession\":null}",
     "messages": [{"role": "user", "content": "你好"}]
   }'
 ```
@@ -214,7 +221,7 @@ POST /session/export
 ```
 
 ```bash
-# JSONL
+# JSONL（默认格式）
 curl -X POST http://localhost:8080/session/export \
   -H "Content-Type: application/json" \
   -d '{"sessionId": "sess_abc123", "format": "jsonl"}'

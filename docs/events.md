@@ -53,7 +53,7 @@ Compaction (独立事件)
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `message` | `Message` | 初始消息 |
+| `message` | `Message` | 初始消息（接口类型） |
 
 流式消息开始播放。
 
@@ -64,15 +64,15 @@ Compaction (独立事件)
 | `message` | `Message` | 当前完整状态 |
 | `delta` | `String` | 文本增量 |
 
-每次收到 Provider 的 SSE chunk 时触发，`delta` 是本次新增的文本片段。前端可逐 token 追加显示。
+每次收到 Provider 的 SSE chunk 时触发，`delta` 是本次新增的文本片段。
 
 ### MessageEndEvent
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `message` | `AssistantMessage` | 完整的助手消息 |
+| `message` | `Message` | 完整的消息（接口类型） |
 
-流式消息完成，消息内容完整可用。
+流式消息完成。
 
 ### ToolExecutionStartEvent
 
@@ -89,8 +89,6 @@ Compaction (独立事件)
 |------|------|------|
 | `toolCallId` | `String` | 调用 ID |
 | `progress` | `String` | 执行进度 |
-
-工具执行进度更新（如流式输出进度）。
 
 ### ToolExecutionEndEvent
 
@@ -110,18 +108,19 @@ Compaction (独立事件)
 | `tokensBefore` | `Int64` | 压缩前 Token |
 | `tokensAfter` | `Int64` | 压缩后 Token |
 
-上下文压缩发生，可作为调试信息查看。
+上下文压缩发生。
 
 ## EventStream
 
 ```cangjie
 class EventStream<T, R> {
-    func emit(event: T): Result<Unit>
-    func receive(timeout: Duration): Option<T>
-    func result(): R
-    func setResult(value: R): Unit
-    func setError(e: Exception): Unit
-    func close(): Unit
+    func emit(event: T): Bool           // 发射事件，false 表示流已关闭
+    func receive(): T                   // 阻塞接收
+    func receive(timeout: Duration): Option<T>  // 带超时接收
+    func result(): R                    // 取最终结果（可跳过中间事件）
+    func setResult(r: R): Bool          // 设置结果
+    func setError(e: Exception): Bool   // 设置错误
+    func close(): Unit                  // 关闭流
 }
 ```
 
@@ -138,10 +137,13 @@ let stream = runtime.chat(messages)
 
 while (true) {
     match (stream.receive(5 * Duration.second)) {
-        case Some(AgentEndEvent) =>
-            let result = stream.result()
-            break
-        case Some(ev) => handle(ev)
+        case Some(ev) =>
+            match (ev) {
+                case _: AgentEndEvent =>
+                    let result = stream.result()
+                    break
+                case _ => handle(ev)
+            }
         case None => break  // 超时
     }
 }
@@ -149,13 +151,15 @@ while (true) {
 
 ### 直接取结果
 
-跳过中间事件，直接等待最终结果：
-
 ```cangjie
 let result: ArrayList<Message> = stream.result()
 ```
 
 `result()` 与事件通道分离，即使不消费任何事件也能拿到结果。
+
+### Once 语义
+
+SetResult / SetError / close 三者竞争，先到先赢。之后的调用返回 false。
 
 ## SSE 序列化
 
@@ -170,3 +174,5 @@ data: {"type":"message_end"}
 data: {"type":"turn_end","stopReason":"end_turn","content":"你好，我是AI助手"}
 data: {"type":"agent_end"}
 ```
+
+CompactionEvent 当前 SSE 序列化仅输出 `{"type":"compaction"}`，数据字段为预留。

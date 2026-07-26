@@ -6,10 +6,7 @@ Skill 是按 [AgentSkills 规范](https://agentskills.io/specification) 定义�
 
 ```
 ~/.agents/skills/<name>/
-├── SKILL.md           # 必需：YAML frontmatter + Markdown 指令
-├── scripts/           # 可选：可执行脚本
-├── references/        # 可选：补充文档
-└── assets/            # 可选：模板/图片/数据文件
+└── SKILL.md           # 必需：YAML frontmatter + Markdown 指令
 ```
 
 ## SKILL.md 格式
@@ -40,7 +37,7 @@ metadata:
 
 | 字段 | 必需 | 说明 |
 |------|------|------|
-| `name` | 是 | 唯一标识，全小写+连字符，匹配目录名 |
+| `name` | 是 | 唯一标识，全小写+连字符 |
 | `description` | 是 | 描述技能做什么及何时使用 |
 | `license` | 否 | 许可证 |
 | `compatibility` | 否 | 环境要求 |
@@ -69,7 +66,4 @@ skills = ["code-review", "debugging"]
 
 ## 校验
 
-Atelier 在加载时校验 SKILL.md 格式：
-- name 与目录名一致
-- 必需的 frontmatter 字段完整
-- 格式非法时给出警告，不阻塞启动
+Atelier 加载 Skill 时校验 frontmatter 完整性。校验失败仅跳过该 Skill，不阻塞启动。

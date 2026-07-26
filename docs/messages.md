@@ -43,6 +43,7 @@ let msg = UserMessage(ContentList.ofText("你好"), 0)
 | `provider` | `String` | Provider 名称 |
 | `stopReason` | `StopReason` | 停止原因 |
 | `usage` | `TokenUsage` | Token 用量 |
+| `reasoningContent` | `String` | 思考过程（deepseek-reasoner） |
 | `timestamp` | `Int64` | 时间戳 |
 
 ```cangjie
@@ -104,9 +105,15 @@ let msg = CompactionMessage(
 ```cangjie
 enum ContentBlock {
     TextBlock(text: String)
-    ToolCallBlock(id: String, name: String, args: JsonValue)
+    ToolCall(tc: ToolCallBlock)    // 工具调用
     ToolResultBlock(toolCallId: String, result: String)
     ImageBlock(data: String, mimeType: String)  // 预留
+}
+
+class ToolCallBlock {
+    id: String
+    name: String
+    args: JsonValue
 }
 ```
 
@@ -137,14 +144,14 @@ for (block in list.blocks()) {
 
 ```cangjie
 struct TokenUsage {
-    promptTokens: Int64
-    completionTokens: Int64
+    inputTokens: Int64    // 输入 Token
+    outputTokens: Int64   // 输出 Token
 }
 ```
 
 ## 序列化
 
-所有 Message 类型实现 `JsonSerializable` / `JsonDeserializable`，使用 `stdx.encoding.json.stream`：
+所有 Message 类型通过 `extend` 实现 `JsonSerializable`，使用 `stdx.encoding.json.stream`：
 
 ```cangjie
 import atelier.util.{toJsonString, fromJsonString}
@@ -153,6 +160,6 @@ import atelier.message.*
 // 序列化消息列表
 let json = toJsonString(messages)
 
-// 反序列化
-let msgs = fromJsonString<ArrayList<Message>>(json)
+// 反序列化（需指定具体消息类型）
+let msg = fromJsonString<AssistantMessage>(json)
 ```

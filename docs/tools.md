@@ -47,7 +47,7 @@ enum ToolExecutionMode {
 | `bash` | Sequential | 过闸 | Shell 执行，流式/超时/取消 |
 | `grep` | Parallel | 放行 | 正则搜索文件内容 |
 | `glob` | Parallel | 放行 | 文件模式匹配，支持 gitignore |
-| `todo` | Parallel | 放行 | 待办列表管理（有状态） |
+| `todo` | Sequential | 放行 | 待办列表管理（有状态） |
 | `ask_user` | Parallel | 放行 | AI 向用户提问，暂停等待回答 |
 
 ### 注册内置工具
@@ -91,7 +91,6 @@ class WeatherTool <: Tool {
             case Some(JsonValue.String(s)) => s
             case _ => return ToolResult("缺少 city 参数", None, true, false)
         }
-        // 调用天气 API
         let result = fetchWeather(city)
         ToolResult(result, None, false, false)
     }
@@ -111,11 +110,20 @@ reg.register(WeatherTool())
 ```cangjie
 let schema = SchemaBuilder()
     .addString("name", "名称", required: true)
-    .addInt("count", "数量", required: false)
-    .addEnum("type", ["a", "b", "c"], "类型", required: true)
-    .addArray("items", "数组（字符串元素）", required: false)
+    .addInteger("count", "数量", required: false)
+    .addEnum("type", "类型", ArrayList<String>(["a", "b", "c"]), required: true)
     .build()
 ```
+
+可用方法：
+
+| 方法 | 说明 |
+|------|------|
+| `addString(name, desc, required?)` | 字符串参数 |
+| `addInteger(name, desc, required?)` | 整数参数 |
+| `addEnum(name, desc, values, required?)` | 枚举参数 |
+
+所有 `required` 参数为命名参数，默认 `false`。
 
 ## MCP 工具
 
@@ -133,7 +141,14 @@ command = "npx @playwright/mcp"
 name = "filesystem"
 transport = "streamable-http"
 url = "http://localhost:3100"
+
+[[mcpServer]]
+name = "custom"
+transport = "session-http"
+url = "http://localhost:3200"
 ```
+
+传输方式：`stdio` / `streamable-http` / `session-http`。
 
 ### 工具命名
 
@@ -169,7 +184,7 @@ tools = ["read_file", "edit_file"]
 name = "supervisor"
 model = "gpt-4o"
 systemPrompt = "你是一个编辑主管，可委派写作任务"
-tools = ["agent_writer", "read_file"]  # agent_writer 调用子 Agent
+tools = ["agent_writer", "read_file"]
 ```
 
-子 Agent 有独立的上下文、工具集和模型，同进程隔离运行。
+子 Agent 有独立的上下文、工具集和模型，同进程隔离运行。工具名按 `agent_<name>` 格式注册。

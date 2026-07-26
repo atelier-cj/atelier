@@ -32,7 +32,7 @@ struct SessionHeader {
 
 ```cangjie
 struct Entry {
-    id: String         // 随机 8 字符 ID
+    id: String         // 唯一标识（内存实现为递增序列号，持久化为 "sessionId_index"）
     parentId: Option<String>  // 上一条 entry ID
     timestamp: Int64
     message: Message
@@ -44,7 +44,7 @@ struct Entry {
 ```cangjie
 let entries: ArrayList<Entry> = session.entries
 let leafId = "entry_C"
-let path = PathToLeaf(entries, leafId)
+let path = pathToLeaf(entries, leafId)
 // 返回 [Entry A, Entry B, Entry C]
 ```
 

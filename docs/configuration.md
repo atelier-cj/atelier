@@ -11,14 +11,13 @@ port = 8080                    # 端口，默认 8080
 sessionStore = "bstorm"        # 会话存储类型（默认 bstorm）
 sessionDir = ""                # 会话存储目录，默认 ~/.atelier/sessions
 authToken = ""                 # API Key 认证（可选）
-trustMode = "ask"              # 信任模式：strict / approve-all / ask
-logLevel = "info"              # 日志级别：debug / info / warn / error
+trustMode = "ask"              # 保留字段，暂未接入运行时逻辑
+logLevel = ""                  # 日志级别（空=不输出，debug/info/warn/error）
 logFormat = "text"             # 日志格式：text / json
-rateLimit = 60                 # 每分钟请求限制（可选，0 表示不限）
+rateLimit = 0                  # 每分钟请求限制（0 表示不限）
 
 [[provider]]
 name = "default"               # Provider 名称
-type = "openai"                # 类型（当前仅 openai）
 baseURL = "https://api.openai.com/v1"
 apiKey = "${OPENAI_API_KEY}"   # 支持 ${ENV_VAR} 引用环境变量
 
@@ -26,7 +25,7 @@ apiKey = "${OPENAI_API_KEY}"   # 支持 ${ENV_VAR} 引用环境变量
 name = "assistant"             # Agent 名称
 description = "通用助手"       # 描述（可选）
 model = "gpt-4o"               # 模型名称
-provider = "default"           # 使用的 Provider（可选，默认按 model 推断）
+provider = "default"           # 使用的 Provider（可选，不指定则按 model 在 registry 中查找）
 systemPrompt = "你是一个有用的助手"
 tools = ["bash", "read_file"]  # 可用工具列表
 skills = ["code_review"]       # Skill 列表（可选）
@@ -36,7 +35,7 @@ level = "info"                 # 日志级别，覆盖 server.logLevel
 
 [[mcpServer]]
 name = "playwright"            # MCP 服务器名称
-transport = "stdio"            # 传输方式：stdio / streamable-http
+transport = "stdio"            # 传输方式：stdio / streamable-http / session-http
 command = "npx @playwright/mcp"
 # streamable-http 时：
 # transport = "streamable-http"
@@ -70,20 +69,20 @@ let config = AgentConfig(
     provider: Some("default"),
     tools: ArrayList<String>(["read_file", "grep", "bash"]),
     skills: ArrayList<String>(["code_review"]),
-    maxTurns: UInt32(20),           // 最大轮次
-    temperature: Float32(0.7),      // 生成温度
-    maxOutputTokens: UInt32(4096),  // 最大输出 Token
-    thinkingLevel: None,            // 思考级别：None / "low" / "medium" / "high"
-    compactionEnabled: true,        // 启用上下文压缩
-    compactionReserveTokens: UInt32(16384),  // 压缩保留缓冲
-    keepRecentTokens: UInt32(20000),         // 保留最近 Token 数
-    maxToolCalls: UInt32(50),       // 单次运行最大工具调用
-    toolTimeout: UInt32(30),        // 工具超时（秒）
-    minToolInterval: UInt32(0),     // 工具最小间隔（毫秒）
-    tags: ArrayList<String>(),      // 标签
-    createdBy: None,                // 创建者
-    createdAt: Int64(0),            // 创建时间戳
-    updatedAt: Int64(0)             // 更新时间戳
+    maxTurns: UInt32(20),
+    temperature: Float32(0.7),
+    maxOutputTokens: UInt32(4096),
+    thinkingLevel: None,
+    compactionEnabled: true,
+    compactionReserveTokens: UInt32(16384),
+    keepRecentTokens: UInt32(20000),
+    maxToolCalls: UInt32(50),
+    toolTimeout: UInt32(30),
+    minToolInterval: UInt32(0),
+    tags: ArrayList<String>(),
+    createdBy: None,
+    createdAt: Int64(0),
+    updatedAt: Int64(0)
 )
 ```
 
@@ -91,22 +90,28 @@ let config = AgentConfig(
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `name` | `String` | — | 唯一标识 |
-| `systemPrompt` | `String` | — | 系统提示词 |
-| `model` | `String` | `"gpt-4o"` | 模型名称 |
-| `provider` | `Option<String>` | `None` | 推断 |
+| `name` | `String` | `""` | 唯一标识 |
+| `description` | `Option<String>` | `None` | 描述 |
+| `systemPrompt` | `String` | `""` | 系统提示词 |
+| `userPromptTemplate` | `Option<String>` | `None` | 用户提示词模板 |
+| `model` | `String` | `""` | 模型名称（空则运行时取 OPENAI_MODEL 或 gpt-4o） |
+| `provider` | `Option<String>` | `None` | Provider 名称，在 ProviderRegistry 中查找 |
 | `tools` | `ArrayList<String>` | `[]` | 工具名称列表 |
 | `skills` | `ArrayList<String>` | `[]` | Skill 名称列表 |
 | `maxTurns` | `UInt32` | `20` | 最大推理轮次 |
 | `temperature` | `Float32` | `0.7` | 生成温度 |
-| `maxOutputTokens` | `UInt32` | `4096` | 最大输出 |
-| `thinkingLevel` | `Option<String>` | `None` | 思考模式 |
-| `compactionEnabled` | `Bool` | `true` | 上下文压缩 |
-| `compactionReserveTokens` | `UInt32` | `16384` | 压缩缓冲 |
-| `keepRecentTokens` | `UInt32` | `20000` | 保留最近 |
-| `maxToolCalls` | `UInt32` | `50` | 工具调用上限 |
-| `toolTimeout` | `UInt32` | `30` | 工具超时 |
-| `minToolInterval` | `UInt32` | `0` | 工具最小间隔 |
+| `maxOutputTokens` | `UInt32` | `4096` | 最大输出 Token |
+| `thinkingLevel` | `Option<String>` | `None` | 思考模式（deepseek-reasoner 可用） |
+| `compactionEnabled` | `Bool` | `true` | 启用上下文压缩 |
+| `compactionReserveTokens` | `UInt32` | `16384` | 压缩保留缓冲 |
+| `keepRecentTokens` | `UInt32` | `20000` | 保留最近 Token 数 |
+| `maxToolCalls` | `UInt32` | `50` | 单次运行最大工具调用数 |
+| `toolTimeout` | `UInt32` | `30` | 工具超时（秒） |
+| `minToolInterval` | `UInt32` | `0` | 工具调用最小间隔（毫秒） |
+| `tags` | `ArrayList<String>` | `[]` | 标签 |
+| `createdBy` | `Option<String>` | `None` | 创建者 |
+| `createdAt` | `Int64` | `0` | 创建时间戳 |
+| `updatedAt` | `Int64` | `0` | 更新时间戳 |
 
 ### 默认配置
 
@@ -114,4 +119,4 @@ let config = AgentConfig(
 let config = AgentConfig.default()
 ```
 
-默认值适用于大多数场景，只需覆写需要的字段。
+所有字段使用代码默认值，适用于快速测试。

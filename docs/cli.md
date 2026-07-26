@@ -44,8 +44,8 @@ atelier repl code-assistant sess_abc123
 | 命令 | 说明 |
 |------|------|
 | `/help` | 显示帮助 |
-| `/exit` | 退出 |
-| `/clear` | 清屏 |
+| `/exit` 或 `/quit` | 退出 |
+| `/clear` | 清空对话历史（不清终端屏幕） |
 | `/model <name>` | 切换模型 |
 | `/tools` | 列出当前 agent 的可用工具 |
 | `/session new` | 新建会话 |

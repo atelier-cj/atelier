@@ -8,7 +8,7 @@ Provider 是 LLM 服务适配器，直接对接 REST API。
 interface Provider {
     func name(): String
     func chat(req: ChatRequest): ChatResponse
-    func chatStreaming(req: ChatRequest): EventStream<ChatDelta>
+    func chatStreaming(req: ChatRequest): EventStream<ChatDelta, AssistantMessage>
 }
 ```
 
@@ -21,7 +21,6 @@ interface Provider {
 ```toml
 [[provider]]
 name = "default"
-type = "openai"
 baseURL = "https://api.openai.com/v1"
 apiKey = "${OPENAI_API_KEY}"
 ```
@@ -76,26 +75,27 @@ model = "deepseek-chat"
 provider = "deepseek"
 ```
 
-不指定时按 model 名自动推断。
+不指定时按 `provider` 名在 registry 中查找。
 
 ## 上下文窗口
 
-Provider 不负责上下文窗口推断。Atelier 内置 `ModelContextRegistry` 查表：
+Atelier 内置 `ModelContextRegistry` 查表：
 
 | 模型 | 上下文窗口 |
 |------|-----------|
-| gpt-4o / gpt-4o-mini | 128,000 |
-| gpt-4-turbo | 128,000 |
+| gpt-4o / gpt-4o-mini / gpt-4-turbo | 128,000 |
+| gpt-4 / gpt-4-32k | 8,192 / 32,768 |
+| gpt-3.5-turbo / gpt-3.5-turbo-16k | 16,384 |
 | deepseek-chat / deepseek-reasoner | 65,536 |
-| claude-sonnet-4 / claude-3.5-sonnet | 200,000 |
-| claude-3-haiku | 200,000 |
-| gemini-1.5-pro / gemini-1.5-flash | 1,048,576 |
+| deepseek-coder | 16,384 |
+| claude-sonnet-4 / claude-3.5-sonnet / claude-3-opus / claude-3-sonnet / claude-3-haiku | 200,000 |
+| gemini-1.5-pro / gemini-1.5-flash / gemini-2.0-flash | 1,048,576 |
 | qwen-turbo / qwen-plus / qwen-max | 131,072 |
 | 未知模型 | 8,192（兜底） |
 
 ## 思考模式（DeepSeek）
 
-DeepSeek Reasoner 支持思考模式：
+DeepSeek Reasoner 支持思考模式，通过 `thinkingLevel` 配置：
 
 ```toml
 [[agent]]
@@ -104,4 +104,4 @@ model = "deepseek-reasoner"
 thinkingLevel = "high"
 ```
 
-`thinkingLevel` 可选值：`off` / `low` / `medium` / `high`（仅对支持思考的模型有效）。
+`thinkingLevel` 可选值：`low` / `medium` / `high`。运行时透传给 OpenAI `reasoning_effort` 参数。
