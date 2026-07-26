@@ -57,7 +57,7 @@ public struct SessionHeader <: JsonSerializable & JsonDeserializable<SessionHead
     }
 }
 
-public struct Entry {
+public struct Entry <: JsonSerializable & JsonDeserializable<Entry> {
     public let id: String
     public let parentId: Option<String>
     public let timestamp: Int64
@@ -65,6 +65,41 @@ public struct Entry {
 
     public init(id: String, parentId: Option<String>, timestamp: Int64, message: Message) {
         this.id = id; this.parentId = parentId; this.timestamp = timestamp; this.message = message
+    }
+
+    public func toJson(w: JsonWriter): Unit {
+        w.startObject()
+        w.writeName("id").writeValue(this.id)
+        match (this.parentId) {
+            case Some(p) => w.writeName("parentId").writeValue(p)
+            case None => ()
+        }
+        w.writeName("timestamp").writeValue(this.timestamp)
+        w.writeName("message")
+        match (this.message) {
+            case um: UserMessage => w.writeValue(um)
+            case am: AssistantMessage => w.writeValue(am)
+            case tm: ToolResultMessage => w.writeValue(tm)
+            case cm: CompactionMessage => w.writeValue(cm)
+            case _ => w.writeNullValue()
+        }
+        w.endObject()
+    }
+
+    public static func fromJson(r: JsonReader): Entry {
+        var id = ""; var parentId: Option<String> = None; var ts = Int64(0); var msg: Message = UserMessage(ContentList.ofText(""), 0)
+        r.startObject()
+        while (r.peek() != EndObject) {
+            match (r.readName()) {
+                case "id" => id = r.readValue<String>()
+                case "parentId" => parentId = r.readValue<Option<String>>()
+                case "timestamp" => ts = r.readValue<Int64>()
+                case "message" => msg = readMessageFromJson(r)
+                case _ => r.skip()
+            }
+        }
+        r.endObject()
+        Entry(id, parentId, ts, msg)
     }
 }
 
