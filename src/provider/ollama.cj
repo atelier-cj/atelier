@@ -140,14 +140,21 @@ func doOllamaStream(client: Client, baseURL: String,
                     lineBuf.clear()
                     if (line == "") { continue }
                     let chunk = fromJsonString<OllamaStreamChunk>(line)
-                    if (chunk.message.content != "") {
-                        contentBuilder.append(chunk.message.content)
-                        stream.emit(ChatDelta(chunk.message.content, "", Option<StopReason>.None))
+                    let thinking = chunk.message.thinking
+                    let content = chunk.message.content
+                    if (content != "") {
+                        contentBuilder.append(content)
+                        stream.emit(ChatDelta(content, thinking, Option<StopReason>.None))
+                    } else if (thinking != "") {
+                        stream.emit(ChatDelta("", thinking, Option<StopReason>.None))
                     }
                     if (chunk.done) {
                         done = true
                         doneReason = chunk.doneReason
                         model = chunk.model
+                        if (content == "" && thinking == "") {
+                            stream.emit(ChatDelta("", "", Some(ollamaDoneReason(chunk.doneReason))))
+                        }
                     }
                 } else {
                     lineBuf.add(b)
@@ -245,6 +252,7 @@ public struct OllamaStreamChunk <: JsonDeserializable<OllamaStreamChunk> {
 public struct OllamaStreamMessage <: JsonDeserializable<OllamaStreamMessage> {
     public var role: String = ""
     public var content: String = ""
+    public var thinking: String = ""
 
     public static func fromJson(r: JsonReader): OllamaStreamMessage {
         var res = OllamaStreamMessage()
@@ -253,6 +261,7 @@ public struct OllamaStreamMessage <: JsonDeserializable<OllamaStreamMessage> {
             match (r.readName()) {
                 case "role" => res.role = r.readValue<String>()
                 case "content" => res.content = r.readValue<String>()
+                case "thinking" => res.thinking = r.readValue<String>()
                 case _ => r.skip()
             }
         }
