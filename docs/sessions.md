@@ -70,6 +70,46 @@ interface SessionStore {
 | `MemorySessionStore` | 内存存储，进程重启丢失 | — |
 | `StormSessionStore` | bstorm 持久化到 `~/.atelier/sessions/` | ✅ |
 
+## 自定义 SessionStore
+
+实现 `SessionStore` 接口可使用自己的存储后端：
+
+```cangjie
+import atelier.session.*
+import std.collection.ArrayList
+
+class MySessionStore <: SessionStore {
+    public func save(id: String, header: SessionHeader, messages: ArrayList<Message>): Unit {
+        // 写入数据库 / Redis / 文件
+    }
+    public func appendBranch(id: String, parentLeafId: String, messages: ArrayList<Message>): String {
+        // 增量追加消息，返回新叶子 ID
+        ""
+    }
+    public func load(id: String): ArrayList<Message> {
+        // 加载线性消息列表
+        ArrayList()
+    }
+    public func loadEntries(id: String): SessionData {
+        // 加载完整 Entry 树
+        SessionData(SessionHeader(0, "", 0, 0, "", "", "", None), ArrayList())
+    }
+    public func list(): ArrayList<SessionHeader> {
+        // 列出所有会话元数据
+        ArrayList()
+    }
+    public func delete(id: String): Unit {
+        // 删除会话
+    }
+    public func fork(sourceId: String, leafId: String): SessionData {
+        // 从源会话的 leafId 处克隆为新会话
+        SessionData(SessionHeader(0, "", 0, 0, "", "", "", None), ArrayList())
+    }
+}
+
+let store = MySessionStore()
+```
+
 ## 导出
 
 支持导出为 JSONL 和 HTML 回放：

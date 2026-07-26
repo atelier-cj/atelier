@@ -93,6 +93,49 @@ Atelier 内置 `ModelContextRegistry` 查表：
 | qwen-turbo / qwen-plus / qwen-max | 131,072 |
 | 未知模型 | 8,192（兜底） |
 
+## 自定义 Provider
+
+实现 `Provider` 接口即可对接任意 LLM API：
+
+```cangjie
+import atelier.provider.*
+import atelier.message.*
+import atelier.event.EventStream
+import std.collection.ArrayList
+
+class MyProvider <: Provider {
+    private let name: String
+    public init(name: String) { this.name = name }
+
+    public func name(): String { this.name }
+
+    public func chat(req: ChatRequest): ChatResponse {
+        // 1. 构建 HTTP 请求体
+        // 2. 调用 LLM API
+        // 3. 解析为 AssistantMessage
+        let msg = AssistantMessage(
+            ContentList.ofText("response"),
+            req.model, this.name,
+            StopReason.EndTurn,
+            TokenUsage(0, 0), 0)
+        msg
+    }
+
+    public func chatStreaming(req: ChatRequest): EventStream<ChatDelta, AssistantMessage> {
+        let stream = EventStream<ChatDelta, AssistantMessage>()
+        spawn {
+            // 1. 构建 HTTP 请求（SSE）
+            // 2. 逐 chunk 发射 ChatDelta
+            // 3. 结束时 setResult
+        }
+        stream
+    }
+}
+
+// 注册
+providerReg.register("my-provider", MyProvider("my-provider"))
+```
+
 ## 思考模式（DeepSeek）
 
 DeepSeek Reasoner 支持思考模式，通过 `thinkingLevel` 配置：

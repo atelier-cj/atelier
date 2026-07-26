@@ -133,6 +133,41 @@ spawn {
 let messages = stream.result()
 ```
 
+### 自定义钩子
+
+实现 `Hook` 接口可介入 Agent 生命周期：
+
+```cangjie
+import atelier.agent.*
+
+class AuditHook <: Hook {
+    public func beforeTool(ctx: HookContext): Unit {
+        println(">>> 调用工具: ${ctx.toolCalls[0].name}")
+    }
+    public func afterTool(ctx: HookContext): Unit {
+        println(">>> 工具结果: ${ctx.toolResults[0].text.size} 字符")
+    }
+}
+
+let hooks = ArrayList<Hook>([AuditHook()])
+let runtime = AgentRuntime(config, provider, toolReg,
+    sessionStore, trustMgr, skillReg, agentReg, providerReg,
+    hooks, askUserFn)
+```
+
+6 个钩子按执行顺序：
+
+| 钩子 | 触发时机 |
+|------|----------|
+| `beforeRun` | Run 开始后，第一轮 Turn 前 |
+| `afterRun` | Run 结束时 |
+| `beforeTurn` | 每轮推理开始前 |
+| `afterTurn` | 每轮推理结束后（含工具调用） |
+| `beforeTool` | 工具执行前 |
+| `afterTool` | 工具执行后 |
+
+所有钩子都有空默认实现，只需覆写需要的。
+
 ### 注入依赖
 
 AgentRuntime 的构造参数即依赖注入点：
@@ -147,8 +182,8 @@ AgentRuntime 的构造参数即依赖注入点：
 | `skillRegistry` | `SkillRegistry` | Skill 注册表 |
 | `agentRegistry` | `AgentRegistry` | 子 Agent 注册 |
 | `providerRegistry` | `ProviderRegistry` | Provider 注册表 |
-| `hooks` | `ArrayList<Hook>` | 生命周期钩子（可选） |
-| `askUser` | `AskUserFn` | 用户交互回调（可选） |
+| `hooks` | `ArrayList<Hook>` | 生命周期钩子（可选），见下方示例 |
+| `askUser` | `AskUserFn` | 用户交互回调（可选），默认返回空字符串 |
 
 ---
 
