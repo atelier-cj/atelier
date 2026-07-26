@@ -133,6 +133,7 @@ main(): Int64 {
             println("Sessions: ~/.atelier/sessions/ (persistent, auto-save after each turn)")
             return 1
     }
+    try { sessionStore.close() } catch (_) { () }
     0
 }
 

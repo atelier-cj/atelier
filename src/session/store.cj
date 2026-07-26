@@ -19,4 +19,5 @@ public interface SessionStore {
     func list(): ArrayList<SessionHeader>
     func delete(id: String): Unit
     func fork(sourceId: String, leafId: String): SessionData
+    public func close(): Unit {}
 }
