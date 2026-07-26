@@ -196,7 +196,8 @@ func doAnthropicStream(client: Client, baseURL: String, apiKey: String, provName
             return
         }
         var contentBuilder = StringBuilder()
-        var toolCallsBuilder = ArrayList<AnthropicContentBlock>()
+        var toolCallsAccum = ArrayList<AnthropicContentBlock>()
+        var toolCallJsonBuilders = ArrayList<StringBuilder>()
         var model = ""
         var stopReason = ""
         var inputTokens: Int64 = 0
@@ -229,12 +230,35 @@ func doAnthropicStream(client: Client, baseURL: String, apiKey: String, provName
                                 inputTokens = ev.message.usage.inputTokens
                             case "content_block_start" =>
                                 if (ev.contentBlock.blockType == "tool_use") {
-                                    toolCallsBuilder.add(ev.contentBlock)
+                                    toolCallsAccum.add(ev.contentBlock)
+                                    toolCallJsonBuilders.add(StringBuilder())
                                 }
                             case "content_block_delta" =>
                                 if (ev.delta.deltaType == "text_delta") {
                                     contentBuilder.append(ev.delta.text)
                                     stream.emit(ChatDelta(ev.delta.text, "", Option<StopReason>.None))
+                                } else if (ev.delta.deltaType == "input_json_delta") {
+                                    let idx = toolCallJsonBuilders.size - 1
+                                    if (idx >= 0) {
+                                        toolCallJsonBuilders[idx].append(ev.delta.partialJson)
+                                    }
+                                }
+                            case "content_block_stop" =>
+                                let tcIdx = toolCallsAccum.size - 1
+                                let jIdx = toolCallJsonBuilders.size - 1
+                                if (tcIdx >= 0 && jIdx >= 0) {
+                                    let jsonStr = toolCallJsonBuilders[jIdx].toString()
+                                    if (jsonStr != "") {
+                                        let parsed = try { JsonValue.parse(jsonStr) } catch (_) { JsonValue.Null }
+                                        // Create updated tool call with parsed input
+                                        var updated = AnthropicContentBlock()
+                                        updated.blockType = toolCallsAccum[tcIdx].blockType
+                                        updated.text = toolCallsAccum[tcIdx].text
+                                        updated.id = toolCallsAccum[tcIdx].id
+                                        updated.name = toolCallsAccum[tcIdx].name
+                                        updated.input = parsed
+                                        toolCallsAccum[tcIdx] = updated
+                                    }
                                 }
                             case "message_delta" =>
                                 stopReason = ev.delta.stopReason
@@ -248,7 +272,7 @@ func doAnthropicStream(client: Client, baseURL: String, apiKey: String, provName
                 }
             }
         }
-        let finalContent = buildAnthropicContent(contentBuilder.toString(), toolCallsBuilder)
+        let finalContent = buildAnthropicContent(contentBuilder.toString(), toolCallsAccum)
         let finalStop = anthropicStopReason(stopReason)
         let assistantMsg = AssistantMessage(
             finalContent, model, provName,
@@ -409,6 +433,7 @@ public struct AnthropicStreamMessage <: JsonDeserializable<AnthropicStreamMessag
 public struct AnthropicStreamDelta <: JsonDeserializable<AnthropicStreamDelta> {
     public var deltaType: String = ""
     public var text: String = ""
+    public var partialJson: String = ""
     public var stopReason: String = ""
 
     public static func fromJson(r: JsonReader): AnthropicStreamDelta {
@@ -418,6 +443,7 @@ public struct AnthropicStreamDelta <: JsonDeserializable<AnthropicStreamDelta> {
             match (r.readName()) {
                 case "type" => res.deltaType = r.readValue<String>()
                 case "text" => res.text = r.readValue<String>()
+                case "partial_json" => res.partialJson = r.readValue<String>()
                 case "stop_reason" => res.stopReason = r.readValue<String>()
                 case _ => r.skip()
             }
