@@ -1,7 +1,6 @@
 package atelier.message
 
 import stdx.encoding.json.stream.*
-import std.io.ByteBuffer
 import std.collection.*
 
 extend UserMessage <: JsonSerializable {
