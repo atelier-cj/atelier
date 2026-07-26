@@ -22,25 +22,24 @@
 | 文档 | 说明 |
 |------|------|
 | [消息模型](messages.md) | Message 密封接口 + 4 种角色 + ContentBlock |
-| [事件流](events.md) | AgentEvent 密封接口 + 11 种事件 |
-| [工具开发](tools.md) | Tool 接口 + 内置工具 + MCP 工具 + Agent-as-Tool |
-| [Provider](providers.md) | Provider 接口 + OpenAI 实现 |
+| [事件流](events.md) | AgentEvent 密封接口 + 11 种事件 + EventStream |
+| [工具](tools.md) | Tool 接口 + 内置工具 + 自定义 + MCP + Agent-as-Tool |
+| [Provider](providers.md) | Provider 接口 + OpenAI 兼容 + 上下文窗口 |
 
 ## 进阶功能
 
 | 文档 | 说明 |
 |------|------|
-| [会话管理](sessions.md) | 树形数据模型 + bstorm 持久化 |
-| [信任闸门](trust.md) | 目录级权限 + ask_user 确认 |
+| [会话管理](sessions.md) | 树形数据模型 + bstorm 持久化 + 导出 |
+| [信任闸门](trust.md) | 三态权限 + 目录继承 + ask_user 交互 |
 | [Skill](skills.md) | 声明式技能注入（AgentSkills 规范） |
-| [上下文压缩](context.md) | Token 估算 + 自动摘要 |
 
 ## 接口参考
 
 | 文档 | 说明 |
 |------|------|
 | [HTTP API](http-api.md) | 全部端点 + curl 示例 |
-| [CLI 参考](cli.md) | serve / repl / run 子命令 |
+| [CLI 参考](cli.md) | serve / repl / run 子命令 + 斜杠命令 |
 
 ## 架构
 

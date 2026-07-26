@@ -1,0 +1,107 @@
+# Provider
+
+Provider 是 LLM 服务适配器，直接对接 REST API。
+
+## Provider 接口
+
+```cangjie
+interface Provider {
+    func name(): String
+    func chat(req: ChatRequest): ChatResponse
+    func chatStreaming(req: ChatRequest): EventStream<ChatDelta>
+}
+```
+
+## OpenAI 兼容 API
+
+默认实现，覆盖绝大多数国产模型（DeepSeek、Qwen、GLM 等）。
+
+### 配置
+
+```toml
+[[provider]]
+name = "default"
+type = "openai"
+baseURL = "https://api.openai.com/v1"
+apiKey = "${OPENAI_API_KEY}"
+```
+
+### 环境变量
+
+| 变量 | 说明 | 默认值 |
+|------|------|--------|
+| `OPENAI_API_KEY` | API Key | — |
+| `OPENAI_BASE_URL` | API 地址 | `https://api.openai.com/v1` |
+| `OPENAI_MODEL` | 默认模型 | `gpt-4o` |
+
+### 模型示例
+
+| 服务商 | baseURL | 模型名 |
+|--------|---------|--------|
+| OpenAI | `https://api.openai.com/v1` | `gpt-4o`, `gpt-4o-mini` |
+| DeepSeek | `https://api.deepseek.com` | `deepseek-chat`, `deepseek-reasoner` |
+| 阿里 Qwen | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen-turbo`, `qwen-max` |
+| 硅基流动 | `https://api.siliconflow.cn/v1` | `Qwen/Qwen2.5-72B-Instruct` |
+
+### 代码创建
+
+```cangjie
+import atelier.provider.*
+
+let provider = OpenAIProvider(
+    "default",
+    "https://api.openai.com/v1",
+    "sk-xxx")
+```
+
+## ProviderRegistry
+
+```cangjie
+let reg = ProviderRegistry()
+reg.register("default", provider)
+reg.register("deepseek", deepseekProvider)
+
+match (reg.get("deepseek")) {
+    case Some(p) => // 使用
+    case None => // 找不到
+}
+```
+
+Agent 通过 `provider` 字段指定使用的 Provider：
+
+```toml
+[[agent]]
+name = "assistant"
+model = "deepseek-chat"
+provider = "deepseek"
+```
+
+不指定时按 model 名自动推断。
+
+## 上下文窗口
+
+Provider 不负责上下文窗口推断。Atelier 内置 `ModelContextRegistry` 查表：
+
+| 模型 | 上下文窗口 |
+|------|-----------|
+| gpt-4o / gpt-4o-mini | 128,000 |
+| gpt-4-turbo | 128,000 |
+| deepseek-chat / deepseek-reasoner | 65,536 |
+| claude-sonnet-4 / claude-3.5-sonnet | 200,000 |
+| claude-3-haiku | 200,000 |
+| gemini-1.5-pro / gemini-1.5-flash | 1,048,576 |
+| qwen-turbo / qwen-plus / qwen-max | 131,072 |
+| 未知模型 | 8,192（兜底） |
+
+## 思考模式（DeepSeek）
+
+DeepSeek Reasoner 支持思考模式：
+
+```toml
+[[agent]]
+name = "reasoner"
+model = "deepseek-reasoner"
+thinkingLevel = "high"
+```
+
+`thinkingLevel` 可选值：`off` / `low` / `medium` / `high`（仅对支持思考的模型有效）。
