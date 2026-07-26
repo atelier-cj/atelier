@@ -20,18 +20,25 @@ public class REPL {
     private var sessionCounter: Int64
 
     public init(agentName: String, registry: SlashCommandRegistry,
-        runtimeFactory: (String) -> AgentRuntime, sessionStore: SessionStore) {
+        runtimeFactory: (String) -> AgentRuntime, sessionStore: SessionStore,
+        resumeSessionId: String) {
         this.agentName = agentName
         this.registry = registry
         this.runtimeFactory = runtimeFactory
         this.sessionStore = sessionStore
         this.sessionCounter = 1
-        this.messages = ArrayList<Message>()
-        this.sessionId = "sess_1"
+        if (resumeSessionId != "") {
+            this.sessionId = resumeSessionId
+            this.messages = try { this.sessionStore.load(resumeSessionId) } catch (_) { ArrayList<Message>() }
+        } else {
+            this.sessionId = "sess_1"
+            this.messages = ArrayList<Message>()
+        }
     }
 
     public func run(): Unit {
         println("Atelier REPL — Agent: " + this.agentName)
+        println("Session: " + this.sessionId)
         println("Type /help for available commands")
         while (this.running) {
             print("> ")
@@ -39,7 +46,7 @@ public class REPL {
             if (line == "") { continue }
             handleInput(line)
         }
-        try { this.sessionStore.delete(this.sessionId) } catch (_) { () }
+        // Session persists across restarts
     }
 
     private func getLine(): String {

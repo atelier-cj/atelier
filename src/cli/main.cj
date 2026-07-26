@@ -68,6 +68,7 @@ main(): Int64 {
 
         case "repl" =>
             let agentName = if (args.size > 2) { args[2] } else { "default" }
+            let resumeId = if (args.size > 3) { args[3] } else { "" }
             let slashReg = SlashCommandRegistry(trustMgr)
             let repl = REPL(agentName, slashReg, { name =>
                 let cfg = match (agentReg.get(name)) {
@@ -76,7 +77,7 @@ main(): Int64 {
                 }
                 let prov = resolveProviderFor(cfg, providerRegForCli)
                 AgentRuntime(cfg, prov, toolReg, sessionStore, trustMgr, skillReg, agentReg, providerRegForCli)
-            }, sessionStore)
+            }, sessionStore, resumeId)
             repl.run()
 
         case "run" =>
