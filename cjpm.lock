@@ -2,11 +2,12 @@ version = 0
 
 [requires]
   snappy = {version = "1.0.0"}
-  tomlcj = {version = "1.0.0"}
+  "opencj::ulid" = {version = "0.1.1"}
+  sonyflake = {version = "1.0.9"}
+  bstorm = {version = "1.4.0"}
   mcp = {version = "2.2.0"}
-  "ystyle::jsonrpc" = {version = "0.4.1"}
   badgercj = {version = "1.6.3"}
+  "ystyle::jsonrpc" = {version = "0.4.1"}
   gjson = {version = "1.1.1"}
   jsonvalue = {version = "1.0.1"}
-  bstorm = {version = "1.4.0"}
-  sonyflake = {version = "1.0.9"}
+  tomlcj = {version = "1.0.0"}

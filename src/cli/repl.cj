@@ -2,7 +2,6 @@ package atelier.cli
 
 import std.env.*
 import std.collection.*
-import std.time.DateTime
 import stdx.log.*
 import atelier.agent.*
 import atelier.message.*
@@ -12,6 +11,7 @@ import atelier.tool.builtin.*
 import atelier.session.*
 import atelier.trust.*
 import atelier.skill.*
+import opencj::ulid.nextId
 
 public class REPL {
     private let agentName: String
@@ -52,7 +52,7 @@ public class REPL {
             this.sessionId = resumeSessionId
             this.messages = try { this.sessionStore.load(resumeSessionId) } catch (_) { ArrayList<Message>() }
         } else {
-            this.sessionId = "sess_" + DateTime.now().toString()
+            this.sessionId = "sess_" + nextId()
             this.messages = ArrayList<Message>()
         }
     }
