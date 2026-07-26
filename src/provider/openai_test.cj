@@ -3,6 +3,19 @@ package atelier.provider
 import atelier.message.*
 import jsonvalue.*
 import std.collection.*
+import std.env.getVariable
+
+@Test
+func anthropic_syncChat() {
+    let provider = AnthropicProvider("test-anthropic",
+        "https://api.deepseek.com/anthropic",
+        match (getVariable("DEEPSEEK_API_KEY")) { case Some(k) => k; case None => "" })
+    let msgs = ArrayList<Message>()
+    msgs.add(UserMessage(ContentList.ofText("Say hello in one word"), 0))
+    let req = ChatRequest("deepseek-chat", msgs, 0.7, 100, None, ArrayList<OpenAITool>())
+    let resp = provider.chat(req)
+    @Expect(resp.message.content.blocks().size > 0, true)
+}
 
 @Test
 func ollama_toolCall() {

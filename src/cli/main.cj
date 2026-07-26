@@ -63,6 +63,7 @@ main(): Int64 {
     for (p in config.provider) {
         let prov: Provider = match (p.providerType) {
             case "ollama" => OllamaProvider(p.name, p.baseURL)
+            case "anthropic" => AnthropicProvider(p.name, p.baseURL, p.apiKey)
             case _ => OpenAIProvider(p.name, p.baseURL, p.apiKey)
         }
         providerReg.register(p.name, prov)
