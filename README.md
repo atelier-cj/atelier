@@ -6,7 +6,7 @@ Atelier 是一个纯仓颉实现的 Agent 运行时，定位为**成品工坊**�
 
 - **开箱即用**：库 + HTTP 服务 + CLI 三种形态
 - **运行时动态**：Agent 在运行时通过 TOML 或代码定义，无需编译
-- **多模型**：OpenAI 兼容 API（直接 REST），覆盖绝大多数国产模型
+- **多模型**：OpenAI / Anthropic / Ollama 三种 Provider，覆盖绝大多数模型
 - **MCP 工具**：通过 `ystyle::mcp` 接入任意 MCP 服务器（stdio/Streamable HTTP）
 - **树形会话**：Entry + ParentID 树模型，支持 fork/clone/JSONL 持久化
 - **信任闸门**：目录级权限控制，`Undecided` 时自动 ask_user 确认

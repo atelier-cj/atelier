@@ -1,6 +1,12 @@
 # Provider
 
-Provider 是 LLM 服务适配器，直接对接 REST API。
+Provider 是 LLM 服务适配器，直接对接 REST API。目前支持三种 Provider：
+
+| 类型 | 协议 | 配置 `type` |
+|------|------|-------------|
+| OpenAI 兼容 | OpenAI Chat API | `"openai"`（默认） |
+| Anthropic 兼容 | Anthropic Messages API | `"anthropic"` |
+| Ollama | Ollama Chat API | `"ollama"` |
 
 ## Provider 接口
 
@@ -12,7 +18,7 @@ interface Provider {
 }
 ```
 
-## OpenAI 兼容 API
+## OpenAI 兼容
 
 默认实现，覆盖绝大多数国产模型（DeepSeek、Qwen、GLM 等）。
 
@@ -21,6 +27,7 @@ interface Provider {
 ```toml
 [[provider]]
 name = "default"
+type = "openai"
 baseURL = "https://api.openai.com/v1"
 apiKey = "${OPENAI_API_KEY}"
 ```
@@ -51,6 +58,74 @@ let provider = OpenAIProvider(
     "default",
     "https://api.openai.com/v1",
     "sk-xxx")
+```
+
+## Anthropic 兼容
+
+通过 DeepSeek 等第三方服务商提供的 Anthropic Messages API 接入。
+
+### 配置
+
+```toml
+[[provider]]
+name = "deepseek-anthropic"
+type = "anthropic"
+baseURL = "https://api.deepseek.com/anthropic"
+apiKey = "${DEEPSEEK_API_KEY}"
+
+[[agent]]
+name = "my-agent"
+model = "deepseek-v4-flash"
+provider = "deepseek-anthropic"
+```
+
+### 说明
+
+- 请求格式遵循 [Anthropic Messages API](https://docs.anthropic.com/en/api/messages)
+- System prompt 从 messages 提取为顶级 `system` 字段
+- 工具调用通过 `content_block_start` + `input_json_delta` 流式传输
+- 目前已知 DeepSeek 的 Anthropic 兼容接口可用
+
+### 代码创建
+
+```cangjie
+let provider = AnthropicProvider(
+    "deepseek-anthropic",
+    "https://api.deepseek.com/anthropic",
+    "sk-xxx")
+```
+
+## Ollama
+
+接入本地 Ollama 服务。
+
+### 配置
+
+```toml
+[[provider]]
+name = "ollama"
+type = "ollama"
+baseURL = "http://192.168.3.6:11434"
+
+[[agent]]
+name = "local"
+model = "qwen3.5:2b"
+provider = "ollama"
+```
+
+### 说明
+
+- Ollama 使用 NDJSON（非 SSE）作为流式传输格式
+- 支持工具调用（需模型支持，如 qwen3.5:2b）
+- 不需要 API Key
+- 单模型服务，并发请求会排队
+
+### 代码创建
+
+```cangjie
+let provider = OllamaProvider(
+    "ollama",
+    "http://192.168.3.6:11434")
 ```
 
 ## ProviderRegistry
