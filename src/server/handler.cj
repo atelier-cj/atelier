@@ -4,7 +4,6 @@ import stdx.net.http.*
 import std.io.ByteBuffer
 import std.collection.*
 import std.core.Duration
-import jsonvalue.*
 import atelier.agent.*
 import atelier.message.*
 import atelier.provider.*
@@ -54,9 +53,9 @@ public class AtelierHttpHandler {
         match (ctx.request.method) {
             case "GET" =>
                 let agents = this.agentRegistry.list()
-                let arr = ArrayList<JsonValue>()
-                for ((k, _) in agents) { arr.add(JsonValue.String(k)) }
-                jsonResponse(ctx, 200, JsonValue.Array(arr).stringify())
+                let names = ArrayList<String>()
+                for ((k, _) in agents) { names.add(k) }
+                jsonResponse(ctx, 200, toJsonString(AgentListResponse(names)))
             case "POST" =>
                 let dto = try { readJson<AgentConfigDTO>(ctx) } catch (_) {
                     jsonResponse(ctx, 400, toJsonString(ErrorResponse("invalid JSON"))); return
@@ -192,29 +191,18 @@ public class AtelierHttpHandler {
     }
 
     private func handleSessionSave(ctx: HttpContext): Unit {
-        let body = readBody(ctx)
-        let v = try { JsonValue.parse(body) } catch (_) {
+        let dto = try { readJson<SessionSaveDTO>(ctx) } catch (_) {
             jsonResponse(ctx, 400, toJsonString(ErrorResponse("invalid JSON"))); return
         }
-        let id = match (v["sessionId"]) { case Some(JsonValue.String(s)) => s; case _ => "" }
-        if (id == "") { jsonResponse(ctx, 400, toJsonString(ErrorResponse("missing sessionId"))); return }
-        let headerJson = match (v["header"]) { case Some(j) => j.stringify(); case _ => "{}" }
-        let msgsJson = match (v["messages"]) { case Some(j) => j.stringify(); case _ => "[]" }
+        if (dto.sessionId == "") { jsonResponse(ctx, 400, toJsonString(ErrorResponse("missing sessionId"))); return }
         try {
-            let header = fromJsonString<SessionHeader>(headerJson)
-            let msgsArr = ArrayList<Message>()
-            match (JsonValue.parse(msgsJson)) {
-                case JsonValue.Array(arr) =>
-                    for (item in arr) {
-                        let role = match (item["role"]) { case Some(JsonValue.String(s)) => s; case _ => "" }
-                        let content = match (item["content"]) { case Some(JsonValue.String(s)) => s; case _ => "" }
-                        if (role == "user") {
-                            msgsArr.add(UserMessage(ContentList.ofText(content), 0))
-                        }
-                    }
-                case _ => ()
+            let header = if (dto.header != "") { fromJsonString<SessionHeader>(dto.header) } else { SessionHeader(0, "", 0, 0, "", "", "", None) }
+            let msgs = ArrayList<Message>()
+            for (m in dto.messages) {
+                if (m.role == "user") { msgs.add(UserMessage(ContentList.ofText(m.content), 0)) }
+                else if (m.role == "assistant") { msgs.add(AssistantMessage(ContentList.ofText(m.content), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0)) }
             }
-            this.sessionStore.save(id, header, msgsArr)
+            this.sessionStore.save(dto.sessionId, header, msgs)
             jsonResponse(ctx, 200, toJsonString(StatusResponse("saved")))
         } catch (e: Exception) {
             jsonResponse(ctx, 500, toJsonString(ErrorResponse(e.message)))
@@ -222,14 +210,12 @@ public class AtelierHttpHandler {
     }
 
     private func handleSessionLoad(ctx: HttpContext): Unit {
-        let body = readBody(ctx)
-        let v = try { JsonValue.parse(body) } catch (_) {
+        let dto = try { readJson<SessionLoadDTO>(ctx) } catch (_) {
             jsonResponse(ctx, 400, toJsonString(ErrorResponse("invalid JSON"))); return
         }
-        let id = match (v["sessionId"]) { case Some(JsonValue.String(s)) => s; case _ => "" }
-        if (id == "") { jsonResponse(ctx, 400, toJsonString(ErrorResponse("missing sessionId"))); return }
+        if (dto.sessionId == "") { jsonResponse(ctx, 400, toJsonString(ErrorResponse("missing sessionId"))); return }
         try {
-            let msgs = this.sessionStore.load(id)
+            let msgs = this.sessionStore.load(dto.sessionId)
             let parts = ArrayList<String>()
             for (m in msgs) {
                 match (m) {

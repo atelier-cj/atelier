@@ -261,3 +261,80 @@ public struct ForkResponse <: JsonSerializable {
         w.endObject()
     }
 }
+
+public struct SessionSaveDTO <: JsonDeserializable<SessionSaveDTO> {
+    public let sessionId: String
+    public let header: String
+    public let messages: ArrayList<MessageItemDTO>
+
+    public init(sessionId: String, header: String, messages: ArrayList<MessageItemDTO>) {
+        this.sessionId = sessionId; this.header = header; this.messages = messages
+    }
+
+    public static func fromJson(r: JsonReader): SessionSaveDTO {
+        var sessionId = ""; var header = ""; var messages = ArrayList<MessageItemDTO>()
+        r.startObject()
+        while (r.peek() != EndObject) {
+            match (r.readName()) {
+                case "sessionId" => sessionId = r.readValue<String>()
+                case "header" => header = r.readValue<String>()
+                case "messages" => messages = r.readValue<ArrayList<MessageItemDTO>>()
+                case _ => r.skip()
+            }
+        }
+        r.endObject()
+        SessionSaveDTO(sessionId, header, messages)
+    }
+}
+
+public struct SessionLoadDTO <: JsonDeserializable<SessionLoadDTO> {
+    public let sessionId: String
+
+    public init(sessionId: String) { this.sessionId = sessionId }
+
+    public static func fromJson(r: JsonReader): SessionLoadDTO {
+        var sessionId = ""
+        r.startObject()
+        while (r.peek() != EndObject) {
+            match (r.readName()) {
+                case "sessionId" => sessionId = r.readValue<String>()
+                case _ => r.skip()
+            }
+        }
+        r.endObject()
+        SessionLoadDTO(sessionId)
+    }
+}
+
+public struct MessageItemDTO <: JsonDeserializable<MessageItemDTO> {
+    public let role: String
+    public let content: String
+
+    public init(role: String, content: String) { this.role = role; this.content = content }
+
+    public static func fromJson(r: JsonReader): MessageItemDTO {
+        var role = ""; var content = ""
+        r.startObject()
+        while (r.peek() != EndObject) {
+            match (r.readName()) {
+                case "role" => role = r.readValue<String>()
+                case "content" => content = r.readValue<String>()
+                case _ => r.skip()
+            }
+        }
+        r.endObject()
+        MessageItemDTO(role, content)
+    }
+}
+
+public struct AgentListResponse <: JsonSerializable {
+    public let agents: ArrayList<String>
+
+    public init(agents: ArrayList<String>) { this.agents = agents }
+
+    public func toJson(w: JsonWriter): Unit {
+        w.startObject()
+        w.writeName("agents").writeValue(this.agents)
+        w.endObject()
+    }
+}
