@@ -122,9 +122,15 @@ main(): Int64 {
         case _ =>
             println("Atelier Agent Runtime")
             println("Usage:")
-            println("  atelier serve [port]   Start HTTP server")
-            println("  atelier repl [agent]    Start interactive REPL")
-            println("  atelier run <prompt>    Run single prompt")
+            println("  atelier serve [port]          Start HTTP server")
+            println("  atelier repl [agent] [sid]    Start interactive REPL (resume session if sid given)")
+            println("  atelier run [agent] <prompt>  Run single prompt")
+            println("")
+            println("REPL slash commands: /help, /trust, /untrust, /session, /clear, /exit")
+            println("Config: ~/.atelier.toml  — agent, provider, mcpServer, logging")
+            println("Skills: ~/.agents/skills/<name>/SKILL.md")
+            println("Logs:   ~/.atelier/atelier.log (set [logging] level = \"debug\")")
+            println("Sessions: ~/.atelier/sessions/ (persistent, auto-save after each turn)")
             return 1
     }
     0
