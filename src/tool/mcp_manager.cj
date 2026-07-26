@@ -1,7 +1,9 @@
 package atelier.tool
 
 import mcp.McpClient
-import mcp.transport.{StdioClientTransport, StatelessHttpClientTransport, SessionHttpClientTransport}
+import mcp.transport.StdioClientTransport
+import mcp.transport.StatelessHttpClient_2026_07_28
+import mcp.transport.StreamableHttpClient_2025_11_25
 import mcp.types.Implementation
 import mcp.types.{Tool as McpToolDef}
 import ystyle::jsonrpc.Result
@@ -79,13 +81,13 @@ func createTransport(cfg: McpServerConfig): Option<Transport> {
             Option<Transport>.Some(StdioClientTransport(cfg.command))
         } else if (cfg.transport == "streamable-http") {
             if (cfg.url == "") { log.warn("mcp ${cfg.name}: missing url", Array<Attr>()); return Option<Transport>.None }
-            let t = StatelessHttpClientTransport(cfg.url)
+            let t = StatelessHttpClient_2026_07_28(cfg.url)
             if (cfg.headers.size > 0) { t.setCustomHeaders(cfg.headers) }
             Option<Transport>.Some(t)
         } else if (cfg.transport == "session-http") {
             if (cfg.url == "") { log.warn("mcp ${cfg.name}: missing url", Array<Attr>()); return Option<Transport>.None }
-            let t = if (cfg.headers.size > 0) { SessionHttpClientTransport(cfg.url, cfg.headers) }
-                else { SessionHttpClientTransport(cfg.url) }
+            let t = if (cfg.headers.size > 0) { StreamableHttpClient_2025_11_25(cfg.url, cfg.headers) }
+                else { StreamableHttpClient_2025_11_25(cfg.url) }
             Option<Transport>.Some(t)
         } else {
             log.warn("mcp ${cfg.name}: unknown transport ${cfg.transport}", Array<Attr>())
