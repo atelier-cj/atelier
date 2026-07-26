@@ -106,7 +106,151 @@ func extractText(msgs: ArrayList<Message>): String {
 }
 ```
 
-### 多会话支持
+## 场景六：用 Atelier 构建 LLM Wiki
+
+LLM Wiki 是一个知识库问答系统——用户提问，AI 检索知识库后回答。用 Atelier 库模式实现，代码量很少。
+
+### 架构
+
+```
+┌──────────────────────────────────────────┐
+│              你的 HTTP 服务               │
+│  ┌─────────┐   ┌────────────────────┐    │
+│  │ 路由/处理 │   │  KnowledgeSearchTool │   │
+│  └────┬────┘   └─────────┬──────────┘    │
+│       │                  │               │
+│  ┌────▼──────────────────▼──────────┐    │
+│  │        AgentRuntime (全局单例)      │    │
+│  │  chat(messages) → EventStream     │    │
+│  └───────────────┬──────────────────┘    │
+│                  │                       │
+│  ┌───────────────▼──────────────────┐    │
+│  │        SessionStore (bstorm)      │    │
+│  │  save/load/list/delete           │    │
+│  └──────────────────────────────────┘    │
+└──────────────────────────────────────────┘
+```
+
+### 步骤
+
+**1. 编写知识检索工具**
+
+```cangjie
+import atelier.tool.*
+import jsonvalue.*
+
+class KnowledgeSearchTool <: Tool {
+    public func name(): String { "wiki_search" }
+    public func description(): String { "搜索知识库，返回相关文档片段" }
+    public func schema(): JsonValue {
+        SchemaBuilder()
+            .addString("query", "搜索关键词", required: true)
+            .build()
+    }
+    public func execute(ctx: ToolContext, args: JsonValue): ToolResult {
+        let query = match (args["query"]) {
+            case Some(JsonValue.String(s)) => s
+            case _ => return ToolResult("", None, true, false)
+        }
+        // 调用你的搜索引擎/向量数据库
+        let results = searchKnowledgeBase(query)
+        ToolResult(results, None, false, false)
+    }
+    public func executionMode(): ToolExecutionMode { ToolExecutionMode.Parallel }
+}
+```
+
+**2. 配置 Agent**
+
+```cangjie
+let config = AgentConfig(
+    name: "wiki-assistant",
+    description: Some("知识库问答助手"),
+    systemPrompt: "你是一个知识库助手。用 wiki_search 查询后回答，注明来源。",
+    model: "deepseek-chat",
+    tools: ArrayList<String>(["wiki_search"]),
+    ...AgentConfig.default() 中的其他字段
+)
+```
+
+**3. 初始化全局组件**
+
+```cangjie
+// 全局初始化一次
+let toolReg = ToolRegistry()
+toolReg.register(KnowledgeSearchTool())
+
+let providerReg = ProviderRegistry()
+providerReg.register("default", OpenAIProvider("default", "https://api.deepseek.com", apiKey))
+
+let sessionStore = StormSessionStore("/data/wiki/sessions")
+let trustMgr = TrustManager()
+let skillReg = SkillRegistry()
+let agentReg = AgentRegistry()
+
+// AgentRuntime 可全局共享
+let runtime = AgentRuntime(config, provider, toolReg, sessionStore, trustMgr, skillReg, agentReg, providerReg)
+```
+
+**4. 处理用户请求**
+
+```cangjie
+// HTTP 路由处理函数
+func handleChat(ctx: HttpContext): Unit {
+    let body = readBody(ctx)
+    let req = fromJsonString<ChatRequestDTO>(body)
+
+    // 加载或创建会话
+    let sessionId = req.sessionId
+    if (!sessionStore.has(sessionId)) {
+        let header = SessionHeader(1, sessionId, 0, 0, "deepseek-chat", "default", "你是一个知识库助手", None)
+        sessionStore.save(sessionId, header, ArrayList())
+    }
+
+    // 追加用户消息
+    let msgs = sessionStore.load(sessionId)
+    msgs.add(UserMessage(ContentList.ofText(req.messages[0].content), 0))
+
+    // 执行
+    let stream = runtime.chat(msgs)
+    let result = stream.result()
+
+    // 持久化
+    sessionStore.save(sessionId, header, result)
+
+    // 返回最后一条回复
+    let lastText = lastAssistantText(result)
+    jsonResponse(ctx, 200, toJsonString(ContentResponse(lastText)))
+}
+```
+
+**5. 会话管理**
+
+```cangjie
+// 列表
+func handleSessions(ctx: HttpContext): Unit {
+    let sessions = sessionStore.list()
+    jsonResponse(ctx, 200, toJsonString(SessionListResponse(sessions)))
+}
+
+// 删除
+func handleDelete(ctx: HttpContext): Unit {
+    sessionStore.delete(req.sessionId)
+    jsonResponse(ctx, 200, toJsonString(StatusResponse("deleted")))
+}
+```
+
+### 扩展方向
+
+| 能力 | 实现方式 |
+|------|----------|
+| 多知识库 | 注册多个工具，如 `wiki_search_tech`、`wiki_search_product` |
+| 权限控制 | `TrustManager` 按目录隔离知识域 |
+| 上下文增强 | `SessionEnvironment.context` 传入用户/页面信息 |
+| 流式输出 | 用 `runtime.chat(messages)` 的 `EventStream` 逐 token SSE 推送 |
+| 多轮记忆 | `SessionStore` 自动持久化 |
+
+## 库模式 API 参考
 
 `AgentRuntime` 是**无状态**的——它不持有会话数据，每次 `chat()` 从入参 `messages` 读取历史：
 
