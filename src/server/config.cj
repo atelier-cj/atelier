@@ -202,6 +202,7 @@ public class TomlAgent <: Serializable<TomlAgent> {
 
 public class TomlProvider <: Serializable<TomlProvider> {
     public var name: String = ""
+    public var providerType: String = "openai"
     public var baseURL: String = ""
     public var apiKey: String = ""
     public init() {}
@@ -209,6 +210,7 @@ public class TomlProvider <: Serializable<TomlProvider> {
     public func serialize(): DataModel {
         DataModelStruct()
             .add(field<String>("name", name))
+            .add(field<String>("type", providerType))
             .add(field<String>("baseURL", baseURL))
             .add(field<String>("apiKey", apiKey))
     }
@@ -217,6 +219,7 @@ public class TomlProvider <: Serializable<TomlProvider> {
         let dms = match (dm) { case s: DataModelStruct => s; case _ => throw Exception("expected struct") }
         let r = TomlProvider()
         r.name = match (dms.get("name")) { case s: DataModelString => s.getValue(); case _ => "" }
+        r.providerType = match (dms.get("type")) { case s: DataModelString => s.getValue(); case _ => "openai" }
         r.baseURL = match (dms.get("baseURL")) { case s: DataModelString => s.getValue(); case _ => "" }
         r.apiKey = match (dms.get("apiKey")) { case s: DataModelString => s.getValue(); case _ => "" }
         r

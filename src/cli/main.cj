@@ -9,6 +9,7 @@ import stdx.logger.*
 import atelier.message.*
 import atelier.agent.*
 import atelier.provider.*
+import atelier.provider.OllamaProvider
 import atelier.tool.*
 import atelier.tool.builtin.*
 import atelier.session.*
@@ -61,7 +62,11 @@ main(): Int64 {
         try { agentReg.create(a.name, agentConfigFrom(a)) } catch (_) { () }
     }
     for (p in config.provider) {
-        providerReg.register(p.name, OpenAIProvider(p.name, p.baseURL, p.apiKey))
+        let prov: Provider = match (p.providerType) {
+            case "ollama" => OllamaProvider(p.name, p.baseURL)
+            case _ => OpenAIProvider(p.name, p.baseURL, p.apiKey)
+        }
+        providerReg.register(p.name, prov)
     }
     let mcpMgr = McpManager()
     for (ms in config.mcpServer) {
