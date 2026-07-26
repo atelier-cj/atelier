@@ -970,11 +970,20 @@ interface AgentHooks {
 
 - [x] HTTP Server（registerRoutes 挂载模式）
 - [x] SSE 流式端点（POST /agent/stream，逐事件推送）
+- [x] /session/save + /session/load 端点
 - [x] AgentConfig 动态注册表（CRUD）
 - [x] 配置文件加载（TOML）
 - [x] 请求/响应 DTO（实现 JsonSerializable）
-- [x] 登录日志系统（SimpleLogger → 文件，可配级别）
+- [x] 日志系统（SimpleLogger → 文件，可配级别）
 - [x] MCP Server TOML 配置 + 运行时自动连接
+- [x] 工具命名空间（mcp_<server>_<name> + agent_<name> + 通配符 _*）
+- [x] Agent-as-Tool（同进程子运行时委派）
+- [x] 信任闸门接入运行时 + CLI /trust 命令
+- [x] 钩子系统（6 个钩子：beforeRun/afterRun/beforeTurn/afterTurn/beforeTool/afterTool）
+- [x] 工具防护链（配额 maxToolCalls + 速率限制 minToolInterval）
+- [x] 上下文压缩接入运行时（afterTurn 时自动摘要）
+- [x] 会话持久化（StormSessionStore ≈ 存储 ~/.atelier/sessions/）
+- [x] REPL 会话管理（/session new/list/switch）
 - [ ] Anthropic Provider 扩展
 - [ ] Ollama Provider 扩展
 
@@ -983,18 +992,13 @@ interface AgentHooks {
 - [x] Skill 加载器（对齐 AgentSkills 规范，从 SKILL.md 目录加载）
 - [x] SKILL.md 格式校验器
 - [x] Skill 运行时注入（指令拼入 system prompt）
-- [x] MCP 工具运行时注册（McpManager：stdio + streamable-http）
-- [x] 斜杠命令系统
-- [x] 交互式 REPL
+- [x] 斜杠命令系统（/help /trust /untrust /session /model /tools /clear /exit）
+- [x] 交互式 REPL（session 持久化 + 恢复 + 模型切换）
 - [x] CLI run 命令（单次执行）
 - [x] 会话导出（JSONL/HTML）
 
 ### Phase 4：增强
 
-- [x] 多 Agent 协同（Agent-as-Tool：`agent_<name>` 前缀 + 子运行时）
-- [ ] 钩子系统（6 个钩子：beforeTurn/afterTurn/beforeTool/afterTool/beforeRun/afterRun，贯穿循环各阶段，作为 Skill 和 Plugin 的扩展基座）
-- [ ] 工具执行前防护链（超时/信任/配额/速率限制/并发限制五道闸门，当前仅信任闸门已实现）
-- [ ] 上下文压缩接入运行时（afterTurn 时判断是否超窗口，触发摘要压缩）
 - [ ] 会话导出与 HTML 回放（JSONL 导出 + 自足 HTML 页面）
 - [ ] 包管理器（安装/卸载 Skills/Tools）
 - [ ] 信任管理完善
@@ -1004,9 +1008,7 @@ interface AgentHooks {
   - [ ] `ask_user` 内置工具：AI 主动向用户提问，runtime 暂停等待回答
   - [ ] REPL 交互支持（暂停 → 显示问题 → 获取输入 → 恢复）
   - [ ] HTTP 端点支持（poll/push 模式获取用户回答）
-- [ ] 会话管理完善（含 StormSessionStore 持久化测试验证）
-  - [ ] 会话目录持久化（`~/.atelier/sessions/` 或可配路径）
-  - [ ] 多会话切换（REPL 内 `/session` 命令）
+- [ ] HTTP 会话管理完善
   - [ ] 会话 fork/clone HTTP 端点
 
 ---
