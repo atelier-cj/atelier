@@ -14,7 +14,7 @@
 
 | 文档 | 说明 |
 |------|------|
-| [快速开始](getting-started.md) | 5 分钟内跑通第一次对话 |
+| [集成指南](integration.md) | 5 种场景：库 / HTTP 挂载 / 独立服务 / CLI / Docker |
 | [配置参考](configuration.md) | TOML 配置 + AgentConfig 所有字段 |
 
 ## 核心概念

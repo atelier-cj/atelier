@@ -75,7 +75,7 @@ command = "npx @playwright/mcp"
 
 | 文档 | 说明 |
 |------|------|
-| [快速开始](docs/getting-started.md) | 5 分钟内跑通 |
+| [集成指南](docs/integration.md) | 库模式 / HTTP 挂载 / CLI / Docker |
 | [配置参考](docs/configuration.md) | TOML 配置 + AgentConfig 字段 |
 | [消息模型](docs/messages.md) | 4 种角色 + ContentBlock |
 | [事件流](docs/events.md) | 11 种事件 + EventStream |
