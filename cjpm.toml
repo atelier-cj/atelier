@@ -7,7 +7,7 @@ compile-option = "-Woff unused"
 link-option = "-lstdx.crypto.digest"
 
 [dependencies]
-"mcp" = { path = "/home/ystyle/Projects/Cangjie/mcp-cj" }
+"mcp" = "2.3.0"
 "sonyflake" = "1.0.9"
 "jsonvalue" = "1.0.1"
 "ystyle::jsonrpc" = "0.4.1"
