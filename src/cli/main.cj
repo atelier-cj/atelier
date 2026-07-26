@@ -126,7 +126,7 @@ main(): Int64 {
             println("  atelier repl [agent] [sid]    Start interactive REPL (resume session if sid given)")
             println("  atelier run [agent] <prompt>  Run single prompt")
             println("")
-            println("REPL slash commands: /help, /trust, /untrust, /session, /clear, /exit")
+            println("REPL slash commands: /help, /trust, /untrust, /session (new/list/switch), /clear, /exit")
             println("Config: ~/.atelier.toml  — agent, provider, mcpServer, logging")
             println("Skills: ~/.agents/skills/<name>/SKILL.md")
             println("Logs:   ~/.atelier/atelier.log (set [logging] level = \"debug\")")

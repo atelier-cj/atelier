@@ -68,6 +68,10 @@ public class REPL {
 
     private func handleInput(line: String): Unit {
         if (line.startsWith("/")) {
+            if (line.startsWith("/session")) {
+                handleSessionCommand(line)
+                return
+            }
             match (this.registry.dispatch(line)) {
                 case Some("exit") => this.running = false
                 case Some(msg) => println(msg)
@@ -96,6 +100,56 @@ public class REPL {
         let lastText = lastAssistantText(allMsgs)
         if (lastText != "") {
             println(lastText)
+        }
+    }
+
+    private func handleSessionCommand(line: String): Unit {
+        let parts = line.split(" ")
+        if (parts.size == 1) {
+            println("Session: " + this.sessionId + "  Messages: " + this.messages.size.toString())
+            return
+        }
+        let cmd = parts[1]
+        if (cmd == "new") {
+            if (this.messages.size > 0) {
+                try {
+                    let header = SessionHeader(1, this.sessionId, 0, 0, "", "", "", None)
+                    this.sessionStore.save(this.sessionId, header, this.messages)
+                } catch (_) { () }
+            }
+            this.sessionCounter++
+            this.sessionId = "sess_" + this.sessionCounter.toString()
+            this.messages = ArrayList<Message>()
+            println("New session: " + this.sessionId)
+        } else if (cmd == "list") {
+            let sessions = try { this.sessionStore.list() } catch (_) { ArrayList<SessionHeader>() }
+            if (sessions.size == 0) {
+                println("No saved sessions")
+            } else {
+                println("Saved sessions (" + sessions.size.toString() + "):")
+                for (s in sessions) {
+                    println("  " + s.id + (if (s.id == this.sessionId) { " (current)" } else { "" }))
+                }
+            }
+        } else if (cmd == "switch" && parts.size > 2) {
+            let targetId = parts[2]
+            if (this.messages.size > 0) {
+                try {
+                    let header = SessionHeader(1, this.sessionId, 0, 0, "", "", "", None)
+                    this.sessionStore.save(this.sessionId, header, this.messages)
+                } catch (_) { () }
+            }
+            this.messages = try { this.sessionStore.load(targetId) } catch (_) {
+                println("Session not found: " + targetId)
+                return
+            }
+            this.sessionId = targetId
+            println("Switched to session: " + targetId + "  Messages: " + this.messages.size.toString())
+        } else {
+            println("Usage: /session          Show current session")
+            println("       /session new      Create new session")
+            println("       /session list     List all sessions")
+            println("       /session switch <id>  Switch to session")
         }
     }
 }
