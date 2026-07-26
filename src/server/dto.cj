@@ -167,3 +167,97 @@ public struct SessionForkDTO <: JsonDeserializable<SessionForkDTO> {
         SessionForkDTO(sourceId, leafId)
     }
 }
+
+public struct StatusResponse <: JsonSerializable {
+    public let status: String
+
+    public init(status: String) { this.status = status }
+
+    public func toJson(w: JsonWriter): Unit {
+        w.startObject()
+        w.writeName("status").writeValue(this.status)
+        w.endObject()
+    }
+}
+
+public struct ErrorResponse <: JsonSerializable {
+    public let error: String
+
+    public init(error: String) { this.error = error }
+
+    public func toJson(w: JsonWriter): Unit {
+        w.startObject()
+        w.writeName("error").writeValue(this.error)
+        w.endObject()
+    }
+}
+
+public struct ContentResponse <: JsonSerializable {
+    public let content: String
+
+    public init(content: String) { this.content = content }
+
+    public func toJson(w: JsonWriter): Unit {
+        w.startObject()
+        w.writeName("content").writeValue(this.content)
+        w.endObject()
+    }
+}
+
+public struct TrustResponse <: JsonSerializable {
+    public let path: String
+    public let trust: String
+    public let status: String
+
+    public init(path: String, trust: String, status: String) {
+        this.path = path; this.trust = trust; this.status = status
+    }
+
+    public func toJson(w: JsonWriter): Unit {
+        w.startObject()
+        w.writeName("path").writeValue(this.path)
+        w.writeName("trust").writeValue(this.trust)
+        if (this.status != "") { w.writeName("status").writeValue(this.status) }
+        w.endObject()
+    }
+}
+
+public struct SessionItem <: JsonSerializable {
+    public let id: String
+    public let model: String
+
+    public init(id: String, model: String) { this.id = id; this.model = model }
+
+    public func toJson(w: JsonWriter): Unit {
+        w.startObject()
+        w.writeName("id").writeValue(this.id)
+        w.writeName("model").writeValue(this.model)
+        w.endObject()
+    }
+}
+
+public struct SessionListResponse <: JsonSerializable {
+    public let sessions: ArrayList<SessionItem>
+
+    public init(sessions: ArrayList<SessionItem>) { this.sessions = sessions }
+
+    public func toJson(w: JsonWriter): Unit {
+        w.startObject()
+        w.writeName("sessions").writeValue(this.sessions)
+        w.endObject()
+    }
+}
+
+public struct ForkResponse <: JsonSerializable {
+    public let status: String
+    public let entries: Int64
+
+    public init(status: String, entries: Int64) { this.status = status; this.entries = entries }
+
+    public func toJson(w: JsonWriter): Unit {
+        w.startObject()
+        w.writeName("status").writeValue(this.status)
+        w.writeName("entries").writeValue(this.entries)
+        w.endObject()
+    }
+}

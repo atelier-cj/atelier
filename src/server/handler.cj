@@ -13,6 +13,7 @@ import atelier.session.*
 import atelier.skill.*
 import atelier.trust.*
 import atelier.util.{toJsonString, fromJsonString}
+import stdx.encoding.json.stream.{JsonSerializable, JsonDeserializable}
 import stdx.log.*
 
 public class AtelierHttpHandler {
@@ -57,28 +58,27 @@ public class AtelierHttpHandler {
                 for ((k, _) in agents) { arr.add(JsonValue.String(k)) }
                 jsonResponse(ctx, 200, JsonValue.Array(arr).stringify())
             case "POST" =>
-                let dto = try { fromJsonString<AgentConfigDTO>(readBody(ctx)) } catch (_) {
-                    jsonResponse(ctx, 400, "{\"error\":\"invalid JSON\"}"); return
+                let dto = try { readJson<AgentConfigDTO>(ctx) } catch (_) {
+                    jsonResponse(ctx, 400, toJsonString(ErrorResponse("invalid JSON"))); return
                 }
                 let cfg = configFromDTO(dto)
                 try {
                     this.agentRegistry.create(dto.name, cfg)
-                    jsonResponse(ctx, 201, "{\"status\":\"created\"}")
+                    jsonResponse(ctx, 201, toJsonString(StatusResponse("created")))
                 } catch (e: Exception) {
-                    jsonResponse(ctx, 409, "{\"error\":\"" + escapeJson(e.message) + "\"}")
+                    jsonResponse(ctx, 409, toJsonString(ErrorResponse(e.message)))
                 }
-            case _ => jsonResponse(ctx, 405, "{\"error\":\"method not allowed\"}")
+            case _ => jsonResponse(ctx, 405, toJsonString(ErrorResponse("method not allowed")))
         }
     }
 
     private func handleAgentRun(ctx: HttpContext): Unit {
-        let body = readBody(ctx)
-        let dto = try { fromJsonString<ChatRequestDTO>(body) } catch (_) {
-            jsonResponse(ctx, 400, "{\"error\":\"invalid JSON\"}"); return
+        let dto = try { readJson<ChatRequestDTO>(ctx) } catch (_) {
+            jsonResponse(ctx, 400, toJsonString(ErrorResponse("invalid JSON"))); return
         }
         let agentCfg = match (this.agentRegistry.get(dto.agent)) {
             case Some(c) => c
-            case None => jsonResponse(ctx, 404, "{\"error\":\"agent not found\"}"); return
+            case None => jsonResponse(ctx, 404, toJsonString(ErrorResponse("agent not found"))); return
         }
         let msgs = ArrayList<Message>()
         for (m in dto.messages) {
@@ -89,17 +89,17 @@ public class AtelierHttpHandler {
         let eventStream = runtime.chat(msgs)
         let msgsResult = eventStream.result()
         let lastText = lastAssistantText(msgsResult)
-        jsonResponse(ctx, 200, "{\"content\":\"" + escapeJson(lastText) + "\"}")
+        jsonResponse(ctx, 200, toJsonString(ContentResponse(lastText)))
     }
 
     private func handleAgentStream(ctx: HttpContext): Unit {
         let body = readBody(ctx)
         let dto = try { fromJsonString<ChatRequestDTO>(body) } catch (_) {
-            jsonResponse(ctx, 400, "{\"error\":\"invalid JSON\"}"); return
+            jsonResponse(ctx, 400, toJsonString(ErrorResponse("invalid JSON"))); return
         }
         let agentCfg = match (this.agentRegistry.get(dto.agent)) {
             case Some(c) => c
-            case None => jsonResponse(ctx, 404, "{\"error\":\"agent not found\"}"); return
+            case None => jsonResponse(ctx, 404, toJsonString(ErrorResponse("agent not found"))); return
         }
         let msgs = ArrayList<Message>()
         for (m in dto.messages) {
@@ -147,19 +147,18 @@ public class AtelierHttpHandler {
     }
 
     private func handleTrust(ctx: HttpContext): Unit {
-        let body = readBody(ctx)
-        let dto = try { fromJsonString<TrustRequestDTO>(body) } catch (_) {
-            jsonResponse(ctx, 400, "{\"error\":\"invalid JSON\"}"); return
+        let dto = try { readJson<TrustRequestDTO>(ctx) } catch (_) {
+            jsonResponse(ctx, 400, toJsonString(ErrorResponse("invalid JSON"))); return
         }
         if (dto.action == "set") {
             let trust = if (dto.trust == "trusted") { TrustState.Trusted }
             else if (dto.trust == "untrusted") { TrustState.Untrusted }
-            else { jsonResponse(ctx, 400, "{\"error\":\"trust must be 'trusted' or 'untrusted'\"}"); return }
+            else { jsonResponse(ctx, 400, toJsonString(ErrorResponse("trust must be 'trusted' or 'untrusted'"))); return }
             this.trustManager.setTrust(dto.path, trust)
-            jsonResponse(ctx, 200, "{\"status\":\"ok\",\"path\":\"" + escapeJson(dto.path) + "\",\"trust\":\"" + dto.trust + "\"}")
+            jsonResponse(ctx, 200, toJsonString(TrustResponse(dto.path, dto.trust, "ok")))
         } else if (dto.action == "reset") {
             this.trustManager.setTrust(dto.path, TrustState.Undecided)
-            jsonResponse(ctx, 200, "{\"status\":\"reset\",\"path\":\"" + escapeJson(dto.path) + "\"}")
+            jsonResponse(ctx, 200, toJsonString(TrustResponse(dto.path, "undecided", "reset")))
         } else {
             let state = this.trustManager.getEffectiveTrust(dto.path)
             let name = match (state) {
@@ -167,47 +166,43 @@ public class AtelierHttpHandler {
                 case TrustState.Untrusted => "untrusted"
                 case _ => "undecided"
             }
-            jsonResponse(ctx, 200, "{\"path\":\"" + escapeJson(dto.path) + "\",\"trust\":\"" + name + "\"}")
+            jsonResponse(ctx, 200, toJsonString(TrustResponse(dto.path, name, "")))
         }
     }
 
     private func handleSessionList(ctx: HttpContext): Unit {
         let sessions = try { this.sessionStore.list() } catch (_) {
-            jsonResponse(ctx, 500, "{\"error\":\"failed to list sessions\"}"); return
+            jsonResponse(ctx, 500, toJsonString(ErrorResponse("failed to list sessions"))); return
         }
-        let parts = ArrayList<String>()
-        for (s in sessions) {
-            parts.add("{\"id\":\"" + escapeJson(s.id) + "\",\"model\":\"" + escapeJson(s.model) + "\"}")
-        }
-        jsonResponse(ctx, 200, "{\"sessions\":[" + joinStrings(parts, ",") + "]}")
+        let items = ArrayList<SessionItem>()
+        for (s in sessions) { items.add(SessionItem(s.id, s.model)) }
+        jsonResponse(ctx, 200, toJsonString(SessionListResponse(items)))
     }
 
     private func handleSessionFork(ctx: HttpContext): Unit {
-        let body = readBody(ctx)
-        let dto = try { fromJsonString<SessionForkDTO>(body) } catch (_) {
-            jsonResponse(ctx, 400, "{\"error\":\"invalid JSON\"}"); return
+        let dto = try { readJson<SessionForkDTO>(ctx) } catch (_) {
+            jsonResponse(ctx, 400, toJsonString(ErrorResponse("invalid JSON"))); return
         }
         try {
             let fork = this.sessionStore.fork(dto.sourceId, dto.leafId)
-            jsonResponse(ctx, 200, "{\"status\":\"forked\",\"entries\":" + fork.entries.size.toString() + "}")
+            jsonResponse(ctx, 200, toJsonString(ForkResponse("forked", fork.entries.size)))
         } catch (e: Exception) {
-            jsonResponse(ctx, 500, "{\"error\":\"" + escapeJson(e.message) + "\"}")
+            jsonResponse(ctx, 500, toJsonString(ErrorResponse(e.message)))
         }
     }
 
     private func handleSessionSave(ctx: HttpContext): Unit {
         let body = readBody(ctx)
         let v = try { JsonValue.parse(body) } catch (_) {
-            jsonResponse(ctx, 400, "{\"error\":\"invalid JSON\"}"); return
+            jsonResponse(ctx, 400, toJsonString(ErrorResponse("invalid JSON"))); return
         }
         let id = match (v["sessionId"]) { case Some(JsonValue.String(s)) => s; case _ => "" }
-        if (id == "") { jsonResponse(ctx, 400, "{\"error\":\"missing sessionId\"}"); return }
+        if (id == "") { jsonResponse(ctx, 400, toJsonString(ErrorResponse("missing sessionId"))); return }
         let headerJson = match (v["header"]) { case Some(j) => j.stringify(); case _ => "{}" }
         let msgsJson = match (v["messages"]) { case Some(j) => j.stringify(); case _ => "[]" }
         try {
             let header = fromJsonString<SessionHeader>(headerJson)
             let msgsArr = ArrayList<Message>()
-            // Parse messages from JSON array
             match (JsonValue.parse(msgsJson)) {
                 case JsonValue.Array(arr) =>
                     for (item in arr) {
@@ -220,18 +215,19 @@ public class AtelierHttpHandler {
                 case _ => ()
             }
             this.sessionStore.save(id, header, msgsArr)
-            jsonResponse(ctx, 200, "{\"status\":\"saved\"}")
+            jsonResponse(ctx, 200, toJsonString(StatusResponse("saved")))
         } catch (e: Exception) {
-            jsonResponse(ctx, 500, "{\"error\":\"" + escapeJson(e.message) + "\"}")
+            jsonResponse(ctx, 500, toJsonString(ErrorResponse(e.message)))
         }
     }
 
     private func handleSessionLoad(ctx: HttpContext): Unit {
-        let v = try { JsonValue.parse(readBody(ctx)) } catch (_) {
-            jsonResponse(ctx, 400, "{\"error\":\"invalid JSON\"}"); return
+        let body = readBody(ctx)
+        let v = try { JsonValue.parse(body) } catch (_) {
+            jsonResponse(ctx, 400, toJsonString(ErrorResponse("invalid JSON"))); return
         }
         let id = match (v["sessionId"]) { case Some(JsonValue.String(s)) => s; case _ => "" }
-        if (id == "") { jsonResponse(ctx, 400, "{\"error\":\"missing sessionId\"}"); return }
+        if (id == "") { jsonResponse(ctx, 400, toJsonString(ErrorResponse("missing sessionId"))); return }
         try {
             let msgs = this.sessionStore.load(id)
             let parts = ArrayList<String>()
@@ -247,14 +243,14 @@ public class AtelierHttpHandler {
                 if (text != "") { text = text + "\n" }
                 text = text + p
             }
-            jsonResponse(ctx, 200, "{\"sessionId\":\"" + id + "\",\"content\":\"" + escapeJson(text) + "\"}")
+            jsonResponse(ctx, 200, toJsonString(ContentResponse(text)))
         } catch (_) {
-            jsonResponse(ctx, 404, "{\"error\":\"session not found\"}")
+            jsonResponse(ctx, 404, toJsonString(ErrorResponse("session not found")))
         }
     }
 
     private func handleHealth(ctx: HttpContext): Unit {
-        jsonResponse(ctx, 200, "{\"status\":\"ok\"}")
+        jsonResponse(ctx, 200, toJsonString(StatusResponse("ok")))
     }
 
     private func resolveProvider(model: String): Provider {
@@ -273,6 +269,17 @@ func jsonResponse(ctx: HttpContext, code: Int64, body: String): Unit {
     b.status(UInt16(code))
     b.header("content-type", "application/json")
     b.body(body)
+}
+
+func json<T>(ctx: HttpContext, code: Int64, obj: T): Unit where T <: JsonSerializable {
+    let b = ctx.responseBuilder
+    b.status(UInt16(code))
+    b.header("content-type", "application/json")
+    b.body(toJsonString(obj))
+}
+
+func readJson<T>(ctx: HttpContext): T where T <: JsonDeserializable<T> {
+    fromJsonString<T>(readBody(ctx))
 }
 
 func readBody(ctx: HttpContext): String {
