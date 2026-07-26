@@ -2,6 +2,7 @@ package atelier.cli
 
 import std.env.*
 import std.collection.*
+import std.time.DateTime
 import stdx.log.*
 import atelier.agent.*
 import atelier.message.*
@@ -51,7 +52,7 @@ public class REPL {
             this.sessionId = resumeSessionId
             this.messages = try { this.sessionStore.load(resumeSessionId) } catch (_) { ArrayList<Message>() }
         } else {
-            this.sessionId = "sess_1"
+            this.sessionId = "sess_" + DateTime.now().toString()
             this.messages = ArrayList<Message>()
         }
     }
