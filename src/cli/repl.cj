@@ -14,6 +14,7 @@ import atelier.skill.*
 import opencj::ulid.nextId
 
 public class REPL {
+    private let MaxLoadMessages: Int64 = 15
     private let agentName: String
     private let registry: SlashCommandRegistry
     private let agentConfig: AgentConfig
@@ -50,11 +51,29 @@ public class REPL {
         this.modelOverride = ""
         if (resumeSessionId != "") {
             this.sessionId = resumeSessionId
-            this.messages = try { this.sessionStore.load(resumeSessionId) } catch (_) { ArrayList<Message>() }
+            this.messages = try {
+                let loaded = this.sessionStore.load(resumeSessionId)
+                if (loaded.size > MaxLoadMessages) {
+                    let recent = ArrayList<Message>()
+                    let start = loaded.size - MaxLoadMessages
+                    for (i in start..loaded.size) { recent.add(loaded[Int64(i)]) }
+                    recent
+                } else { loaded }
+            } catch (_) { ArrayList<Message>() }
         } else {
             this.sessionId = "sess_" + nextId()
             this.messages = ArrayList<Message>()
         }
+    }
+
+    private func loadSessionMessages(id: String): ArrayList<Message> {
+        let msgs = try { this.sessionStore.load(id) } catch (_) { return ArrayList<Message>() }
+        if (msgs.size > MaxLoadMessages) {
+            let recent = ArrayList<Message>()
+            let start = msgs.size - MaxLoadMessages
+            for (i in start..msgs.size) { recent.add(msgs[Int64(i)]) }
+            recent
+        } else { msgs }
     }
 
     private func makeRuntime(): AgentRuntime {
@@ -189,7 +208,8 @@ public class REPL {
                     this.sessionStore.save(this.sessionId, header, this.messages)
                 } catch (_) { () }
             }
-            this.messages = try { this.sessionStore.load(targetId) } catch (_) {
+            this.messages = this.loadSessionMessages(targetId)
+            if (this.messages.size == 0) {
                 println("Session not found: " + targetId)
                 return
             }
