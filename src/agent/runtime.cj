@@ -7,6 +7,7 @@ import atelier.skill.*
 import atelier.session.*
 import atelier.trust.*
 import atelier.context.compactMessages
+import atelier.context.ModelContextRegistry
 import atelier.event.EventStream
 import jsonvalue.*
 import std.collection.*
@@ -28,6 +29,7 @@ public class AgentRuntime {
     private let toolExecutor: ToolExecutor
     private let hooks: ArrayList<Hook>
     private let askUser: AskUserFn
+    private let modelRegistry: ModelContextRegistry
 
     public init(config: AgentConfig, provider: Provider,
         toolRegistry: ToolRegistry, sessionStore: SessionStore,
@@ -45,6 +47,7 @@ public class AgentRuntime {
         this.toolExecutor = ToolExecutor(this.toolRegistry)
         this.hooks = hooks
         this.askUser = askUser
+        this.modelRegistry = ModelContextRegistry()
     }
 
     public init(config: AgentConfig, provider: Provider,
@@ -62,6 +65,7 @@ public class AgentRuntime {
         this.toolExecutor = ToolExecutor(this.toolRegistry)
         this.hooks = ArrayList<Hook>()
         this.askUser = { q => "" }
+        this.modelRegistry = ModelContextRegistry()
     }
 
     public func chat(messages: ArrayList<Message>): EventStream<AgentEvent, ArrayList<Message>> {
@@ -166,21 +170,33 @@ public class AgentRuntime {
                             var idx: Int64 = 0
                             while (idx < toolCalls.size) {
                                 let tc = toolCalls[idx]
-                                match (this.toolRegistry.get(tc.name)) {
-                                    case Some(t) =>
-                                        if (shouldAllow(t, ctx.workDir, this.trustManager)) {
-                                            batch.add((tc.name, ctx, tc.args))
-                                        } else {
-                                            let answer = this.askUser("Tool '" + tc.name + "' needs your approval to run in directory '" + ctx.workDir + "'. Allow? (yes/no)")
-                                            if (answer == "yes" || answer == "y") {
-                                                this.trustManager.setTrust(ctx.workDir, TrustState.Trusted)
-                                                batch.add((tc.name, ctx, tc.args))
-                                                log.info("tool ${tc.name} approved by user", Array<Attr>())
-                                            } else {
-                                                skipResults[idx] = "Tool not allowed: workDir not trusted"
-                                                log.warn("tool ${tc.name} blocked by trust gate", Array<Attr>())
+                                    match (this.toolRegistry.get(tc.name)) {
+                                        case Some(t) =>
+                                            match (shouldAllow(t, ctx.workDir, this.trustManager)) {
+                                                case TrustDecision.Allowed =>
+                                                    batch.add((tc.name, ctx, tc.args))
+                                                case TrustDecision.NeedsApproval =>
+                                                    let answer = this.askUser(
+                                                        "Tool '" + tc.name + "' needs your approval.\n" +
+                                                        "  y  — allow this once (session only)\n" +
+                                                        "  a  — always allow this directory\n" +
+                                                        "  n  — deny")
+                                                    if (answer == "a" || answer == "always" || answer == "yes") {
+                                                        this.trustManager.setTrust(ctx.workDir, TrustState.Trusted)
+                                                        batch.add((tc.name, ctx, tc.args))
+                                                        log.info("tool ${tc.name} always approved for ${ctx.workDir}", Array<Attr>())
+                                                    } else if (answer == "y" || answer == "once") {
+                                                        this.trustManager.setSessionTrust(ctx.workDir, TrustState.Trusted)
+                                                        batch.add((tc.name, ctx, tc.args))
+                                                        log.info("tool ${tc.name} approved for session", Array<Attr>())
+                                                    } else {
+                                                        skipResults[idx] = "Tool not allowed: user denied approval"
+                                                        log.warn("tool ${tc.name} denied by user", Array<Attr>())
+                                                    }
+                                                case TrustDecision.Denied =>
+                                                    skipResults[idx] = "Tool not allowed: workDir is untrusted"
+                                                    log.warn("tool ${tc.name} blocked: workDir untrusted", Array<Attr>())
                                             }
-                                        }
                                     case None =>
                                         skipResults[idx] = "Tool not found: " + tc.name
                                 }
@@ -231,8 +247,9 @@ public class AgentRuntime {
                             log.info("turn finished", Array<Attr>())
                             callHooks("afterTurn", turnCount, ArrayList<ToolCallBlock>(), ArrayList<ToolResultMessage>())
                             if (this.config.compactionEnabled) {
+                                let contextWindow = this.modelRegistry.get(actualModel)
                                 currentMessages = compactMessages(currentMessages,
-                                    Int64(this.config.maxOutputTokens) * 8,
+                                    contextWindow,
                                     Int64(this.config.compactionReserveTokens),
                                     Int64(this.config.keepRecentTokens))
                             }

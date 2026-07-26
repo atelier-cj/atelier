@@ -22,37 +22,44 @@ class MockSequentialTool <: Tool {
 
 func mockCtx(): ToolContext { ToolContext("/home/user/project") }
 
-@Test
-func shouldAllow_parallel_alwaysTrue() {
-    let mgr = TrustManager()
-    @Expect(shouldAllow(MockParallelTool(), "/tmp", mgr), true)
+func isDecision(d: TrustDecision, expected: TrustDecision): Bool {
+    match (d) {
+        case expected => true
+        case _ => false
+    }
 }
 
 @Test
-func shouldAllow_sequential_undecidedIsFalse() {
+func shouldAllow_parallel_alwaysAllowed() {
     let mgr = TrustManager()
-    @Expect(shouldAllow(MockSequentialTool(), "/tmp", mgr), false)
+    @Expect(isDecision(shouldAllow(MockParallelTool(), "/tmp", mgr), TrustDecision.Allowed), true)
 }
 
 @Test
-func shouldAllow_sequential_trustedIsTrue() {
+func shouldAllow_sequential_undecidedNeedsApproval() {
+    let mgr = TrustManager()
+    @Expect(isDecision(shouldAllow(MockSequentialTool(), "/tmp", mgr), TrustDecision.NeedsApproval), true)
+}
+
+@Test
+func shouldAllow_sequential_trustedIsAllowed() {
     let mgr = TrustManager()
     mgr.setTrust("/home/user/project", TrustState.Trusted)
-    @Expect(shouldAllow(MockSequentialTool(), "/home/user/project", mgr), true)
+    @Expect(isDecision(shouldAllow(MockSequentialTool(), "/home/user/project", mgr), TrustDecision.Allowed), true)
 }
 
 @Test
-func shouldAllow_sequential_untrustedIsFalse() {
+func shouldAllow_sequential_untrustedIsDenied() {
     let mgr = TrustManager()
     mgr.setTrust("/home/user/project", TrustState.Untrusted)
-    @Expect(shouldAllow(MockSequentialTool(), "/home/user/project", mgr), false)
+    @Expect(isDecision(shouldAllow(MockSequentialTool(), "/home/user/project", mgr), TrustDecision.Denied), true)
 }
 
 @Test
 func shouldAllow_sequential_parentTrusted() {
     let mgr = TrustManager()
     mgr.setTrust("/home/user", TrustState.Trusted)
-    @Expect(shouldAllow(MockSequentialTool(), "/home/user/project/sub", mgr), true)
+    @Expect(isDecision(shouldAllow(MockSequentialTool(), "/home/user/project/sub", mgr), TrustDecision.Allowed), true)
 }
 
 func isState(s: TrustState, expected: TrustState): Bool {
