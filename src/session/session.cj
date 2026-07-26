@@ -4,6 +4,19 @@ import atelier.message.*
 import stdx.encoding.json.stream.*
 import std.collection.*
 
+public struct SessionEnvironment {
+    public let directory: String
+    public let context: HashMap<String, String>
+
+    public init() {
+        this.directory = ""; this.context = HashMap()
+    }
+
+    public init(directory: String, context: HashMap<String, String>) {
+        this.directory = directory; this.context = context
+    }
+}
+
 public struct SessionHeader <: JsonSerializable & JsonDeserializable<SessionHeader> {
     public let version: Int32
     public let id: String
@@ -13,6 +26,7 @@ public struct SessionHeader <: JsonSerializable & JsonDeserializable<SessionHead
     public let provider: String
     public let systemPrompt: String
     public let parentSession: Option<String>
+    public let env: SessionEnvironment
 
     public init(version: Int32, id: String, createdAt: Int64, updatedAt: Int64,
         model: String, provider: String, systemPrompt: String,
@@ -20,6 +34,16 @@ public struct SessionHeader <: JsonSerializable & JsonDeserializable<SessionHead
         this.version = version; this.id = id; this.createdAt = createdAt
         this.updatedAt = updatedAt; this.model = model; this.provider = provider
         this.systemPrompt = systemPrompt; this.parentSession = parentSession
+        this.env = SessionEnvironment()
+    }
+
+    public init(version: Int32, id: String, createdAt: Int64, updatedAt: Int64,
+        model: String, provider: String, systemPrompt: String,
+        parentSession: Option<String>, env: SessionEnvironment) {
+        this.version = version; this.id = id; this.createdAt = createdAt
+        this.updatedAt = updatedAt; this.model = model; this.provider = provider
+        this.systemPrompt = systemPrompt; this.parentSession = parentSession
+        this.env = env
     }
 
     public func toJson(w: JsonWriter): Unit {
@@ -32,12 +56,17 @@ public struct SessionHeader <: JsonSerializable & JsonDeserializable<SessionHead
         w.writeName("provider").writeValue(this.provider)
         w.writeName("systemPrompt").writeValue(this.systemPrompt)
         w.writeName("parentSession").writeValue(this.parentSession)
+        w.writeName("env").startObject()
+        w.writeName("directory").writeValue(this.env.directory)
+        w.writeName("context").writeValue(this.env.context)
+        w.endObject()
         w.endObject()
     }
 
     public static func fromJson(r: JsonReader): SessionHeader {
         var version = Int32(0); var id = ""; var createdAt = Int64(0); var updatedAt = Int64(0)
         var model = ""; var provider = ""; var systemPrompt = ""; var parentSession: Option<String> = None
+        var directory = ""; var context = HashMap<String, String>()
         r.startObject()
         while (r.peek() != EndObject) {
             match (r.readName()) {
@@ -49,11 +78,22 @@ public struct SessionHeader <: JsonSerializable & JsonDeserializable<SessionHead
                 case "provider" => provider = r.readValue<String>()
                 case "systemPrompt" => systemPrompt = r.readValue<String>()
                 case "parentSession" => parentSession = r.readValue<Option<String>>()
+                case "env" =>
+                    r.startObject()
+                    while (r.peek() != EndObject) {
+                        match (r.readName()) {
+                            case "directory" => directory = r.readValue<String>()
+                            case "context" => context = r.readValue<HashMap<String, String>>()
+                            case _ => r.skip()
+                        }
+                    }
+                    r.endObject()
                 case _ => r.skip()
             }
         }
         r.endObject()
-        SessionHeader(version, id, createdAt, updatedAt, model, provider, systemPrompt, parentSession)
+        SessionHeader(version, id, createdAt, updatedAt, model, provider, systemPrompt, parentSession,
+            SessionEnvironment(directory, context))
     }
 }
 

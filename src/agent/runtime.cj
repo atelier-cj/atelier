@@ -9,11 +9,14 @@ import atelier.trust.*
 import atelier.context.compactMessages
 import atelier.context.ModelContextRegistry
 import atelier.event.EventStream
+import std.fs.File
+import std.io.InputStream
 import jsonvalue.*
 import std.collection.*
 import std.core.Duration
 import std.core.sleep
 import std.env.getVariable
+import std.fs.*
 import std.time.MonoTime
 import stdx.log.*
 
@@ -30,6 +33,7 @@ public class AgentRuntime {
     private let hooks: ArrayList<Hook>
     private let askUser: AskUserFn
     private let modelRegistry: ModelContextRegistry
+    private let sessionEnv: SessionEnvironment
 
     public init(config: AgentConfig, provider: Provider,
         toolRegistry: ToolRegistry, sessionStore: SessionStore,
@@ -48,6 +52,28 @@ public class AgentRuntime {
         this.hooks = hooks
         this.askUser = askUser
         this.modelRegistry = ModelContextRegistry()
+        this.sessionEnv = SessionEnvironment()
+    }
+
+    public init(config: AgentConfig, provider: Provider,
+        toolRegistry: ToolRegistry, sessionStore: SessionStore,
+        trustManager: TrustManager, skillRegistry: SkillRegistry,
+        agentRegistry: AgentRegistry, providerRegistry: ProviderRegistry,
+        hooks: ArrayList<Hook>, askUser: AskUserFn,
+        sessionEnv: SessionEnvironment) {
+        this.config = config
+        this.provider = provider
+        this.toolRegistry = toolRegistry
+        this.sessionStore = sessionStore
+        this.trustManager = trustManager
+        this.skillRegistry = skillRegistry
+        this.agentRegistry = agentRegistry
+        this.providerRegistry = providerRegistry
+        this.toolExecutor = ToolExecutor(this.toolRegistry)
+        this.hooks = hooks
+        this.askUser = askUser
+        this.modelRegistry = ModelContextRegistry()
+        this.sessionEnv = sessionEnv
     }
 
     public init(config: AgentConfig, provider: Provider,
@@ -66,11 +92,18 @@ public class AgentRuntime {
         this.hooks = ArrayList<Hook>()
         this.askUser = { q => "" }
         this.modelRegistry = ModelContextRegistry()
+        this.sessionEnv = SessionEnvironment()
     }
 
     public func chat(messages: ArrayList<Message>): EventStream<AgentEvent, ArrayList<Message>> {
+        this.chatWithEnv(messages, this.sessionEnv)
+    }
+
+    public func chatWithEnv(messages: ArrayList<Message>, sessionEnv: SessionEnvironment): EventStream<AgentEvent, ArrayList<Message>> {
         let stream = EventStream<AgentEvent, ArrayList<Message>>()
-        let ctx = ToolContext(".", this.askUser)
+        let se = sessionEnv
+        let workDir = if (se.directory != "") { se.directory } else { "." }
+        let ctx = ToolContext(workDir, this.askUser, se.context)
         let sessionId = "sess_0"
 
         spawn {
@@ -80,8 +113,8 @@ public class AgentRuntime {
                 log.info("agent start: ${this.config.name}", Array<Attr>())
                 callHooks("beforeRun", 0, ArrayList<ToolCallBlock>(), ArrayList<ToolResultMessage>())
 
-                // Build system prompt with skill instructions
-                let systemText = buildSystemPrompt(this.config, this.skillRegistry)
+                // Build system prompt with skill instructions + session env
+                let systemText = buildSystemPromptWithEnv(this.config, this.skillRegistry, se)
                 var currentMessages = ArrayList<Message>()
                 if (systemText != "") {
                     currentMessages.add(UserMessage(ContentList.ofText(systemText), 0))
@@ -348,14 +381,33 @@ public class AgentRuntime {
     }
 }
 
+func readFile(p: Path): String {
+    let f = File(p, OpenMode.Read)
+    let buf = Array<Byte>(4096, repeat: 0)
+    let all = ArrayList<Byte>()
+    while (true) {
+        let n = f.read(buf)
+        if (n <= 0) { break }
+        for (i in 0..n) { all.add(buf[Int64(i)]) }
+    }
+    f.close()
+    let raw = Array<Byte>(all.size, repeat: 0)
+    for (i in 0..all.size) { raw[i] = all[i] }
+    String.fromUtf8(raw)
+}
+
 func buildSystemPrompt(config: AgentConfig, skills: SkillRegistry): String {
+    buildSystemPromptWithEnv(config, skills, SessionEnvironment())
+}
+
+func buildSystemPromptWithEnv(config: AgentConfig, skills: SkillRegistry, env: SessionEnvironment): String {
     let sp = config.systemPrompt
-    if (config.skills.size == 0) { return sp }
     let sb = StringBuilder()
     if (sp != "") {
         sb.append(sp)
         sb.append("\n\n")
     }
+    // Skill instructions
     for (name in config.skills) {
         match (skills.get(name)) {
             case Some(skill) =>
@@ -363,6 +415,32 @@ func buildSystemPrompt(config: AgentConfig, skills: SkillRegistry): String {
                 sb.append("\n\n")
             case None => ()
         }
+    }
+    // AGENTS.md from working directory
+    if (env.directory != "") {
+        try {
+            let agentsPath = env.directory + "/AGENTS.md"
+            let p = Path(agentsPath)
+            if (exists(p)) {
+                let content = readFile(p)
+                if (content != "") {
+                    sb.append("[Project Rules]\n")
+                    sb.append(content)
+                    sb.append("\n\n")
+                }
+            }
+        } catch (_: Exception) {}
+    }
+    // Session context
+    if (env.context.size > 0) {
+        sb.append("[Session Context]\n")
+        for ((k, v) in env.context) {
+            sb.append(k)
+            sb.append(" = ")
+            sb.append(v)
+            sb.append("\n")
+        }
+        sb.append("\n")
     }
     sb.toString()
 }

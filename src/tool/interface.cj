@@ -1,6 +1,7 @@
 package atelier.tool
 
 import jsonvalue.*
+import std.collection.HashMap
 
 /**
  * Execution mode for a tool.
@@ -21,15 +22,24 @@ public type AskUserFn = (String) -> String
 public struct ToolContext {
     public let workDir: String
     public let askUser: AskUserFn
+    public let env: HashMap<String, String>
 
     public init(workDir: String) {
         this.workDir = workDir
         this.askUser = { q => "" }
+        this.env = HashMap()
     }
 
     public init(workDir: String, askUser: AskUserFn) {
         this.workDir = workDir
         this.askUser = askUser
+        this.env = HashMap()
+    }
+
+    public init(workDir: String, askUser: AskUserFn, env: HashMap<String, String>) {
+        this.workDir = workDir
+        this.askUser = askUser
+        this.env = env
     }
 }
 
