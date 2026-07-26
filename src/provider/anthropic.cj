@@ -57,7 +57,17 @@ public class AnthropicProvider <: Provider {
         }
         let json = readAll(resp.body)
         let aResp = fromJsonString<AnthropicResponse>(json)
-        let content = buildAnthropicContent(aResp.content)
+        // Extract text and tool_use blocks from response content
+        var respText = ""
+        var respTools = ArrayList<AnthropicContentBlock>()
+        for (cb in aResp.content) {
+            match (cb.blockType) {
+                case "text" => respText = cb.text
+                case "tool_use" => respTools.add(cb)
+                case _ => ()
+            }
+        }
+        let content = buildAnthropicContent(respText, respTools)
         let stopReason = anthropicStopReason(aResp.stopReason)
         ChatResponse(AssistantMessage(
             content, aResp.model, this.provName,
@@ -186,11 +196,11 @@ func doAnthropicStream(client: Client, baseURL: String, apiKey: String, provName
             return
         }
         var contentBuilder = StringBuilder()
+        var toolCallsBuilder = ArrayList<AnthropicContentBlock>()
         var model = ""
         var stopReason = ""
         var inputTokens: Int64 = 0
         var outputTokens: Int64 = 0
-        var contentIndex: Int64 = 0
         let buf = Array<Byte>(4096, repeat: 0)
         var lineBuf = ArrayList<Byte>()
 
@@ -217,6 +227,10 @@ func doAnthropicStream(client: Client, baseURL: String, apiKey: String, provName
                             case "message_start" =>
                                 model = ev.message.model
                                 inputTokens = ev.message.usage.inputTokens
+                            case "content_block_start" =>
+                                if (ev.contentBlock.blockType == "tool_use") {
+                                    toolCallsBuilder.add(ev.contentBlock)
+                                }
                             case "content_block_delta" =>
                                 if (ev.delta.deltaType == "text_delta") {
                                     contentBuilder.append(ev.delta.text)
@@ -234,7 +248,7 @@ func doAnthropicStream(client: Client, baseURL: String, apiKey: String, provName
                 }
             }
         }
-        let finalContent = ContentList.ofText(contentBuilder.toString())
+        let finalContent = buildAnthropicContent(contentBuilder.toString(), toolCallsBuilder)
         let finalStop = anthropicStopReason(stopReason)
         let assistantMsg = AssistantMessage(
             finalContent, model, provName,
@@ -262,16 +276,13 @@ func anthropicStopReason(s: String): StopReason {
     }
 }
 
-func buildAnthropicContent(content: ArrayList<AnthropicContentBlock>): ContentList {
+func buildAnthropicContent(text: String, toolCalls: ArrayList<AnthropicContentBlock>): ContentList {
     let blocks = ArrayList<ContentBlock>()
-    for (cb in content) {
-    match (cb.blockType) {
-        case "text" =>
-            if (cb.text != "") { blocks.add(ContentBlock.TextBlock(cb.text)) }
-        case "tool_use" =>
+    if (text != "") { blocks.add(ContentBlock.TextBlock(text)) }
+    for (cb in toolCalls) {
+        if (cb.blockType == "tool_use") {
             blocks.add(ContentBlock.ToolCall(ToolCallBlock(cb.id, cb.name, cb.input)))
-        case _ => ()
-    }
+        }
     }
     ContentList(blocks)
 }
@@ -352,6 +363,7 @@ public struct AnthropicUsage <: JsonDeserializable<AnthropicUsage> {
 public struct AnthropicStreamEvent <: JsonDeserializable<AnthropicStreamEvent> {
     public var eventType: String = ""
     public var message: AnthropicStreamMessage = AnthropicStreamMessage()
+    public var contentBlock: AnthropicContentBlock = AnthropicContentBlock()
     public var delta: AnthropicStreamDelta = AnthropicStreamDelta()
     public var usage: AnthropicUsage = AnthropicUsage()
 
@@ -362,6 +374,7 @@ public struct AnthropicStreamEvent <: JsonDeserializable<AnthropicStreamEvent> {
             match (r.readName()) {
                 case "type" => res.eventType = r.readValue<String>()
                 case "message" => res.message = r.readValue<AnthropicStreamMessage>()
+                case "content_block" => res.contentBlock = r.readValue<AnthropicContentBlock>()
                 case "delta" => res.delta = r.readValue<AnthropicStreamDelta>()
                 case "usage" => res.usage = r.readValue<AnthropicUsage>()
                 case _ => r.skip()
