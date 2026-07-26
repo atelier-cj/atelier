@@ -230,9 +230,9 @@ public class REPL {
                     case _ => ()
                 }
             }
-        } else if (cmd == "export" && parts.size > 3) {
+        } else if (cmd == "export" && parts.size > 2) {
             let targetId = parts[2]
-            let fmt = parts[3]
+            let fmt = if (parts.size > 3) { parts[3] } else { "jsonl" }
             let msgs = this.loadSessionMessages(targetId)
             if (msgs.size == 0) {
                 println("Session not found: " + targetId)
