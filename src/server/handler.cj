@@ -14,6 +14,7 @@ import atelier.trust.*
 import atelier.util.{toJsonString, fromJsonString}
 import stdx.encoding.json.stream.{JsonSerializable, JsonDeserializable}
 import stdx.log.*
+import std.collection.concurrent.*
 
 public class AtelierHttpHandler {
     private let agentRegistry: AgentRegistry
@@ -22,6 +23,7 @@ public class AtelierHttpHandler {
     private let trustManager: TrustManager
     private let skillRegistry: SkillRegistry
     private var providerRegistry: ProviderRegistry
+    let pendingInputs = HashMap<String, LinkedBlockingQueue<String>>()
 
     public init(agentRegistry: AgentRegistry, toolRegistry: ToolRegistry,
         sessionStore: SessionStore, trustManager: TrustManager,
@@ -41,6 +43,7 @@ public class AtelierHttpHandler {
         distributor.register("/agent/config", { ctx => h.handleAgentConfig(ctx) })
         distributor.register("/agent/run", { ctx => h.handleAgentRun(ctx) })
         distributor.register("/agent/stream", { ctx => h.handleAgentStream(ctx) })
+        distributor.register("/agent/input", { ctx => h.handleAgentInput(ctx) })
         distributor.register("/session/save", { ctx => h.handleSessionSave(ctx) })
         distributor.register("/session/load", { ctx => h.handleSessionLoad(ctx) })
         distributor.register("/session/fork", { ctx => h.handleSessionFork(ctx) })
@@ -85,7 +88,7 @@ public class AtelierHttpHandler {
             if (m.role == "user") { msgs.add(UserMessage(ContentList.ofText(m.content), 0)) }
         }
         let provider = resolveProvider(agentCfg.model)
-        let runtime = AgentRuntime(agentCfg, provider, this.toolRegistry, this.sessionStore, this.trustManager, this.skillRegistry, this.agentRegistry, this.providerRegistry)
+        let runtime = AgentRuntime(agentCfg, provider, this.toolRegistry, this.sessionStore, this.trustManager, this.skillRegistry, this.agentRegistry, this.providerRegistry, ArrayList<Hook>(), { q => "[User input not available in HTTP mode. Question was: " + q + "]" })
         let eventStream = runtime.chat(msgs)
         let msgsResult = eventStream.result()
         let lastText = lastAssistantText(msgsResult)
@@ -106,8 +109,6 @@ public class AtelierHttpHandler {
             if (m.role == "user") { msgs.add(UserMessage(ContentList.ofText(m.content), 0)) }
         }
         let provider = resolveProvider(agentCfg.model)
-        let runtime = AgentRuntime(agentCfg, provider, this.toolRegistry, this.sessionStore, this.trustManager, this.skillRegistry, this.agentRegistry, this.providerRegistry)
-        let eventStream = runtime.chat(msgs)
 
         let b = ctx.responseBuilder
         b.status(UInt16(200))
@@ -116,16 +117,27 @@ public class AtelierHttpHandler {
         b.header("connection", "keep-alive")
         b.header("transfer-encoding", "chunked")
 
+        let writer = HttpResponseWriter(ctx)
+        let log = getGlobalLogger([("name", "SSE")])
+        let runtime = AgentRuntime(agentCfg, provider, this.toolRegistry, this.sessionStore, this.trustManager, this.skillRegistry, this.agentRegistry, this.providerRegistry, ArrayList<Hook>(), { q =>
+            let data = "data: {\"type\":\"user_input_request\",\"question\":\"" + escapeJson(q) + "\"}\n\n"
+            try { writer.write(data.toArray()) } catch (_) { () }
+            let queue = LinkedBlockingQueue<String>(1)
+            this.pendingInputs[q] = queue
+            log.info("askUser: waiting for input", Array<Attr>())
+            let answer = queue.remove()
+            log.info("askUser: got answer", Array<Attr>())
+            answer
+        })
+        let eventStream = runtime.chat(msgs)
         try {
-            doSSEStream(ctx, eventStream)
+            doSSEStream(ctx, eventStream, writer)
         } catch (e: Exception) {
-            let log = getGlobalLogger([("name", "SSE")])
             log.error("sse error: ${e.message}", Array<Attr>())
         }
     }
 
-    private func doSSEStream(ctx: HttpContext, eventStream: LoopEventStream): Unit {
-        let writer = HttpResponseWriter(ctx)
+    private func doSSEStream(ctx: HttpContext, eventStream: LoopEventStream, writer: HttpResponseWriter): Unit {
         var done = false
         while (!done) {
             match (eventStream.receive(30 * Duration.second)) {
@@ -256,6 +268,21 @@ public class AtelierHttpHandler {
     }
 
     private func handleHealth(ctx: HttpContext): Unit {
+        jsonResponse(ctx, 200, toJsonString(StatusResponse("ok")))
+    }
+
+    private func handleAgentInput(ctx: HttpContext): Unit {
+        let dto = try { readJson<SessionInputDTO>(ctx) } catch (_) {
+            jsonResponse(ctx, 400, toJsonString(ErrorResponse("invalid JSON"))); return
+        }
+        if (dto.answer == "") {
+            jsonResponse(ctx, 400, toJsonString(ErrorResponse("missing answer"))); return
+        }
+        // Find matching pending input (any will do for now)
+        for ((_, queue) in this.pendingInputs) {
+            try { queue.add(dto.answer) } catch (_) { () }
+            break
+        }
         jsonResponse(ctx, 200, toJsonString(StatusResponse("ok")))
     }
 

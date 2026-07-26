@@ -359,3 +359,24 @@ public struct AgentListResponse <: JsonSerializable {
         w.endObject()
     }
 }
+
+public struct SessionInputDTO <: JsonDeserializable<SessionInputDTO> {
+    public let sessionId: String
+    public let answer: String
+
+    public init(sessionId: String, answer: String) { this.sessionId = sessionId; this.answer = answer }
+
+    public static func fromJson(r: JsonReader): SessionInputDTO {
+        var sessionId = ""; var answer = ""
+        r.startObject()
+        while (r.peek() != EndObject) {
+            match (r.readName()) {
+                case "sessionId" => sessionId = r.readValue<String>()
+                case "answer" => answer = r.readValue<String>()
+                case _ => r.skip()
+            }
+        }
+        r.endObject()
+        SessionInputDTO(sessionId, answer)
+    }
+}
