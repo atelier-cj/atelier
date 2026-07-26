@@ -146,3 +146,26 @@ func tool_grep() {
     @Expect(result.text.contains("apple"), true)
     removeDir(dir)
 }
+
+@Test
+func tool_glob_respectsGitignore() {
+    let ctx = ToolContext(".")
+    let args = HashMap<String, JsonValue>()
+    args.add("pattern", JsonValue.String("*"))
+    let result = GlobTool().execute(ctx, JsonValue.Map(args))
+    @Expect(result.isError, false)
+    // .gitignore excludes target dir
+    @Expect(result.text.contains("target"), false)
+}
+
+@Test
+func tool_glob_noIgnoreIncludesAll() {
+    let ctx = ToolContext(".")
+    let args = HashMap<String, JsonValue>()
+    args.add("pattern", JsonValue.String("*"))
+    args.add("noIgnore", JsonValue.String("true"))
+    let result = GlobTool().execute(ctx, JsonValue.Map(args))
+    @Expect(result.isError, false)
+    // With noIgnore=true, target dir should appear
+    @Expect(result.text.contains("target"), true)
+}
