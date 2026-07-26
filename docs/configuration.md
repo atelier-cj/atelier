@@ -18,8 +18,20 @@ rateLimit = 0                  # 每分钟请求限制（0 表示不限）
 
 [[provider]]
 name = "default"               # Provider 名称
+type = "openai"                # 类型：openai / anthropic / ollama
 baseURL = "https://api.openai.com/v1"
-apiKey = "${OPENAI_API_KEY}"   # 支持 ${ENV_VAR} 引用环境变量
+apiKey = "${OPENAI_API_KEY}"   # 支持 ${ENV_VAR} 引用环境变量（ollama 不需要）
+
+[[provider]]
+name = "ollama"
+type = "ollama"
+baseURL = "http://localhost:11434"
+
+[[provider]]
+name = "deepseek-anthropic"
+type = "anthropic"
+baseURL = "https://api.deepseek.com/anthropic"
+apiKey = "${DEEPSEEK_API_KEY}"
 
 [[agent]]
 name = "assistant"             # Agent 名称
