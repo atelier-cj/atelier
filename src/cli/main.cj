@@ -39,15 +39,23 @@ main(): Int64 {
         case None => "."
     }
 
-    // Persistent session store at ~/.atelier/sessions/
-    let sessionDir = configDir + "/.atelier/sessions"
+    let config = loadToml(configDir + "/.atelier.toml")
+    let serverCfg = config.server.toServerConfig()
+
+    // Session store
+    let sessionDir = if (serverCfg.sessionDir != "") { serverCfg.sessionDir }
+        else { configDir + "/.atelier/sessions" }
     try { Directory.create(Path(sessionDir)) } catch (_) { () }
     let sessionStore: SessionStore = StormSessionStore(sessionDir)
 
+    // Apply server config log level if not set by logging section
+    if (config.logging.level == "" && serverCfg.logLevel != "") {
+        config.logging.level = serverCfg.logLevel
+    }
+    initLogger(config.logging)
+
     let handler = AtelierHttpHandler(agentReg, toolReg, sessionStore, trustMgr, skillReg)
     handler.setProviderRegistry(providerReg)
-    let config = loadToml(configDir + "/.atelier.toml")
-    initLogger(config.logging)
     try { skillReg.loadDirectory(configDir + "/.agents/skills") } catch (_) { () }
     for (a in config.agent) {
         try { agentReg.create(a.name, agentConfigFrom(a)) } catch (_) { () }
@@ -63,8 +71,8 @@ main(): Int64 {
 
     match (cmd) {
         case "serve" =>
-            let port = if (args.size > 2) { args[2] } else { "8080" }
-            serve(handler, port)
+            let port = if (args.size > 2) { args[2] } else { serverCfg.port.toString() }
+            serve(handler, serverCfg.host, port)
 
         case "repl" =>
             let agentName = if (args.size > 2) { args[2] } else { "default" }
@@ -127,7 +135,7 @@ main(): Int64 {
             println("  atelier run [agent] <prompt>  Run single prompt")
             println("")
             println("REPL slash commands: /help, /trust, /untrust, /session (new/list/switch), /clear, /exit")
-            println("Config: ~/.atelier.toml  — agent, provider, mcpServer, logging")
+            println("Config: ~/.atelier.toml  — agent, provider, server, mcpServer, logging")
             println("Skills: ~/.agents/skills/<name>/SKILL.md")
             println("Logs:   ~/.atelier/atelier.log (set [logging] level = \"debug\")")
             println("Sessions: ~/.atelier/sessions/ (persistent, auto-save after each turn)")
@@ -186,13 +194,13 @@ func resolveProviderFor(cfg: AgentConfig, reg: ProviderRegistry): Provider {
     }
 }
 
-func serve(handler: AtelierHttpHandler, port: String): Unit {
+func serve(handler: AtelierHttpHandler, host: String, port: String): Unit {
     let server = ServerBuilder()
-        .addr("0.0.0.0")
+        .addr(host)
         .port(UInt16(parseInt(port)))
         .build()
     handler.registerRoutes(server.distributor)
-    println("Atelier HTTP server listening on port " + port)
+    println("Atelier HTTP server listening on ${host}:${port}")
     server.serve()
 }
 

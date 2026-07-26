@@ -360,6 +360,187 @@ public struct AgentListResponse <: JsonSerializable {
     }
 }
 
+public struct DeleteAgentDTO <: JsonDeserializable<DeleteAgentDTO> {
+    public let name: String
+
+    public init(name: String) { this.name = name }
+
+    public static func fromJson(r: JsonReader): DeleteAgentDTO {
+        var name = ""
+        r.startObject()
+        while (r.peek() != EndObject) {
+            match (r.readName()) {
+                case "name" => name = r.readValue<String>()
+                case _ => r.skip()
+            }
+        }
+        r.endObject()
+        DeleteAgentDTO(name)
+    }
+}
+
+public struct AgentItem <: JsonSerializable {
+    public let name: String
+    public let model: String
+    public let systemPrompt: String
+
+    public init(name: String, model: String, systemPrompt: String) {
+        this.name = name; this.model = model; this.systemPrompt = systemPrompt
+    }
+
+    public func toJson(w: JsonWriter): Unit {
+        w.startObject()
+        w.writeName("name").writeValue(this.name)
+        w.writeName("model").writeValue(this.model)
+        w.writeName("systemPrompt").writeValue(this.systemPrompt)
+        w.endObject()
+    }
+}
+
+public struct AgentConfigListResponse <: JsonSerializable {
+    public let agents: ArrayList<AgentItem>
+
+    public init(agents: ArrayList<AgentItem>) { this.agents = agents }
+
+    public func toJson(w: JsonWriter): Unit {
+        w.startObject()
+        w.writeName("agents").writeValue(this.agents)
+        w.endObject()
+    }
+}
+
+// OpenAI /v1/chat/completions DTOs
+
+public struct ChatCompletionRequest <: JsonDeserializable<ChatCompletionRequest> {
+    public let model: String
+    public let messages: ArrayList<ChatCompletionMessage>
+    public let stream: Bool
+    public let temperature: Float64
+    public let maxTokens: Int64
+
+    public init(model: String, messages: ArrayList<ChatCompletionMessage>,
+        stream: Bool, temperature: Float64, maxTokens: Int64) {
+        this.model = model; this.messages = messages; this.stream = stream
+        this.temperature = temperature; this.maxTokens = maxTokens
+    }
+
+    public static func fromJson(r: JsonReader): ChatCompletionRequest {
+        var model = ""; var messages = ArrayList<ChatCompletionMessage>()
+        var stream = false; var temperature = Float64(0.7); var maxTokens = Int64(4096)
+        r.startObject()
+        while (r.peek() != EndObject) {
+            match (r.readName()) {
+                case "model" => model = r.readValue<String>()
+                case "messages" => messages = r.readValue<ArrayList<ChatCompletionMessage>>()
+                case "stream" => stream = r.readValue<Bool>()
+                case "temperature" => temperature = r.readValue<Float64>()
+                case "max_tokens" => maxTokens = r.readValue<Int64>()
+                case _ => r.skip()
+            }
+        }
+        r.endObject()
+        ChatCompletionRequest(model, messages, stream, temperature, maxTokens)
+    }
+}
+
+public struct ChatCompletionMessage <: JsonDeserializable<ChatCompletionMessage> {
+    public let role: String
+    public let content: String
+
+    public init(role: String, content: String) { this.role = role; this.content = content }
+
+    public static func fromJson(r: JsonReader): ChatCompletionMessage {
+        var role = ""; var content = ""
+        r.startObject()
+        while (r.peek() != EndObject) {
+            match (r.readName()) {
+                case "role" => role = r.readValue<String>()
+                case "content" => content = r.readValue<String>()
+                case _ => r.skip()
+            }
+        }
+        r.endObject()
+        ChatCompletionMessage(role, content)
+    }
+}
+
+public struct ChatCompletionResponse <: JsonSerializable {
+    public let id: String
+    public let object: String
+    public let created: Int64
+    public let model: String
+    public let choices: ArrayList<Choice>
+    public let usage: Usage
+
+    public init(id: String, object: String, created: Int64, model: String,
+        choices: ArrayList<Choice>, usage: Usage) {
+        this.id = id; this.object = object; this.created = created
+        this.model = model; this.choices = choices; this.usage = usage
+    }
+
+    public func toJson(w: JsonWriter): Unit {
+        w.startObject()
+        w.writeName("id").writeValue(this.id)
+        w.writeName("object").writeValue(this.object)
+        w.writeName("created").writeValue(this.created)
+        w.writeName("model").writeValue(this.model)
+        w.writeName("choices").writeValue(this.choices)
+        w.writeName("usage").writeValue(this.usage)
+        w.endObject()
+    }
+}
+
+public struct Choice <: JsonSerializable {
+    public let index: Int64
+    public let message: ChatCompletionResponseMessage
+    public let finishReason: String
+
+    public init(index: Int64, message: ChatCompletionResponseMessage, finishReason: String) {
+        this.index = index; this.message = message; this.finishReason = finishReason
+    }
+
+    public func toJson(w: JsonWriter): Unit {
+        w.startObject()
+        w.writeName("index").writeValue(this.index)
+        w.writeName("message").writeValue(this.message)
+        w.writeName("finish_reason").writeValue(this.finishReason)
+        w.endObject()
+    }
+}
+
+public struct ChatCompletionResponseMessage <: JsonSerializable {
+    public let role: String
+    public let content: String
+
+    public init(role: String, content: String) { this.role = role; this.content = content }
+
+    public func toJson(w: JsonWriter): Unit {
+        w.startObject()
+        w.writeName("role").writeValue(this.role)
+        w.writeName("content").writeValue(this.content)
+        w.endObject()
+    }
+}
+
+public struct Usage <: JsonSerializable {
+    public let promptTokens: Int64
+    public let completionTokens: Int64
+    public let totalTokens: Int64
+
+    public init(promptTokens: Int64, completionTokens: Int64, totalTokens: Int64) {
+        this.promptTokens = promptTokens; this.completionTokens = completionTokens
+        this.totalTokens = totalTokens
+    }
+
+    public func toJson(w: JsonWriter): Unit {
+        w.startObject()
+        w.writeName("prompt_tokens").writeValue(this.promptTokens)
+        w.writeName("completion_tokens").writeValue(this.completionTokens)
+        w.writeName("total_tokens").writeValue(this.totalTokens)
+        w.endObject()
+    }
+}
+
 public struct SessionInputDTO <: JsonDeserializable<SessionInputDTO> {
     public let sessionId: String
     public let answer: String

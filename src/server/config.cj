@@ -7,9 +7,55 @@ import std.collection.*
 import std.fs.*
 import std.env.*
 
+public struct StoreType {
+    public let name: String
+    public init(name: String) { this.name = name }
+}
+
+public struct TrustMode {
+    public let mode: String
+    public init(mode: String) { this.mode = mode }
+}
+
+public struct LogFormat {
+    public let format: String
+    public init(format: String) { this.format = format }
+}
+
+public struct RateLimit {
+    public let requestsPerMinute: Int64
+    public init(requestsPerMinute: Int64) { this.requestsPerMinute = requestsPerMinute }
+}
+
+public struct ServerConfig {
+    public let host: String
+    public let port: UInt16
+    public let sessionStore: String
+    public let sessionDir: String
+    public let authToken: Option<String>
+    public let trustMode: String
+    public let logLevel: String
+    public let logFormat: String
+    public let rateLimit: Option<Int64>
+
+    public init(host: String, port: UInt16, sessionStore: String, sessionDir: String,
+        authToken: Option<String>, trustMode: String, logLevel: String,
+        logFormat: String, rateLimit: Option<Int64>) {
+        this.host = host; this.port = port; this.sessionStore = sessionStore
+        this.sessionDir = sessionDir; this.authToken = authToken
+        this.trustMode = trustMode; this.logLevel = logLevel
+        this.logFormat = logFormat; this.rateLimit = rateLimit
+    }
+
+    public static func default(): ServerConfig {
+        ServerConfig("0.0.0.0", UInt16(8080), "bstorm", "", None, "ask", "", "text", None)
+    }
+}
+
 public class TomlConfig <: Serializable<TomlConfig> {
     public var agent: ArrayList<TomlAgent> = ArrayList()
     public var provider: ArrayList<TomlProvider> = ArrayList()
+    public var server: TomlServer = TomlServer()
     public var logging: TomlLogging = TomlLogging()
     public var mcpServer: ArrayList<TomlMcpServer> = ArrayList()
     public init() {}
@@ -18,6 +64,7 @@ public class TomlConfig <: Serializable<TomlConfig> {
         DataModelStruct()
             .add(field<ArrayList<TomlAgent>>("agent", this.agent))
             .add(field<ArrayList<TomlProvider>>("provider", this.provider))
+            .add(field<TomlServer>("server", this.server))
             .add(field<TomlLogging>("logging", this.logging))
             .add(field<ArrayList<TomlMcpServer>>("mcpServer", this.mcpServer))
     }
@@ -39,6 +86,10 @@ public class TomlConfig <: Serializable<TomlConfig> {
                 }
             case _ => ()
         }
+        match (dms.get("server")) {
+            case dm: DataModelStruct => r.server = TomlServer.deserialize(dm)
+            case _ => ()
+        }
         match (dms.get("logging")) {
             case dm: DataModelStruct => r.logging = TomlLogging.deserialize(dm)
             case _ => ()
@@ -51,6 +102,55 @@ public class TomlConfig <: Serializable<TomlConfig> {
             case _ => ()
         }
         r
+    }
+}
+
+public class TomlServer <: Serializable<TomlServer> {
+    public var host: String = "0.0.0.0"
+    public var port: Int64 = 8080
+    public var sessionStore: String = "bstorm"
+    public var sessionDir: String = ""
+    public var authToken: String = ""
+    public var trustMode: String = "ask"
+    public var logLevel: String = ""
+    public var logFormat: String = "text"
+    public var rateLimit: Int64 = 0
+    public init() {}
+
+    public func serialize(): DataModel {
+        DataModelStruct()
+            .add(field<String>("host", host))
+            .add(field<Int64>("port", port))
+            .add(field<String>("sessionStore", sessionStore))
+            .add(field<String>("sessionDir", sessionDir))
+            .add(field<String>("authToken", authToken))
+            .add(field<String>("trustMode", trustMode))
+            .add(field<String>("logLevel", logLevel))
+            .add(field<String>("logFormat", logFormat))
+            .add(field<Int64>("rateLimit", rateLimit))
+    }
+
+    public static func deserialize(dm: DataModel): TomlServer {
+        let dms = match (dm) { case s: DataModelStruct => s; case _ => return TomlServer() }
+        let r = TomlServer()
+        r.host = match (dms.get("host")) { case s: DataModelString => s.getValue(); case _ => "0.0.0.0" }
+        r.port = match (dms.get("port")) { case i: DataModelInt => i.getValue(); case _ => Int64(8080) }
+        r.sessionStore = match (dms.get("sessionStore")) { case s: DataModelString => s.getValue(); case _ => "bstorm" }
+        r.sessionDir = match (dms.get("sessionDir")) { case s: DataModelString => s.getValue(); case _ => "" }
+        r.authToken = match (dms.get("authToken")) { case s: DataModelString => s.getValue(); case _ => "" }
+        r.trustMode = match (dms.get("trustMode")) { case s: DataModelString => s.getValue(); case _ => "ask" }
+        r.logLevel = match (dms.get("logLevel")) { case s: DataModelString => s.getValue(); case _ => "" }
+        r.logFormat = match (dms.get("logFormat")) { case s: DataModelString => s.getValue(); case _ => "text" }
+        r.rateLimit = match (dms.get("rateLimit")) { case i: DataModelInt => i.getValue(); case _ => Int64(0) }
+        r
+    }
+
+    public func toServerConfig(): ServerConfig {
+        ServerConfig(
+            this.host, UInt16(this.port), this.sessionStore, this.sessionDir,
+            if (this.authToken == "") { None } else { Some(this.authToken) },
+            this.trustMode, this.logLevel, this.logFormat,
+            if (this.rateLimit > 0) { Some(this.rateLimit) } else { None })
     }
 }
 

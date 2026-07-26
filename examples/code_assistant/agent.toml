@@ -1,0 +1,11 @@
+[[agent]]
+name = "code-assistant"
+model = "gpt-4o"
+systemPrompt = "你是高级软件工程师，帮助用户编写、审查、调试代码。"
+description = "代码助手 - 编写、审查、调试代码"
+tools = ["read_file", "write_file", "edit_file", "bash", "grep", "glob"]
+skills = ["code_review", "debugging"]
+
+[[provider]]
+name = "default"
+baseURL = "https://api.openai.com/v1"

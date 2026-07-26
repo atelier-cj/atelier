@@ -41,6 +41,7 @@ public class AtelierHttpHandler {
     public func registerRoutes(distributor: HttpRequestDistributor): Unit {
         let h = this
         distributor.register("/agent/config", { ctx => h.handleAgentConfig(ctx) })
+        distributor.register("/agent/configs", { ctx => h.handleAgentConfigs(ctx) })
         distributor.register("/agent/run", { ctx => h.handleAgentRun(ctx) })
         distributor.register("/agent/stream", { ctx => h.handleAgentStream(ctx) })
         distributor.register("/agent/input", { ctx => h.handleAgentInput(ctx) })
@@ -51,6 +52,7 @@ public class AtelierHttpHandler {
         distributor.register("/sessions", { ctx => h.handleSessionList(ctx) })
         distributor.register("/trust", { ctx => h.handleTrust(ctx) })
         distributor.register("/health", { ctx => h.handleHealth(ctx) })
+        distributor.register("/v1/chat/completions", { ctx => h.handleV1Chat(ctx) })
     }
 
     private func handleAgentConfig(ctx: HttpContext): Unit {
@@ -71,8 +73,27 @@ public class AtelierHttpHandler {
                 } catch (e: Exception) {
                     jsonResponse(ctx, 409, toJsonString(ErrorResponse(e.message)))
                 }
+            case "DELETE" =>
+                let dto = try { readJson<DeleteAgentDTO>(ctx) } catch (_) {
+                    jsonResponse(ctx, 400, toJsonString(ErrorResponse("invalid JSON"))); return
+                }
+                let deleted = this.agentRegistry.delete(dto.name)
+                if (deleted) {
+                    jsonResponse(ctx, 200, toJsonString(StatusResponse("deleted")))
+                } else {
+                    jsonResponse(ctx, 404, toJsonString(ErrorResponse("agent not found: " + dto.name)))
+                }
             case _ => jsonResponse(ctx, 405, toJsonString(ErrorResponse("method not allowed")))
         }
+    }
+
+    private func handleAgentConfigs(ctx: HttpContext): Unit {
+        let agents = this.agentRegistry.list()
+        let items = ArrayList<AgentItem>()
+        for ((k, v) in agents) {
+            items.add(AgentItem(k, v.model, v.systemPrompt))
+        }
+        jsonResponse(ctx, 200, toJsonString(AgentConfigListResponse(items)))
     }
 
     private func handleAgentRun(ctx: HttpContext): Unit {
@@ -269,6 +290,99 @@ public class AtelierHttpHandler {
 
     private func handleHealth(ctx: HttpContext): Unit {
         jsonResponse(ctx, 200, toJsonString(StatusResponse("ok")))
+    }
+
+    private func handleV1Chat(ctx: HttpContext): Unit {
+        let dto = try { readJson<ChatCompletionRequest>(ctx) } catch (_) {
+            jsonResponse(ctx, 400, toJsonString(ErrorResponse("invalid JSON"))); return
+        }
+
+        // Resolve agent: try model name as agent name, else use default
+        let agentName = if (this.agentRegistry.has(dto.model)) { dto.model } else { "default" }
+        let agentCfg = match (this.agentRegistry.get(agentName)) {
+            case Some(c) => c
+            case None =>
+                jsonResponse(ctx, 404, toJsonString(ErrorResponse("model not found: " + dto.model)))
+                return
+        }
+
+        // Convert messages
+        let msgs = ArrayList<Message>()
+        for (m in dto.messages) {
+            match (m.role) {
+                case "user" => msgs.add(UserMessage(ContentList.ofText(m.content), 0))
+                case "assistant" => msgs.add(AssistantMessage(ContentList.ofText(m.content), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0))
+                case "system" =>
+                    // Prepend system message as user message with system prefix
+                    msgs.add(UserMessage(ContentList.ofText("[System]: " + m.content), 0))
+                case _ => ()
+            }
+        }
+
+        let provider = resolveProvider(agentCfg.model)
+        let runtime = AgentRuntime(agentCfg, provider, this.toolRegistry,
+            this.sessionStore, this.trustManager, this.skillRegistry,
+            this.agentRegistry, this.providerRegistry, ArrayList<Hook>(),
+            { q => "[User input not available]" })
+
+        if (dto.stream) {
+            doV1ChatStream(ctx, runtime, msgs, dto.model)
+        } else {
+            doV1ChatSync(ctx, runtime, msgs, dto.model)
+        }
+    }
+
+    private func doV1ChatSync(ctx: HttpContext, runtime: AgentRuntime,
+        msgs: ArrayList<Message>, model: String): Unit {
+        let eventStream = runtime.chat(msgs)
+        let result = eventStream.result()
+        let lastText = lastAssistantText(result)
+        let resp = ChatCompletionResponse(
+            "chatcmpl-" + Int64(0).toString(),
+            "chat.completion",
+            Int64(0),
+            model,
+            ArrayList<Choice>([Choice(0,
+                ChatCompletionResponseMessage("assistant", lastText),
+                "stop")]),
+            Usage(0, 0, 0))
+        jsonResponse(ctx, 200, toJsonString(resp))
+    }
+
+    private func doV1ChatStream(ctx: HttpContext, runtime: AgentRuntime,
+        msgs: ArrayList<Message>, model: String): Unit {
+        let b = ctx.responseBuilder
+        b.status(UInt16(200))
+        b.header("content-type", "text/event-stream")
+        b.header("cache-control", "no-cache")
+        b.header("connection", "keep-alive")
+        b.header("transfer-encoding", "chunked")
+
+        let writer = HttpResponseWriter(ctx)
+        let eventStream = runtime.chat(msgs)
+        let id = "chatcmpl-" + Int64(0).toString()
+        var done = false
+        try {
+            while (!done) {
+                match (eventStream.receive(30 * Duration.second)) {
+                    case Some(ev) =>
+                        match (ev) {
+                            case upd: MessageUpdateEvent =>
+                                if (upd.delta != "") {
+                                    let chunk = "{\"id\":\"" + id + "\",\"object\":\"chat.completion.chunk\",\"created\":0,\"model\":\"" + model + "\",\"choices\":[{\"delta\":{\"content\":\"" + escapeJson(upd.delta) + "\"},\"index\":0}]}"
+                                    writer.write(("data: " + chunk + "\n\n").toArray())
+                                }
+                            case _: AgentEndEvent =>
+                                let finish = "{\"id\":\"" + id + "\",\"object\":\"chat.completion.chunk\",\"created\":0,\"model\":\"" + model + "\",\"choices\":[{\"delta\":{},\"index\":0,\"finish_reason\":\"stop\"}]}"
+                                writer.write(("data: " + finish + "\n\n").toArray())
+                                writer.write("data: [DONE]\n\n".toArray())
+                                done = true
+                            case _ => ()
+                        }
+                    case None => done = true
+                }
+            }
+        } catch (_) { () }
     }
 
     private func handleAgentInput(ctx: HttpContext): Unit {

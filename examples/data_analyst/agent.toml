@@ -1,0 +1,18 @@
+[[agent]]
+name = "data-analyst"
+model = "gpt-4o"
+systemPrompt = """
+你是一个数据分析专家。你可以使用 SQL 查询数据库，
+使用 Python 分析数据，并生成可视化图表。
+"""
+description = "数据分析助手 - 查询数据库、分析数据、生成图表"
+tools = ["sql_executor", "python_runner", "chart_renderer"]
+skills = ["data_cleaning", "outlier_detection"]
+
+[[provider]]
+name = "default"
+baseURL = "https://api.openai.com/v1"
+# apiKey = "${OPENAI_API_KEY}"
+
+[logging]
+level = "info"

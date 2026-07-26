@@ -1,0 +1,10 @@
+[[agent]]
+name = "customer-service"
+model = "gpt-4o"
+systemPrompt = "你是公司产品的客服，回答用户问题。用友好、专业的语气回复。"
+description = "智能客服助手 - 回答产品咨询、处理售后问题"
+tools = ["knowledge_search", "ticket_create", "order_query"]
+
+[[provider]]
+name = "default"
+baseURL = "https://api.openai.com/v1"
