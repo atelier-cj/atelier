@@ -106,6 +106,31 @@ func extractText(msgs: ArrayList<Message>): String {
 }
 ```
 
+### 多会话支持
+
+`AgentRuntime` 是**无状态**的——它不持有会话数据，每次 `chat()` 从入参 `messages` 读取历史：
+
+```cangjie
+// 全局一个 runtime 实例
+let runtime = AgentRuntime(config, provider, toolReg, sessionStore, ...)
+
+// 用户 A 的会话
+let msgsA = sessionStore.load("session_a")
+msgsA.add(UserMessage(ContentList.ofText("你好"), 0))
+let newA = runtime.chat(msgsA).result()
+sessionStore.save("session_a", header, newA)
+
+// 用户 B 的会话，同一 runtime，完全隔离
+let msgsB = sessionStore.load("session_b")
+msgsB.add(UserMessage(ContentList.ofText("查订单"), 0))
+let newB = runtime.chat(msgsB).result()
+sessionStore.save("session_b", header, newB)
+```
+
+- **不缓存 runtime**：每次 `chat()` 新建或复用均可，构造开销只有 O(1)
+- **不存 Map<sessionId, runtime>**：runtime 无状态，不需要按会话缓存
+- **会话在 store 里**：`SessionStore` 负责持久化，库集成方只需 `load → append → chat → save`
+
 ### 订阅事件
 
 EventStream 让你在获取结果的同时消费中间事件：
