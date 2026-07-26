@@ -215,6 +215,18 @@ public class REPL {
             }
             this.sessionId = targetId
             println("Switched to session: " + targetId + "  Messages: " + this.messages.size.toString())
+            // Display conversation history
+            for (m in this.messages) {
+                match (m) {
+                    case um: UserMessage =>
+                        let text = textFromContent(um.content)
+                        if (text != "") { println("> " + text) }
+                    case am: AssistantMessage =>
+                        let text = textFromContent(am.content)
+                        if (text != "") { println(text + "\n") }
+                    case _ => ()
+                }
+            }
         } else {
             println("Usage: /session          Show current session")
             println("       /session new      Create new session")
@@ -253,14 +265,18 @@ func lastAssistantText(msgs: ArrayList<Message>): String {
     while (i >= 0) {
         match (msgs[Int64(i)]) {
             case am: AssistantMessage =>
-                var r = ""
-                for (b in am.content.blocks()) {
-                    match (b) { case ContentBlock.TextBlock(t) => r = r + t; case _ => () }
-                }
-                return r
+                return textFromContent(am.content)
             case _ => ()
         }
         i--
     }
     ""
+}
+
+func textFromContent(cl: ContentList): String {
+    var r = ""
+    for (b in cl.blocks()) {
+        match (b) { case ContentBlock.TextBlock(t) => r = r + t; case _ => () }
+    }
+    r
 }
