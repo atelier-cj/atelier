@@ -72,6 +72,14 @@ public class REPL {
                 handleSessionCommand(line)
                 return
             }
+            if (line == "/tools") {
+                handleToolsCommand()
+                return
+            }
+            if (line.startsWith("/model")) {
+                handleModelCommand(line)
+                return
+            }
             match (this.registry.dispatch(line)) {
                 case Some("exit") => this.running = false
                 case Some(msg) => println(msg)
@@ -150,6 +158,28 @@ public class REPL {
             println("       /session new      Create new session")
             println("       /session list     List all sessions")
             println("       /session switch <id>  Switch to session")
+        }
+    }
+
+    private func handleToolsCommand(): Unit {
+        let runtime = this.runtimeFactory(this.agentName)
+        let tools = runtime.toolNames()
+        if (tools.size == 0) {
+            println("No tools configured for agent: " + this.agentName)
+        } else {
+            println("Tools (" + tools.size.toString() + "):")
+            for (t in tools) {
+                println("  - " + t)
+            }
+        }
+    }
+
+    private func handleModelCommand(line: String): Unit {
+        let parts = line.split(" ")
+        if (parts.size == 1) {
+            println("Model switching is not supported at runtime. Configure model in ~/.atelier.toml")
+        } else {
+            println("Model switching is not supported at runtime. Edit ~/.atelier.toml to change model")
         }
     }
 }

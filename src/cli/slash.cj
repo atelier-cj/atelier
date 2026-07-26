@@ -13,11 +13,7 @@ public class SlashCommandRegistry {
     public init(trustManager: TrustManager) {
         this.trustManager = trustManager
         register("help", "Show this help message", { args => showHelp(this) })
-        register("model", "Show or change the current model", { args =>
-            if (args.size == 0) { "Current model: (use /model <name> to change)" }
-            else { "Model changed to: " + args[0] }
-        })
-        register("tools", "List available tools", { args => "(tool list)" })
+        register("clear", "Clear conversation history", { args => "Conversation cleared" })
         register("trust", "Trust a directory: /trust <path>. Parallel(read-only) tools always allowed, sequential(side-effect) tools need trust.", { args =>
             if (args.size == 0) { "Usage: /trust <directory-path>" }
             else {

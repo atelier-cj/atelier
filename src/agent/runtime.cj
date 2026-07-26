@@ -244,6 +244,10 @@ public class AgentRuntime {
         stream
     }
 
+    public func toolNames(): ArrayList<String> {
+        this.config.tools
+    }
+
     private func pickModel(m: String): String {
         if (m != "") { return m }
         let envModel = match (getVariable("OPENAI_MODEL")) { case Some(v) => v; case None => "" }
