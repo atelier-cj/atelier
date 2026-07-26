@@ -964,7 +964,7 @@ interface AgentHooks {
 - [x] 信任闸门（Trust Gate）
 - [x] AgentConfig 定义 + 代码方式构建
 - [x] SchemaBuilder（替代手写 HashMap 造 JSON Schema）
-- [x] 配套单元测试（91 测试）
+- [x] 配套单元测试（116+ 测试）
 
 ### Phase 2：HTTP 服务 + 动态配置
 
@@ -984,8 +984,8 @@ interface AgentHooks {
 - [x] 上下文压缩接入运行时（afterTurn 时自动摘要）
 - [x] 会话持久化（StormSessionStore ≈ 存储 ~/.atelier/sessions/）
 - [x] REPL 会话管理（/session new/list/switch）
-- [ ] Anthropic Provider 扩展
-- [ ] Ollama Provider 扩展
+- [x] Anthropic Provider 扩展（兼容 DeepSeek Anthropic API）
+- [x] Ollama Provider 扩展（sync + streaming + 工具调用）
 
 ### Phase 3：Skill 系统 + CLI
 
@@ -1003,11 +1003,11 @@ interface AgentHooks {
 - [ ] 包管理器（安装/卸载 Skills/Tools）
 - [x] HTTP 信任管理端点（`/trust` POST，支持 get/set/reset）
 - [x] HTTP 会话管理端点（`/sessions` 列表 + `/session/fork` 克隆）
-- [ ] 信任提示/申请流程（被拦截时向用户请求批准）
-- [ ] 用户交互工具
-  - [ ] `ask_user` 内置工具：AI 主动向用户提问，runtime 暂停等待回答
-  - [ ] REPL 交互支持（暂停 → 显示问题 → 获取输入 → 恢复）
-  - [ ] HTTP 端点支持（poll/push 模式获取用户回答）
+- [x] 信任提示/申请流程（TrustDecision 三态 + ask_user 三选）
+- [x] 用户交互工具
+  - [x] `ask_user` 内置工具：AI 主动向用户提问，runtime 暂停等待回答
+  - [x] REPL 交互支持（暂停 → 显示问题 → 获取输入 → 恢复）
+  - [x] HTTP 端点支持（SSE `user_input_request` 事件 + `/agent/input` 端点）
 
 ---
 
