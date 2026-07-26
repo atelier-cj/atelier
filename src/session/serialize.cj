@@ -1,97 +1,121 @@
 package atelier.session
 
 import atelier.message.*
-import jsonvalue.*
+import stdx.encoding.json.stream.*
+import std.io.ByteBuffer
 import std.collection.*
 
 public func entriesToJson(entries: ArrayList<Entry>): String {
-    let arr = ArrayList<JsonValue>()
+    let buf = ByteBuffer()
+    let w = JsonWriter(buf)
+    w.startArray()
     for (e in entries) {
-        let obj = HashMap<String, JsonValue>()
-        obj.add("id", JsonValue.String(e.id))
+        w.startObject()
+        w.writeName("id").writeValue(e.id)
         match (e.parentId) {
-            case Some(p) => obj.add("parentId", JsonValue.String(p))
+            case Some(p) => w.writeName("parentId").writeValue(p)
             case None => ()
         }
-        obj.add("timestamp", JsonValue.Number(Float64(e.timestamp)))
-        obj.add("message", messageToJson(e.message))
-        arr.add(JsonValue.Map(obj))
+        w.writeName("timestamp").writeValue(e.timestamp)
+        w.writeName("message")
+        writeMessage(w, e.message)
+        w.endObject()
     }
-    JsonValue.Array(arr).stringify()
+    w.endArray()
+    w.flush()
+    String.fromUtf8(buf.bytes())
 }
 
 public func entriesFromJson(json: String): ArrayList<Entry> {
-    let v = try { JsonValue.parse(json) } catch (_) { return ArrayList<Entry>() }
-    let arr = match (v) { case JsonValue.Array(a) => a; case _ => return ArrayList<Entry>() }
+    let buf = ByteBuffer(json.toArray())
+    let r = JsonReader(buf)
     let result = ArrayList<Entry>()
-    for (item in arr) {
-        let obj = match (item) { case JsonValue.Map(m) => m; case _ => continue }
-        let id = match (obj.get("id")) { case Some(JsonValue.String(s)) => s; case _ => continue }
-        let parentId: Option<String> = match (obj.get("parentId")) {
-            case Some(JsonValue.String(s)) => Some(s)
-            case _ => None
+    try {
+        r.startArray()
+        while (r.peek() != EndArray) {
+            var id = ""; var parentId: Option<String> = None; var ts = Int64(0); var msg = Option<Message>.None
+            r.startObject()
+            while (r.peek() != EndObject) {
+                match (r.readName()) {
+                    case "id" => id = r.readValue<String>()
+                    case "parentId" => parentId = r.readValue<Option<String>>()
+                    case "timestamp" => ts = r.readValue<Int64>()
+                    case "message" => msg = readMessage(r)
+                    case _ => r.skip()
+                }
+            }
+            r.endObject()
+            if (id != "") {
+                match (msg) {
+                    case Some(m) => result.add(Entry(id, parentId, ts, m))
+                    case None => ()
+                }
+            }
         }
-        let ts = match (obj.get("timestamp")) { case Some(JsonValue.Number(n)) => Int64(n); case _ => 0 }
-        let msg = match (obj.get("message")) { case Some(m) => messageFromJson(m); case _ => continue }
-        result.add(Entry(id, parentId, ts, msg))
-    }
+        r.endArray()
+    } catch (_) { () }
     result
 }
 
-func messageToJson(m: Message): JsonValue {
-    let obj = HashMap<String, JsonValue>()
+func writeMessage(w: JsonWriter, m: Message): Unit {
+    w.startObject()
     match (m) {
         case um: UserMessage =>
-            obj.add("role", JsonValue.String("user"))
-            obj.add("content", JsonValue.String(textFrom(um.content)))
-            obj.add("timestamp", JsonValue.Number(Float64(um.timestamp)))
+            w.writeName("role").writeValue("user")
+            w.writeName("content").writeValue(textFrom(um.content))
+            w.writeName("timestamp").writeValue(um.timestamp)
         case am: AssistantMessage =>
-            obj.add("role", JsonValue.String("assistant"))
-            obj.add("content", JsonValue.String(textFrom(am.content)))
-            obj.add("model", JsonValue.String(am.model))
-            obj.add("timestamp", JsonValue.Number(Float64(am.timestamp)))
+            w.writeName("role").writeValue("assistant")
+            w.writeName("content").writeValue(textFrom(am.content))
+            w.writeName("model").writeValue(am.model)
+            w.writeName("timestamp").writeValue(am.timestamp)
         case tm: ToolResultMessage =>
-            obj.add("role", JsonValue.String("tool"))
-            obj.add("content", JsonValue.String(textFrom(tm.content)))
-            obj.add("toolCallId", JsonValue.String(tm.toolCallId))
-            obj.add("toolName", JsonValue.String(tm.toolName))
-            obj.add("isError", JsonValue.Boolean(tm.isError))
-            obj.add("timestamp", JsonValue.Number(Float64(tm.timestamp)))
+            w.writeName("role").writeValue("tool")
+            w.writeName("content").writeValue(textFrom(tm.content))
+            w.writeName("toolCallId").writeValue(tm.toolCallId)
+            w.writeName("toolName").writeValue(tm.toolName)
+            w.writeName("isError").writeValue(tm.isError)
+            w.writeName("timestamp").writeValue(tm.timestamp)
         case cm: CompactionMessage =>
-            obj.add("role", JsonValue.String("compaction"))
-            obj.add("summary", JsonValue.String(cm.summary))
-            obj.add("tokensBefore", JsonValue.Number(Float64(cm.tokensBefore)))
-            obj.add("timestamp", JsonValue.Number(Float64(cm.timestamp)))
+            w.writeName("role").writeValue("compaction")
+            w.writeName("summary").writeValue(cm.summary)
+            w.writeName("tokensBefore").writeValue(cm.tokensBefore)
+            w.writeName("timestamp").writeValue(cm.timestamp)
         case _ => ()
     }
-    JsonValue.Map(obj)
+    w.endObject()
 }
 
-func messageFromJson(v: JsonValue): Message {
-    let obj = match (v) { case JsonValue.Map(m) => m; case _ => return defaultMsg() }
-    let role = match (obj.get("role")) { case Some(JsonValue.String(s)) => s; case _ => "user" }
-    let content = match (obj.get("content")) { case Some(JsonValue.String(s)) => s; case _ => "" }
-    let ts = match (obj.get("timestamp")) { case Some(JsonValue.Number(n)) => Int64(n); case _ => 0 }
+func readMessage(r: JsonReader): Message {
+    var role = ""; var content = ""; var ts = Int64(0)
+    var model = ""
+    var toolCallId = ""; var toolName = ""; var isError = false
+    var summary = ""; var tokensBefore = Int64(0)
+    try {
+        r.startObject()
+        while (r.peek() != EndObject) {
+            match (r.readName()) {
+                case "role" => role = r.readValue<String>()
+                case "content" => content = r.readValue<String>()
+                case "timestamp" => ts = r.readValue<Int64>()
+                case "model" => model = r.readValue<String>()
+                case "toolCallId" => toolCallId = r.readValue<String>()
+                case "toolName" => toolName = r.readValue<String>()
+                case "isError" => isError = r.readValue<Bool>()
+                case "summary" => summary = r.readValue<String>()
+                case "tokensBefore" => tokensBefore = r.readValue<Int64>()
+                case _ => r.skip()
+            }
+        }
+        r.endObject()
+    } catch (_) { () }
     match (role) {
         case "user" => UserMessage(ContentList.ofText(content), ts)
-        case "assistant" =>
-            let model: String = match (obj.get("model")) { case Some(JsonValue.String(s)) => s; case _ => "" }
-            AssistantMessage(ContentList.ofText(content), model, "", StopReason.EndTurn, TokenUsage(0, 0), ts)
-        case "tool" =>
-            let tid: String = match (obj.get("toolCallId")) { case Some(JsonValue.String(s)) => s; case _ => "" }
-            let tn: String = match (obj.get("toolName")) { case Some(JsonValue.String(s)) => s; case _ => "" }
-            let isErr: Bool = match (obj.get("isError")) { case Some(JsonValue.Boolean(b)) => b; case _ => false }
-            ToolResultMessage(tid, tn, ContentList.ofText(content), isErr, ts)
-        case "compaction" =>
-            let summary: String = match (obj.get("summary")) { case Some(JsonValue.String(s)) => s; case _ => "" }
-            let tb: Int64 = match (obj.get("tokensBefore")) { case Some(JsonValue.Number(n)) => Int64(n); case _ => 0 }
-            CompactionMessage(summary, tb, ts)
+        case "assistant" => AssistantMessage(ContentList.ofText(content), model, "", StopReason.EndTurn, TokenUsage(0, 0), ts)
+        case "tool" => ToolResultMessage(toolCallId, toolName, ContentList.ofText(content), isError, ts)
+        case "compaction" => CompactionMessage(summary, tokensBefore, ts)
         case _ => UserMessage(ContentList.ofText(content), ts)
     }
-}
-
-func defaultMsg(): Message {
-    UserMessage(ContentList.ofText(""), 0)
 }
 
 func textFrom(cl: ContentList): String {
