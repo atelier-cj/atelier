@@ -1,7 +1,24 @@
 package atelier.provider
 
 import atelier.message.*
+import jsonvalue.*
 import std.collection.*
+
+@Test
+func ollama_toolCall() {
+    let provider = OllamaProvider("test-ollama", "http://192.168.3.6:11434")
+    let msgs = ArrayList<Message>()
+    msgs.add(UserMessage(ContentList.ofText("Run ls /tmp"), 0))
+    let tools = ArrayList<OpenAITool>()
+    tools.add(OpenAITool("bash", "Run shell commands", JsonValue.Map(HashMap<String, JsonValue>())))
+    let req = ChatRequest("qwen3.5:2b", msgs, 0.7, 200, None, tools)
+    let resp = provider.chat(req)
+    let isToolUse = match (resp.message.stopReason) { case StopReason.ToolUse => true; case _ => false }
+    @Expect(isToolUse, true)
+    let tcs = resp.message.toolCalls()
+    @Expect(tcs.size > 0, true)
+    @Expect(tcs[0].name, "bash")
+}
 
 @Test
 func ollama_syncChat() {
@@ -22,7 +39,7 @@ func ollama_streamingChat() {
     let stream = provider.chatStreaming(req)
     var deltaCount: Int64 = 0
     while (true) {
-        match (stream.receive(30 * Duration.second)) {
+        match (stream.receive(60 * Duration.second)) {
             case Some(delta) =>
                 deltaCount++
                 match (delta.finishReason) {
