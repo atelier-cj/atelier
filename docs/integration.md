@@ -106,6 +106,180 @@ func extractText(msgs: ArrayList<Message>): String {
 }
 ```
 
+## 场景二：挂载到既有 HTTP 服务
+
+适合已有仓颉 HTTP 服务的项目，不占独立端口。
+
+### 步骤
+
+```cangjie
+import atelier.server.*
+import atelier.agent.*
+import atelier.tool.*
+import atelier.tool.builtin.*
+import atelier.session.*
+import atelier.trust.*
+import atelier.skill.*
+import stdx.net.http.*
+
+main() {
+    // 1. 准备 Atelier 组件
+    let toolReg = ToolRegistry()
+    toolReg.register(ReadFileTool())
+    toolReg.register(BashTool())
+
+    let agentReg = AgentRegistry()
+    let sessionStore = MemorySessionStore()
+    let trustMgr = TrustManager()
+    let skillReg = SkillRegistry()
+
+    // 2. 创建 Handler
+    let atelier = AtelierHttpHandler(
+        agentReg, toolReg, sessionStore, trustMgr, skillReg)
+
+    // 3. 创建你的 HTTP 服务
+    let server = ServerBuilder()
+        .addr("0.0.0.0")
+        .port(8080)
+        .build()
+
+    // 4. 挂载 Atelier 路由
+    atelier.registerRoutes(server.distributor)
+
+    // 5. 还可以加你自己的路由
+    server.distributor.register("/health", { ctx =>
+        let b = ctx.responseBuilder
+        b.status(200)
+        b.body("ok")
+    })
+
+    server.serve()
+}
+```
+
+### 注册的路由
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET/POST/DELETE | `/agent/config` | Agent 配置管理 |
+| GET | `/agent/configs` | 列举 Agent 配置详情 |
+| POST | `/agent/run` | 同步运行 |
+| GET | `/agent/stream` | SSE 流式运行 |
+| POST | `/agent/input` | ask_user 交互输入 |
+| POST | `/session/save` | 保存会话 |
+| POST | `/session/load` | 加载会话 |
+| POST | `/session/fork` | 克隆会话 |
+| POST | `/session/export` | 导出会话（JSONL/HTML） |
+| GET | `/sessions` | 会话列表 |
+| POST | `/trust` | 信任管理 |
+| POST | `/v1/chat/completions` | OpenAI 兼容 API |
+| GET | `/health` | 健康检查 |
+
+---
+
+## 场景三：独立 HTTP 服务
+
+一行命令启动，适合快速部署。
+
+```bash
+# 使用默认端口 8080
+atelier serve
+
+# 指定端口
+atelier serve 9000
+
+# 配置 ~/.atelier.toml 控制服务行为
+```
+
+配置示例 `~/.atelier.toml`：
+
+```toml
+[server]
+host = "0.0.0.0"
+port = 8080
+sessionDir = "/var/lib/atelier/sessions"
+logLevel = "info"
+trustMode = "ask"
+
+[[provider]]
+name = "default"
+baseURL = "https://api.openai.com/v1"
+apiKey = "${OPENAI_API_KEY}"
+
+[[agent]]
+name = "assistant"
+model = "gpt-4o"
+systemPrompt = "你是一个有用的助手"
+tools = ["bash", "read_file", "grep", "glob"]
+```
+
+---
+
+## 场景四：CLI 交互
+
+适合开发调试和一次性任务。
+
+### REPL 交互
+
+```bash
+# 启动 REPL（默认 agent）
+atelier repl
+
+# 指定 agent
+atelier repl my-assistant
+
+# 恢复之前会话
+atelier repl my-assistant sess_abc123
+```
+
+REPL 内支持斜杠命令：
+
+| 命令 | 说明 |
+|------|------|
+| `/help` | 帮助 |
+| `/model <name>` | 切换模型 |
+| `/tools` | 列出可用工具 |
+| `/session new` | 新建会话 |
+| `/session list` | 列出会话 |
+| `/session switch <id>` | 切换会话 |
+| `/session export <id> html` | 导出回放 |
+| `/trust <path>` | 信任目录 |
+| `/untrust <path>` | 取消信任 |
+| `/clear` | 清屏 |
+| `/exit` | 退出 |
+
+### 单次执行
+
+```bash
+# 使用默认 agent
+atelier run "分析这个日志文件"
+
+# 指定 agent
+atelier run code-assistant "给这个函数加注释"
+```
+
+---
+
+## 场景五：Docker 部署
+
+```dockerfile
+FROM cangjie:latest AS build
+WORKDIR /app
+COPY . .
+RUN cjpm build -j 16
+
+FROM cangjie:latest
+COPY --from=build /app/target/release/atelier /usr/local/bin/
+COPY atelier.toml /root/.atelier.toml
+EXPOSE 8080
+CMD ["atelier", "serve", "8080"]
+```
+
+```bash
+docker build -t atelier .
+docker run -e OPENAI_API_KEY=sk-xxx -p 8080:8080 atelier
+```
+
 ## 场景六：用 Atelier 构建 LLM Wiki
 
 LLM Wiki 是一个知识库问答系统——用户提问，AI 检索知识库后回答。用 Atelier 库模式实现，代码量很少。
@@ -355,177 +529,3 @@ AgentRuntime 的构造参数即依赖注入点：
 | `askUser` | `AskUserFn` | 用户交互回调（可选），默认返回空字符串 |
 
 ---
-
-## 场景二：挂载到既有 HTTP 服务
-
-适合已有仓颉 HTTP 服务的项目，不占独立端口。
-
-### 步骤
-
-```cangjie
-import atelier.server.*
-import atelier.agent.*
-import atelier.tool.*
-import atelier.tool.builtin.*
-import atelier.session.*
-import atelier.trust.*
-import atelier.skill.*
-import stdx.net.http.*
-
-main() {
-    // 1. 准备 Atelier 组件
-    let toolReg = ToolRegistry()
-    toolReg.register(ReadFileTool())
-    toolReg.register(BashTool())
-
-    let agentReg = AgentRegistry()
-    let sessionStore = MemorySessionStore()
-    let trustMgr = TrustManager()
-    let skillReg = SkillRegistry()
-
-    // 2. 创建 Handler
-    let atelier = AtelierHttpHandler(
-        agentReg, toolReg, sessionStore, trustMgr, skillReg)
-
-    // 3. 创建你的 HTTP 服务
-    let server = ServerBuilder()
-        .addr("0.0.0.0")
-        .port(8080)
-        .build()
-
-    // 4. 挂载 Atelier 路由
-    atelier.registerRoutes(server.distributor)
-
-    // 5. 还可以加你自己的路由
-    server.distributor.register("/health", { ctx =>
-        let b = ctx.responseBuilder
-        b.status(200)
-        b.body("ok")
-    })
-
-    server.serve()
-}
-```
-
-### 注册的路由
-
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| GET/POST/DELETE | `/agent/config` | Agent 配置管理 |
-| GET | `/agent/configs` | 列举 Agent 配置详情 |
-| POST | `/agent/run` | 同步运行 |
-| GET | `/agent/stream` | SSE 流式运行 |
-| POST | `/agent/input` | ask_user 交互输入 |
-| POST | `/session/save` | 保存会话 |
-| POST | `/session/load` | 加载会话 |
-| POST | `/session/fork` | 克隆会话 |
-| POST | `/session/export` | 导出会话（JSONL/HTML） |
-| GET | `/sessions` | 会话列表 |
-| POST | `/trust` | 信任管理 |
-| POST | `/v1/chat/completions` | OpenAI 兼容 API |
-| GET | `/health` | 健康检查 |
-
----
-
-## 场景三：独立 HTTP 服务
-
-一行命令启动，适合快速部署。
-
-```bash
-# 使用默认端口 8080
-atelier serve
-
-# 指定端口
-atelier serve 9000
-
-# 配置 ~/.atelier.toml 控制服务行为
-```
-
-配置示例 `~/.atelier.toml`：
-
-```toml
-[server]
-host = "0.0.0.0"
-port = 8080
-sessionDir = "/var/lib/atelier/sessions"
-logLevel = "info"
-trustMode = "ask"
-
-[[provider]]
-name = "default"
-baseURL = "https://api.openai.com/v1"
-apiKey = "${OPENAI_API_KEY}"
-
-[[agent]]
-name = "assistant"
-model = "gpt-4o"
-systemPrompt = "你是一个有用的助手"
-tools = ["bash", "read_file", "grep", "glob"]
-```
-
----
-
-## 场景四：CLI 交互
-
-适合开发调试和一次性任务。
-
-### REPL 交互
-
-```bash
-# 启动 REPL（默认 agent）
-atelier repl
-
-# 指定 agent
-atelier repl my-assistant
-
-# 恢复之前会话
-atelier repl my-assistant sess_abc123
-```
-
-REPL 内支持斜杠命令：
-
-| 命令 | 说明 |
-|------|------|
-| `/help` | 帮助 |
-| `/model <name>` | 切换模型 |
-| `/tools` | 列出可用工具 |
-| `/session new` | 新建会话 |
-| `/session list` | 列出会话 |
-| `/session switch <id>` | 切换会话 |
-| `/session export <id> html` | 导出回放 |
-| `/trust <path>` | 信任目录 |
-| `/untrust <path>` | 取消信任 |
-| `/clear` | 清屏 |
-| `/exit` | 退出 |
-
-### 单次执行
-
-```bash
-# 使用默认 agent
-atelier run "分析这个日志文件"
-
-# 指定 agent
-atelier run code-assistant "给这个函数加注释"
-```
-
----
-
-## 场景五：Docker 部署
-
-```dockerfile
-FROM cangjie:latest AS build
-WORKDIR /app
-COPY . .
-RUN cjpm build -j 16
-
-FROM cangjie:latest
-COPY --from=build /app/target/release/atelier /usr/local/bin/
-COPY atelier.toml /root/.atelier.toml
-EXPOSE 8080
-CMD ["atelier", "serve", "8080"]
-```
-
-```bash
-docker build -t atelier .
-docker run -e OPENAI_API_KEY=sk-xxx -p 8080:8080 atelier
-```
