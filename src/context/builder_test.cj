@@ -5,6 +5,7 @@ import atelier.provider.*
 import atelier.session.*
 import atelier.skill.*
 import atelier.tool.*
+import jsonvalue.*
 import std.collection.*
 import std.fs.*
 
@@ -337,4 +338,97 @@ func ctxBuilder_skillCatalogInSystemMessage() {
             }
         case _ => @Expect(false, true)
     }
+}
+
+func archivedPair(msgs: ArrayList<Message>, start: Int64, end: Int64, summary: String): Unit {
+    let args = HashMap<String, JsonValue>()
+    args["start_index"] = JsonValue.Number(Float64(start))
+    args["end_index"] = JsonValue.Number(Float64(end))
+    args["summary"] = JsonValue.String(summary)
+    let tc = ToolCallBlock("call_1", "archive_history", JsonValue.Map(args))
+    let blocks = ArrayList<ContentBlock>()
+    blocks.add(ContentBlock.ToolCall(tc))
+    msgs.add(AssistantMessage(ContentList(blocks), "", "", StopReason.ToolUse, TokenUsage(0, 0), 0))
+    msgs.add(ToolResultMessage("call_1", "archive_history", ContentList.ofText("已归档..."), false, 0))
+}
+
+func plainMsg(text: String): Message {
+    UserMessage(ContentList.ofText(text), 0)
+}
+
+@Test
+func applyArchives_replacesRange() {
+    let b = ContextBuilder(SkillRegistry(), SessionEnvironment())
+    let msgs = ArrayList<Message>()
+    msgs.add(plainMsg("m0"))
+    msgs.add(plainMsg("m1"))
+    msgs.add(plainMsg("m2"))
+    archivedPair(msgs, 1, 1, "摘要内容")
+    let out = b.applyArchives(msgs)
+    @Expect(out.size, 2)
+    match (out[1]) {
+        case am: ArchiveMessage =>
+            @Expect(am.summary, "摘要内容")
+            @Expect(am.startIndex, 1)
+            @Expect(am.endIndex, 1)
+        case _ => @Fail("expected ArchiveMessage at index 1")
+    }
+}
+
+@Test
+func applyArchives_clampsOutOfRange() {
+    let b = ContextBuilder(SkillRegistry(), SessionEnvironment())
+    let msgs = ArrayList<Message>()
+    msgs.add(plainMsg("m0"))
+    msgs.add(plainMsg("m1"))
+    archivedPair(msgs, 0, 99, "摘要")
+    let out = b.applyArchives(msgs)
+    @Expect(out.size, 1)
+    match (out[0]) {
+        case am: ArchiveMessage =>
+            @Expect(am.startIndex, 0)
+            @Expect(am.endIndex, 1)
+        case _ => @Fail("expected ArchiveMessage")
+    }
+}
+
+@Test
+func applyArchives_noPairUnchanged() {
+    let b = ContextBuilder(SkillRegistry(), SessionEnvironment())
+    let msgs = ArrayList<Message>()
+    msgs.add(plainMsg("m0"))
+    msgs.add(plainMsg("m1"))
+    let out = b.applyArchives(msgs)
+    @Expect(out.size, 2)
+}
+
+@Test
+func applyArchives_idempotent() {
+    let b = ContextBuilder(SkillRegistry(), SessionEnvironment())
+    let msgs = ArrayList<Message>()
+    msgs.add(plainMsg("m0"))
+    archivedPair(msgs, 0, 0, "摘要")
+    let once = b.applyArchives(msgs)
+    let twice = b.applyArchives(once)
+    @Expect(twice.size, 1)
+    match (twice[0]) {
+        case am: ArchiveMessage => @Expect(am.summary, "摘要")
+        case _ => @Fail("expected ArchiveMessage")
+    }
+}
+
+@Test
+func applyArchives_nonArchiveToolPairIgnored() {
+    let b = ContextBuilder(SkillRegistry(), SessionEnvironment())
+    let msgs = ArrayList<Message>()
+    msgs.add(plainMsg("m0"))
+    let args = HashMap<String, JsonValue>()
+    args["path"] = JsonValue.String("/tmp/a")
+    let tc = ToolCallBlock("call_x", "read_file", JsonValue.Map(args))
+    let blocks = ArrayList<ContentBlock>()
+    blocks.add(ContentBlock.ToolCall(tc))
+    msgs.add(AssistantMessage(ContentList(blocks), "", "", StopReason.ToolUse, TokenUsage(0, 0), 0))
+    msgs.add(ToolResultMessage("call_x", "read_file", ContentList.ofText("内容"), false, 0))
+    let out = b.applyArchives(msgs)
+    @Expect(out.size, 3)
 }
