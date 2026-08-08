@@ -7,16 +7,15 @@ import atelier.skill.*
 import atelier.session.*
 import atelier.trust.*
 import atelier.context.compactMessages
+import atelier.context.ContextBuilder
 import atelier.context.ModelContextRegistry
 import atelier.event.EventStream
-import std.fs.File
 import std.io.InputStream
 import jsonvalue.*
 import std.collection.*
 import std.core.Duration
 import std.core.sleep
 import std.env.getVariable
-import std.fs.*
 import std.time.MonoTime
 import stdx.log.*
 
@@ -105,6 +104,7 @@ public class AgentRuntime {
         let workDir = if (se.directory != "") { se.directory } else { "." }
         let ctx = ToolContext(workDir, this.askUser, se.context)
         let sessionId = "sess_0"
+        let ctxBuilder = ContextBuilder(this.skillRegistry, se)
 
         spawn {
             let log = getGlobalLogger([("name", "AgentRuntime")])
@@ -114,13 +114,9 @@ public class AgentRuntime {
                 let hookState = HookState()
                 callHooks("beforeRun", 0, hookState)
 
-                // Build system prompt with skill instructions + session env
-                let systemText = buildSystemPromptWithEnv(this.config, this.skillRegistry, se)
-                var currentMessages = ArrayList<Message>()
-                if (systemText != "") {
-                    currentMessages.add(UserMessage(ContentList.ofText(systemText), 0))
-                }
-                for (m in messages) { currentMessages.add(m) }
+                // Build system prompt + assemble initial messages (L2)
+                var currentMessages = ctxBuilder.initMessages(
+                    this.config.systemPrompt, this.config.skills, messages)
                 var turnCount: Int64 = 0
                 var toolCallCount: Int64 = 0
                 var lastToolTime: MonoTime = MonoTime.now()
@@ -134,7 +130,7 @@ public class AgentRuntime {
                     stream.emit(MessageStartEvent(currentMessages[0]))
                     let actualModel = this.pickModel(this.config.model)
                     let tools = this.resolveTools()
-                    var chatReq = ChatRequest(actualModel, currentMessages,
+                    var chatReq = ctxBuilder.buildChatRequest(actualModel, currentMessages,
                         Float64(this.config.temperature), Int64(this.config.maxOutputTokens),
                         this.config.thinkingLevel, tools)
                     match (runBeforeTurnHooks(hookState, turnCount, chatReq)) {
@@ -500,68 +496,4 @@ public class AgentRuntime {
         }
         update
     }
-}
-
-func readFile(p: Path): String {
-    let f = File(p, OpenMode.Read)
-    let buf = Array<Byte>(4096, repeat: 0)
-    let all = ArrayList<Byte>()
-    while (true) {
-        let n = f.read(buf)
-        if (n <= 0) { break }
-        for (i in 0..n) { all.add(buf[Int64(i)]) }
-    }
-    f.close()
-    let raw = Array<Byte>(all.size, repeat: 0)
-    for (i in 0..all.size) { raw[i] = all[i] }
-    String.fromUtf8(raw)
-}
-
-func buildSystemPrompt(config: AgentConfig, skills: SkillRegistry): String {
-    buildSystemPromptWithEnv(config, skills, SessionEnvironment())
-}
-
-func buildSystemPromptWithEnv(config: AgentConfig, skills: SkillRegistry, env: SessionEnvironment): String {
-    let sp = config.systemPrompt
-    let sb = StringBuilder()
-    if (sp != "") {
-        sb.append(sp)
-        sb.append("\n\n")
-    }
-    // Skill instructions
-    for (name in config.skills) {
-        match (skills.get(name)) {
-            case Some(skill) =>
-                sb.append(skill.instructions)
-                sb.append("\n\n")
-            case None => ()
-        }
-    }
-    // AGENTS.md from working directory
-    if (env.directory != "") {
-        try {
-            let agentsPath = env.directory + "/AGENTS.md"
-            let p = Path(agentsPath)
-            if (exists(p)) {
-                let content = readFile(p)
-                if (content != "") {
-                    sb.append("[Project Rules]\n")
-                    sb.append(content)
-                    sb.append("\n\n")
-                }
-            }
-        } catch (_: Exception) {}
-    }
-    // Session context
-    if (env.context.size > 0) {
-        sb.append("[Session Context]\n")
-        for ((k, v) in env.context) {
-            sb.append(k)
-            sb.append(" = ")
-            sb.append(v)
-            sb.append("\n")
-        }
-        sb.append("\n")
-    }
-    sb.toString()
 }
