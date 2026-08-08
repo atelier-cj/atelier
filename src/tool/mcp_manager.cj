@@ -116,6 +116,7 @@ public class McpManager {
 
     public func cacheServerTools(name: String, tools: ArrayList<(String, String)>): Unit {
         this.serverTools[name] = tools
+        this.serverToolCounts[name] = Int64(tools.size)
     }
 
     public func serverToolsOf(name: String): ArrayList<(String, String)> {
