@@ -1,6 +1,7 @@
 package atelier.context
 
 import atelier.message.*
+import atelier.provider.*
 import atelier.session.*
 import atelier.skill.*
 import std.collection.*
@@ -56,12 +57,16 @@ func sysPrompt_unknownSkillSkipped() {
 @Test
 func sysPrompt_projectRulesFromAgentsMd() {
     let dir = Directory.createTemp(Path("/tmp"))
-    File.writeTo(dir.toString() + "/AGENTS.md", "项目规则内容".toArray())
-    let env = SessionEnvironment(dir.toString(), HashMap())
-    let spb = SystemPromptBuilder()
-    let out = buildText(spb, "", ArrayList(), SkillRegistry(), env)
-    @Expect(out.contains("[Project Rules]"), true)
-    @Expect(out.contains("项目规则内容"), true)
+    try {
+        File.writeTo(dir.toString() + "/AGENTS.md", "项目规则内容".toArray())
+        let env = SessionEnvironment(dir.toString(), HashMap())
+        let spb = SystemPromptBuilder()
+        let out = buildText(spb, "", ArrayList(), SkillRegistry(), env)
+        @Expect(out.contains("[Project Rules]"), true)
+        @Expect(out.contains("项目规则内容"), true)
+    } finally {
+        try { remove(Path(dir.toString()), recursive: true) } catch (_: Exception) {}
+    }
 }
 
 @Test
@@ -102,4 +107,59 @@ func sysPrompt_sectionOrder() {
     let out = buildText(spb, "SYS", names, reg, env)
     @Expect(pos(out, "SYS") < pos(out, "SKILL-BODY"), true)
     @Expect(pos(out, "SKILL-BODY") < pos(out, "[Session Context]"), true)
+}
+
+@Test
+func ctxBuilder_initMessages_injectsSystemMessage() {
+    let b = ContextBuilder(SkillRegistry(), SessionEnvironment())
+    let history = ArrayList<Message>([UserMessage(ContentList.ofText("hi"), 0)])
+    let msgs = b.initMessages("sys", ArrayList(), history)
+    @Expect(msgs.size, 2)
+    match (msgs[0]) {
+        case um: UserMessage =>
+            match (um.content.blocks()[0]) {
+                case ContentBlock.TextBlock(t) => @Expect(t.startsWith("sys"), true)
+                case _ => @Expect(false, true)
+            }
+        case _ => @Expect(false, true)
+    }
+}
+
+@Test
+func ctxBuilder_initMessages_emptySystemNoInjection() {
+    let b = ContextBuilder(SkillRegistry(), SessionEnvironment())
+    let history = ArrayList<Message>([UserMessage(ContentList.ofText("hi"), 0)])
+    let msgs = b.initMessages("", ArrayList(), history)
+    @Expect(msgs.size, 1)
+}
+
+@Test
+func ctxBuilder_initMessages_appendsHistory() {
+    let b = ContextBuilder(SkillRegistry(), SessionEnvironment())
+    let history = ArrayList<Message>()
+    history.add(UserMessage(ContentList.ofText("a"), 0))
+    history.add(UserMessage(ContentList.ofText("b"), 0))
+    let msgs = b.initMessages("sys", ArrayList(), history)
+    @Expect(msgs.size, 3)
+    match (msgs[1]) {
+        case um: UserMessage =>
+            match (um.content.blocks()[0]) {
+                case ContentBlock.TextBlock(t) => @Expect(t, "a")
+                case _ => @Expect(false, true)
+            }
+        case _ => @Expect(false, true)
+    }
+}
+
+@Test
+func ctxBuilder_buildChatRequest_fields() {
+    let b = ContextBuilder(SkillRegistry(), SessionEnvironment())
+    let msgs = ArrayList<Message>([UserMessage(ContentList.ofText("hi"), 0)])
+    let req = b.buildChatRequest("deepseek-chat", msgs, 0.3, 4096, Some("low"), ArrayList())
+    @Expect(req.model, "deepseek-chat")
+    @Expect(req.messages.size, 1)
+    @Expect(req.temperature, 0.3)
+    @Expect(req.maxTokens, 4096)
+    @Expect(req.reasoningEffort, Some("low"))
+    @Expect(req.tools.size, 0)
 }
