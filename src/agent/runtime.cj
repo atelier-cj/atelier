@@ -111,7 +111,8 @@ public class AgentRuntime {
             try {
                 stream.emit(AgentStartEvent(sessionId))
                 log.info("agent start: ${this.config.name}", Array<Attr>())
-                callHooks("beforeRun", 0, ArrayList<ToolCallBlock>(), ArrayList<ToolResultMessage>())
+                let hookState = HookState()
+                callHooks("beforeRun", 0, hookState)
 
                 // Build system prompt with skill instructions + session env
                 let systemText = buildSystemPromptWithEnv(this.config, this.skillRegistry, se)
@@ -129,14 +130,20 @@ public class AgentRuntime {
                     stream.emit(TurnStartEvent())
                     turnCount++
                     log.info("turn ${turnCount} start", Array<Attr>())
-                    callHooks("beforeTurn", turnCount, ArrayList<ToolCallBlock>(), ArrayList<ToolResultMessage>())
 
                     stream.emit(MessageStartEvent(currentMessages[0]))
                     let actualModel = this.pickModel(this.config.model)
                     let tools = this.resolveTools()
-                    let chatReq = ChatRequest(actualModel, currentMessages,
+                    var chatReq = ChatRequest(actualModel, currentMessages,
                         Float64(this.config.temperature), Int64(this.config.maxOutputTokens),
                         this.config.thinkingLevel, tools)
+                    chatReq = runBeforeTurnHooks(hookState, turnCount, chatReq)
+                    if (chatReq.model == "") {
+                        log.info("beforeTurn hook short-circuited run", Array<Attr>())
+                        stream.emit(TurnEndEvent(AssistantMessage(ContentList.ofText("[Run short-circuited by hook]"), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0), ArrayList<ToolResultMessage>()))
+                        finished = true
+                        break
+                    }
 
                     let chatStream = this.provider.chatStreaming(chatReq)
                     var contentBuilder = StringBuilder()
@@ -207,7 +214,16 @@ public class AgentRuntime {
                                         case Some(t) =>
                                             match (shouldAllow(t, ctx.workDir, this.trustManager)) {
                                                 case TrustDecision.Allowed =>
-                                                    batch.add((tc.name, ctx, tc.args))
+                                                    match (runBeforeToolHooks(hookState, turnCount, tc)) {
+                                                        case BeforeToolDecision.Allow =>
+                                                            batch.add((tc.name, ctx, tc.args))
+                                                        case BeforeToolDecision.Deny(reason) =>
+                                                            skipResults[idx] = "Tool blocked by hook: " + reason
+                                                            log.warn("tool ${tc.name} blocked by hook: ${reason}", Array<Attr>())
+                                                        case BeforeToolDecision.Modify(args) =>
+                                                            batch.add((tc.name, ctx, args))
+                                                            log.info("tool ${tc.name} args modified by hook", Array<Attr>())
+                                                    }
                                                 case TrustDecision.NeedsApproval =>
                                                     let answer = this.askUser(
                                                         "Tool '" + tc.name + "' needs your approval.\n" +
@@ -242,7 +258,6 @@ public class AgentRuntime {
                                     sleep(Duration.millisecond * (minIntervalMs - elapsed))
                                 }
                             }
-                            callHooks("beforeTool", turnCount, toolCalls, ArrayList<ToolResultMessage>())
                             let results = try {
                                 this.toolExecutor.executeBatch(batch)
                             } catch (e: Exception) {
@@ -267,18 +282,30 @@ public class AgentRuntime {
                                             let tr = ToolResultMessage(tc.id, tc.name, ContentList.ofText(r.text), r.isError, 0)
                                             currentMessages.add(tr)
                                             toolResults.add(tr)
+                                            callAfterToolHooks(hookState, turnCount, tc, tr)
                                             resIdx++
                                         }
                                 }
                             }
-                            callHooks("afterTool", turnCount, toolCalls, toolResults)
                             toolCallCount += toolCalls.size
                             lastToolTime = MonoTime.now()
                             stream.emit(TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
 
                         case _ =>
                             log.info("turn finished", Array<Attr>())
-                            callHooks("afterTurn", turnCount, ArrayList<ToolCallBlock>(), ArrayList<ToolResultMessage>())
+                            let turnUpdate = runAfterTurnHooks(hookState, turnCount)
+                            match (turnUpdate.messages) {
+                                case Some(msgs) =>
+                                    currentMessages = msgs
+                                    log.info("afterTurn hook rewrote messages to ${msgs.size}", Array<Attr>())
+                                case None => ()
+                            }
+                            if (turnUpdate.shortCircuit) {
+                                log.info("afterTurn hook short-circuited run", Array<Attr>())
+                                stream.emit(TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
+                                finished = true
+                                break
+                            }
                             if (this.config.compactionEnabled) {
                                 let contextWindow = this.modelRegistry.get(actualModel)
                                 currentMessages = compactMessages(currentMessages,
@@ -292,7 +319,7 @@ public class AgentRuntime {
                 }
 
                 log.info("agent end, total turns=${turnCount}", Array<Attr>())
-                callHooks("afterRun", turnCount, ArrayList<ToolCallBlock>(), ArrayList<ToolResultMessage>())
+                callHooks("afterRun", turnCount, hookState)
                 stream.setResult(currentMessages)
                 stream.emit(AgentEndEvent(currentMessages))
             } catch (e: Exception) {
@@ -358,19 +385,13 @@ public class AgentRuntime {
     }
 
     private func callHooks(phase: String, turnCount: Int64,
-        toolCalls: ArrayList<ToolCallBlock>,
-        toolResults: ArrayList<ToolResultMessage>): Unit {
-        let ctx = HookContext(this.config, this.toolRegistry, turnCount,
-            toolCalls, toolResults)
+        state: HookState): Unit {
+        let ctx = HookContext(this.config, this.toolRegistry, turnCount, state)
         for (h in this.hooks) {
             try {
                 match (phase) {
                     case "beforeRun" => h.beforeRun(ctx)
                     case "afterRun" => h.afterRun(ctx)
-                    case "beforeTurn" => h.beforeTurn(ctx)
-                    case "afterTurn" => h.afterTurn(ctx)
-                    case "beforeTool" => h.beforeTool(ctx)
-                    case "afterTool" => h.afterTool(ctx)
                     case _ => ()
                 }
             } catch (e: Exception) {
@@ -378,6 +399,79 @@ public class AgentRuntime {
                 log.warn("hook ${phase} error: ${e.message}", Array<Attr>())
             }
         }
+    }
+
+    private func runBeforeTurnHooks(state: HookState, turnCount: Int64,
+        request: ChatRequest): ChatRequest {
+        let ctx = HookContext(this.config, this.toolRegistry, turnCount, state)
+        var current = request
+        for (h in this.hooks) {
+            try {
+                match (h.beforeTurn(ctx, current)) {
+                    case TurnDecision.Continue(r) => current = r
+                    case TurnDecision.ShortCircuit(msg) =>
+                        return ChatRequest("", current.messages, current.temperature,
+                            current.maxTokens, current.reasoningEffort, current.tools)
+                }
+            } catch (e: Exception) {
+                let log = getGlobalLogger([("name", "AgentRuntime")])
+                log.warn("beforeTurn hook error: ${e.message}", Array<Attr>())
+            }
+        }
+        current
+    }
+
+    private func runBeforeToolHooks(state: HookState, turnCount: Int64,
+        call: ToolCallBlock): BeforeToolDecision {
+        let ctx = HookContext(this.config, this.toolRegistry, turnCount, state)
+        var decision = BeforeToolDecision.Allow
+        for (h in this.hooks) {
+            try {
+                match (h.beforeTool(ctx, call)) {
+                    case BeforeToolDecision.Allow => ()
+                    case BeforeToolDecision.Deny(reason) =>
+                        return BeforeToolDecision.Deny(reason)
+                    case BeforeToolDecision.Modify(args) =>
+                        decision = BeforeToolDecision.Modify(args)
+                }
+            } catch (e: Exception) {
+                let log = getGlobalLogger([("name", "AgentRuntime")])
+                log.warn("beforeTool hook error: ${e.message}", Array<Attr>())
+            }
+        }
+        decision
+    }
+
+    private func callAfterToolHooks(state: HookState, turnCount: Int64,
+        call: ToolCallBlock, result: ToolResultMessage): Unit {
+        let ctx = HookContext(this.config, this.toolRegistry, turnCount, state)
+        for (h in this.hooks) {
+            try {
+                h.afterTool(ctx, call, result)
+            } catch (e: Exception) {
+                let log = getGlobalLogger([("name", "AgentRuntime")])
+                log.warn("afterTool hook error: ${e.message}", Array<Attr>())
+            }
+        }
+    }
+
+    private func runAfterTurnHooks(state: HookState, turnCount: Int64): AfterTurnUpdate {
+        let ctx = HookContext(this.config, this.toolRegistry, turnCount, state)
+        var update = AfterTurnUpdate.none()
+        for (h in this.hooks) {
+            try {
+                let u = h.afterTurn(ctx)
+                let msgs = match (u.messages) {
+                    case Some(m) => Some(m)
+                    case None => update.messages
+                }
+                update = AfterTurnUpdate(msgs, update.shortCircuit || u.shortCircuit)
+            } catch (e: Exception) {
+                let log = getGlobalLogger([("name", "AgentRuntime")])
+                log.warn("afterTurn hook error: ${e.message}", Array<Attr>())
+            }
+        }
+        update
     }
 }
 
