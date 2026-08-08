@@ -82,7 +82,7 @@ public class OpenAIProvider <: Provider {
 func buildRequest(req: ChatRequest, stream: Bool): OpenAIRequest {
     OpenAIRequest(req.model, messagesToOpenAI(req.messages), stream,
         req.temperature, req.maxTokens, req.reasoningEffort,
-        req.tools)
+        req.tools, req.extra)
 }
 
 func doStreamRequest(client: Client, baseURL: String, apiKey: String, headers: ArrayList<String>,

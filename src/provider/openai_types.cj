@@ -12,15 +12,24 @@ public struct OpenAIRequest <: JsonSerializable {
     public let maxTokens: Int64
     public let reasoningEffort: Option<String>
     public let tools: ArrayList<OpenAITool>
+    public let extra: HashMap<String, JsonValue>
 
     public init(model: String, messages: ArrayList<OpenAIMessage>,
         stream: Bool, temperature: Float64, maxTokens: Int64,
         reasoningEffort: Option<String>,
         tools: ArrayList<OpenAITool>) {
+        this(model, messages, stream, temperature, maxTokens, reasoningEffort,
+            tools, HashMap<String, JsonValue>())
+    }
+
+    public init(model: String, messages: ArrayList<OpenAIMessage>,
+        stream: Bool, temperature: Float64, maxTokens: Int64,
+        reasoningEffort: Option<String>,
+        tools: ArrayList<OpenAITool>, extra: HashMap<String, JsonValue>) {
         this.model = model; this.messages = messages; this.stream = stream
         this.temperature = temperature; this.maxTokens = maxTokens
         this.reasoningEffort = reasoningEffort
-        this.tools = tools
+        this.tools = tools; this.extra = extra
     }
 
     public func toJson(w: JsonWriter): Unit {
@@ -40,8 +49,19 @@ public struct OpenAIRequest <: JsonSerializable {
         if (this.tools.size > 0) {
             w.writeName("tools").writeValue(this.tools)
         }
+        for ((k, v) in this.extra) {
+            if (!isReservedOpenAIKey(k)) {
+                w.writeName(k).writeValue(v)
+            }
+        }
         w.endObject()
     }
+}
+
+func isReservedOpenAIKey(k: String): Bool {
+    k == "model" || k == "messages" || k == "stream" || k == "max_tokens" ||
+    k == "temperature" || k == "reasoning_effort" || k == "thinking" ||
+    k == "tools"
 }
 
 public struct OpenAITool <: JsonSerializable {

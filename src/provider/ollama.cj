@@ -101,6 +101,12 @@ func buildOllamaRequest(req: ChatRequest, stream: Bool): String {
         }
         obj["tools"] = JsonValue.Array(tools)
     }
+    // Extra params: passthrough, fixed fields take priority
+    for ((k, v) in req.extra) {
+        if (!obj.contains(k)) {
+            obj[k] = v
+        }
+    }
     toJsonString(JsonValue.Map(obj))
 }
 

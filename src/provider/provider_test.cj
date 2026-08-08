@@ -5,6 +5,7 @@ import std.collection.*
 import stdx.net.http.*
 import atelier.message.*
 import atelier.event.EventStream
+import atelier.util.toJsonString
 
 @Test
 func chatRequest_extraField() {
@@ -132,6 +133,101 @@ func builtinFactory_ollama_create() {
     let cfg = ProviderConfig.empty("ollama", "my-ollama")
     let p = f.create(cfg)
     @Expect(p.name(), "my-ollama")
+}
+
+@Test
+func openaiRequest_extraKeysInJson() {
+    let extra = HashMap<String, JsonValue>()
+    let rf = HashMap<String, JsonValue>()
+    rf["type"] = JsonValue.String("json_object")
+    extra["response_format"] = JsonValue.Map(rf)
+    extra["top_p"] = JsonValue.Number(0.9)
+    let req = OpenAIRequest("m", ArrayList<OpenAIMessage>(), false, 0.7, 100,
+        None, ArrayList<OpenAITool>(), extra)
+    let json = toJsonString(req)
+    @Expect(json.contains("response_format"), true)
+    @Expect(json.contains("json_object"), true)
+    @Expect(json.contains("top_p"), true)
+}
+
+@Test
+func openaiRequest_extraReservedKeysIgnored() {
+    let extra = HashMap<String, JsonValue>()
+    extra["model"] = JsonValue.String("evil-model")
+    extra["temperature"] = JsonValue.Number(9.9)
+    extra["max_tokens"] = JsonValue.Number(Float64(999))
+    let req = OpenAIRequest("real-model", ArrayList<OpenAIMessage>(), false, 0.7, 100,
+        None, ArrayList<OpenAITool>(), extra)
+    let json = toJsonString(req)
+    @Expect(json.contains("evil-model"), false)
+    @Expect(json.contains("9.9"), false)
+    @Expect(json.contains("real-model"), true)
+}
+
+@Test
+func openaiBuildRequest_passesExtra() {
+    let extra = HashMap<String, JsonValue>()
+    extra["top_p"] = JsonValue.Number(0.9)
+    let req = ChatRequest("m", ArrayList<Message>(), 0.7, 100, None,
+        ArrayList<OpenAITool>(), extra)
+    let oai = buildRequest(req, false)
+    let json = toJsonString(oai)
+    @Expect(json.contains("top_p"), true)
+    @Expect(json.contains("0.9"), true)
+}
+
+@Test
+func anthropicRequest_extraKeysInBody() {
+    let extra = HashMap<String, JsonValue>()
+    extra["metadata"] = JsonValue.Map(HashMap<String, JsonValue>())
+    let stops = ArrayList<JsonValue>()
+    stops.add(JsonValue.String("END"))
+    extra["stop_sequences"] = JsonValue.Array(stops)
+    let req = ChatRequest("m", ArrayList<Message>(), 0.7, 100, None,
+        ArrayList<OpenAITool>(), extra)
+    let body = buildAnthropicRequest(req, false)
+    @Expect(body.contains("metadata"), true)
+    @Expect(body.contains("stop_sequences"), true)
+    @Expect(body.contains("END"), true)
+}
+
+@Test
+func anthropicRequest_extraReservedIgnored() {
+    let extra = HashMap<String, JsonValue>()
+    extra["model"] = JsonValue.String("evil-model")
+    extra["max_tokens"] = JsonValue.Number(Float64(999))
+    let req = ChatRequest("real-model", ArrayList<Message>(), 0.7, 100, None,
+        ArrayList<OpenAITool>(), extra)
+    let body = buildAnthropicRequest(req, false)
+    @Expect(body.contains("evil-model"), false)
+    @Expect(body.contains("999"), false)
+    @Expect(body.contains("real-model"), true)
+}
+
+@Test
+func ollamaRequest_extraKeysInBody() {
+    let extra = HashMap<String, JsonValue>()
+    extra["keep_alive"] = JsonValue.String("5m")
+    extra["num_ctx"] = JsonValue.Number(Float64(4096))
+    let req = ChatRequest("m", ArrayList<Message>(), 0.7, 100, None,
+        ArrayList<OpenAITool>(), extra)
+    let body = buildOllamaRequest(req, false)
+    @Expect(body.contains("keep_alive"), true)
+    @Expect(body.contains("num_ctx"), true)
+    @Expect(body.contains("5m"), true)
+}
+
+@Test
+func ollamaRequest_extraReservedIgnored() {
+    let extra = HashMap<String, JsonValue>()
+    extra["model"] = JsonValue.String("evil-model")
+    extra["stream"] = JsonValue.Boolean(false)
+    let req = ChatRequest("real-model", ArrayList<Message>(), 0.7, 100, None,
+        ArrayList<OpenAITool>(), extra)
+    let body = buildOllamaRequest(req, true)
+    @Expect(body.contains("evil-model"), false)
+    @Expect(body.contains("real-model"), true)
+    @Expect(body.contains("false"), false)
 }
 
 @Test
