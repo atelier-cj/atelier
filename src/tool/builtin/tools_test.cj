@@ -4,6 +4,7 @@ import std.fs.*
 import std.collection.*
 import jsonvalue.*
 import atelier.tool.*
+import atelier.skill.*
 
 func makeCtx(): ToolContext {
     ToolContext("/tmp")
@@ -168,4 +169,39 @@ func tool_glob_noIgnoreIncludesAll() {
     @Expect(result.isError, false)
     // With noIgnore=true, target dir should appear
     @Expect(result.text.contains("target"), true)
+}
+
+func fakeSkillEntry(name: String, desc: String, instructions: String): Skill {
+    Skill(name, desc, None, None, HashMap(), ArrayList(), instructions, "")
+}
+
+@Test
+func useSkills_returnsInstructions() {
+    let reg = SkillRegistry()
+    reg.register(fakeSkillEntry("code-review", "代码审查", "## 审查流程\n1. 读文件"))
+    let tool = UseSkillsTool(reg)
+    let args = HashMap<String, JsonValue>()
+    args.add("name", JsonValue.String("code-review"))
+    let r = tool.execute(ToolContext("."), JsonValue.Map(args))
+    @Expect(r.isError, false)
+    @Expect(r.text.contains("## 审查流程"), true)
+}
+
+@Test
+func useSkills_unknownSkillError() {
+    let reg = SkillRegistry()
+    let tool = UseSkillsTool(reg)
+    let args = HashMap<String, JsonValue>()
+    args.add("name", JsonValue.String("not-exist"))
+    let r = tool.execute(ToolContext("."), JsonValue.Map(args))
+    @Expect(r.isError, true)
+    @Expect(r.text.contains("未知"), true)
+}
+
+@Test
+func useSkills_missingParamError() {
+    let reg = SkillRegistry()
+    let tool = UseSkillsTool(reg)
+    let r = tool.execute(ToolContext("."), JsonValue.Map(HashMap()))
+    @Expect(r.isError, true)
 }

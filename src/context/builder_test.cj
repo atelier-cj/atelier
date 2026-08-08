@@ -300,3 +300,41 @@ func ctxBuilder_noMcpNoCatalog() {
         case _ => @Expect(false, true)
     }
 }
+
+func skillRegWith(name: String, desc: String): SkillRegistry {
+    let reg = SkillRegistry()
+    reg.register(Skill(name, desc, None, None, HashMap(), ArrayList(), "SKILL-BODY", ""))
+    reg
+}
+
+@Test
+func sysPrompt_skillCatalogInjected() {
+    let spb = SystemPromptBuilder()
+    let out = spb.buildSkillCatalog(skillRegWith("code-review", "代码审查技能"))
+    @Expect(out.contains("use_skills"), true)
+    @Expect(out.contains("code-review"), true)
+    @Expect(out.contains("代码审查技能"), true)
+}
+
+@Test
+func sysPrompt_skillCatalogEmptyWithoutSkills() {
+    let spb = SystemPromptBuilder()
+    @Expect(spb.buildSkillCatalog(SkillRegistry()), "")
+}
+
+@Test
+func ctxBuilder_skillCatalogInSystemMessage() {
+    let b = ContextBuilder(skillRegWith("code-review", "代码审查技能"), SessionEnvironment())
+    let msgs = b.initMessages("sys", ArrayList(), ArrayList())
+    @Expect(msgs.size, 1)
+    match (msgs[0]) {
+        case um: UserMessage =>
+            match (um.content.blocks()[0]) {
+                case ContentBlock.TextBlock(t) =>
+                    @Expect(t.contains("use_skills"), true)
+                    @Expect(t.contains("code-review"), true)
+                case _ => @Expect(false, true)
+            }
+        case _ => @Expect(false, true)
+    }
+}

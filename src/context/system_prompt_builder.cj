@@ -91,6 +91,26 @@ public class SystemPromptBuilder {
         sb.append("\n")
         sb.toString()
     }
+
+    // 渐进披露第 1 层：Skill 目录段（name + description + use_skills 引导语；无 skill 返回 ""）
+    public func buildSkillCatalog(skillRegistry: SkillRegistry): String {
+        let skills = skillRegistry.list()
+        if (skills.size == 0) { return "" }
+        let sb = StringBuilder()
+        sb.append("[可用 Skills]\n")
+        sb.append("调用 use_skills(name) 加载对应技能的完整指令。\n")
+        for (s in skills) {
+            sb.append("- ")
+            sb.append(s.name)
+            if (s.description != "") {
+                sb.append(": ")
+                sb.append(s.description)
+            }
+            sb.append("\n")
+        }
+        sb.append("\n")
+        sb.toString()
+    }
 }
 
 func readFileText(p: Path): String {
