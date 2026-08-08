@@ -29,12 +29,122 @@ public struct McpServerConfig {
 }
 
 public class McpManager {
+    public static let COOLDOWN_TURNS: Int64 = 20
+
+    let servers = HashMap<String, McpServerConfig>()
     let clients = HashMap<String, McpClient>()
+    let activeServers = HashSet<String>()
+    let lastUsed = HashMap<String, Int64>()
+    let serverVersions = HashMap<String, String>()
+    let serverToolCounts = HashMap<String, Int64>()
+    let serverTools = HashMap<String, ArrayList<(String, String)>>()
+    var turnCounter: Int64 = 0
 
     public init() {}
 
+    public func registerServer(cfg: McpServerConfig): Unit {
+        this.servers[cfg.name] = cfg
+    }
+
+    public func hasServer(name: String): Bool { this.servers.contains(name) }
+
+    public func serverNames(): ArrayList<String> {
+        let r = ArrayList<String>()
+        for ((name, _) in this.servers) { r.add(name) }
+        r
+    }
+
+    public func serverCount(): Int64 { Int64(this.servers.size) }
+
+    public func getServer(name: String): Option<McpServerConfig> { this.servers.get(name) }
+
+    // ---- 激活/冷却状态机（进程级，不持久化） ----
+
+    public func advanceTurn(): Unit { this.turnCounter++ }
+
+    public func activate(name: String): Unit {
+        this.activeServers.add(name)
+        this.lastUsed[name] = this.turnCounter
+    }
+
+    public func markUsed(name: String): Unit { this.lastUsed[name] = this.turnCounter }
+
+    public func markUsedTool(toolName: String): Unit {
+        for (s in this.activeServers) {
+            if (toolName.startsWith("mcp_" + s + "_")) { this.lastUsed[s] = this.turnCounter; return }
+        }
+    }
+
+    public func isActive(name: String): Bool {
+        if (!this.activeServers.contains(name)) { return false }
+        match (this.lastUsed.get(name)) {
+            case Some(t) => this.turnCounter - t < McpManager.COOLDOWN_TURNS
+            case None => false
+        }
+    }
+
+    public func isActiveTool(toolName: String): Bool {
+        for (s in this.activeServers) {
+            if (toolName.startsWith("mcp_" + s + "_")) { return this.isActive(s) }
+        }
+        false
+    }
+
+    // ---- 协议/工具目录缓存（addServer 连接成功后记录；目录段展示） ----
+
+    public func updateServerInfo(name: String, version: String, toolCount: Int64): Unit {
+        this.serverVersions[name] = version
+        this.serverToolCounts[name] = toolCount
+    }
+
+    public func serverVersion(name: String): Option<String> { this.serverVersions.get(name) }
+
+    public func serverToolCount(name: String): Option<Int64> { this.serverToolCounts.get(name) }
+
+    public func cacheServerTools(name: String, tools: ArrayList<(String, String)>): Unit {
+        this.serverTools[name] = tools
+    }
+
+    public func serverToolsOf(name: String): ArrayList<(String, String)> {
+        match (this.serverTools.get(name)) {
+            case Some(t) => t
+            case None => ArrayList<(String, String)>()
+        }
+    }
+
+    // ---- 按需激活（无网络：启动 addServer 已连接注册，这里只翻状态） ----
+
+    public func loadToolset(reg: ToolRegistry, name: String): String {
+        match (this.servers.get(name)) {
+            case None => "未知 MCP 服务: ${name}"
+            case Some(_) =>
+                if (this.activeServers.contains(name)) {
+                    let names = this.activeToolNames(reg, name)
+                    return "已加载 MCP 服务 '${name}'，共 ${names.size} 个工具：${String.join(names.toArray(), delimiter: ", ")}"
+                }
+                if (!this.serverTools.contains(name)) {
+                    return "MCP 服务 '${name}' 未连接（启动连接失败或未配置）"
+                }
+                this.activate(name)
+                let names = this.activeToolNames(reg, name)
+                "已加载 MCP 服务 '${name}'，共 ${names.size} 个工具：${String.join(names.toArray(), delimiter: ", ")}"
+        }
+    }
+
+    func activeToolNames(reg: ToolRegistry, name: String): ArrayList<String> {
+        let r = ArrayList<String>()
+        let prefix = "mcp_" + name + "_"
+        for (t in reg.list()) {
+            if (t.name().startsWith(prefix)) { r.add(t.name()) }
+        }
+        r
+    }
+
+    // ---- 启动连接 + 注册 + 缓存（保留原 addServer 语义，成功后缓存协议信息与工具目录） ----
+
     public func addServer(reg: ToolRegistry, cfg: McpServerConfig): Unit {
         let log = getGlobalLogger([("name", "McpManager")])
+        this.servers[cfg.name] = cfg
         let transportObj = createTransport(cfg)
         match (transportObj) {
             case Some(t) =>
@@ -43,24 +153,28 @@ public class McpManager {
                 match (client.connect(info)) {
                     case Result.Ok(initResult) =>
                         log.info("mcp ${cfg.name} connected: ${initResult.serverInfo.name}", Array<Attr>())
-                    case Result.Err(e) =>
-                        log.error("mcp ${cfg.name} connect failed: ${e}", Array<Attr>())
-                        return
-                }
-                match (client.listTools()) {
-                    case Result.Ok(result) =>
-                        for (toolDef in result.tools) {
-                            let prefixed = "mcp_" + cfg.name + "_" + toolDef.name
-                            let wrapper = MCPToolWrapper(client, toolDef, toolName: prefixed)
-                            reg.register(wrapper)
-                            log.info("mcp ${cfg.name}: registered ${prefixed}", Array<Attr>())
+                        match (client.listTools()) {
+                            case Result.Ok(result) =>
+                                for (toolDef in result.tools) {
+                                    let prefixed = "mcp_" + cfg.name + "_" + toolDef.name
+                                    let wrapper = MCPToolWrapper(client, toolDef, toolName: prefixed)
+                                    reg.register(wrapper)
+                                    log.info("mcp ${cfg.name}: registered ${prefixed}", Array<Attr>())
+                                }
+                                this.clients[cfg.name] = client
+                                this.updateServerInfo(cfg.name, initResult.serverInfo.version, Int64(result.tools.size))
+                                let toolList = ArrayList<(String, String)>()
+                                for (toolDef in result.tools) {
+                                    toolList.add((toolDef.name, toolDef.description))
+                                }
+                                this.cacheServerTools(cfg.name, toolList)
+                            case Result.Err(e) =>
+                                log.error("mcp ${cfg.name} listTools failed: ${e}", Array<Attr>())
+                                client.close()
                         }
                     case Result.Err(e) =>
-                        log.error("mcp ${cfg.name} listTools failed: ${e}", Array<Attr>())
-                        client.close()
-                        return
+                        log.error("mcp ${cfg.name} connect failed: ${e}", Array<Attr>())
                 }
-                this.clients[cfg.name] = client
             case None => ()
         }
     }
