@@ -339,36 +339,40 @@ runtime afterTurn 压缩触发（runtime.cj:322 现调用点）
 
 ## 五、MCP 工具集成
 
-### 5.1 现状：启动时全量连接 + 全量注册（✅ tool/mcp_manager.cj + mcp_tool.cj）
+### 5.1 现状：启动连接 + 激活过滤（✅ P1 已实现）
 
-`McpManager.addServer(toolRegistry, cfg)`（server 启动阶段调用）：
+`McpManager.addServer(toolRegistry, cfg)`（server 启动阶段调用）——**连接保留**（连接不占 LLM token），但工具定义**不再直接进入 LLM tools 段**：
 
 ```
 1. createTransport(cfg)：stdio / streamable-http / session-http 三种传输
 2. McpClient.connect(info) → listTools()
 3. 每个工具包装为 MCPToolWrapper，注册名 mcp_<server>_<tool>（如 mcp_github_search_repos）
-4. clients[cfg.name] = client（持有连接）
+4. clients[cfg.name] = client（持有连接）+ 缓存协议信息（serverInfo.version + 工具数 + 工具名/描述目录）
 ```
 
-- 工具定义在连接时全量拉取、全量注册到 `ToolRegistry`，**没有按需加载**（全量摊平）
 - 配置来源：`server/config.cj` 的 `TomlMcpServer`（name/transport/command/url/headers），经 `server/handler.cj` 在服务启动时注入
+- 服务名**不允许含下划线**（registerServer/addServer 校验拒绝）——工具名 `mcp_<server>_<tool>` 靠前缀解析服务名，下划线会歧义
+- 连接失败的服务：启动时 log 警告，`load_mcp_toolset` 时报"未连接"
 
-### 5.2 🚧 演进：按服务加载（load_mcp_toolset）
+### 5.2 ✅ P1 已实现：按服务激活（load_mcp_toolset）
 
-对照参考设计的"渐进式披露"：
+**目标**：减少 LLM 请求 tools 定义段的 token——`resolveTools` 只暴露**已激活**且未过冷却期的服务工具。
 
-| 对比项 | 全量摊平（现状） | 按服务加载（演进） |
+| 对比项 | 全量暴露（P1 前） | 按服务激活（P1） |
 |--------|------------------|--------------------|
-| 初始 Token | ❌ 极高（所有工具定义） | ✅ 极低（只有服务名+描述目录） |
-| 首次使用工具延迟 | ✅ 无 | ⚠️ 一次 `load_mcp_toolset` 调用 |
-| 缓存命中率 | ❌ 差（工具多易变动） | ✅ 高（只加载需要的服务） |
+| tools 定义段 Token | ❌ 极高（所有工具 schema） | ✅ 只有激活服务的工具 |
+| 激活延迟 | ✅ 无 | ⚠️ 一次 `load_mcp_toolset` 调用（纯状态翻转，无网络） |
+| 缓存命中率 | ❌ 差（工具多易变动） | ✅ 高 |
 
-演进要点：
+**实现要点**：
 
-- 系统提示注入 **MCP 服务目录**（服务名 + 描述 + 工具数，轻量）
-- 🚧 新工具 `load_mcp_toolset(server_id)`：建立连接 → 拉取工具列表 → 注册 `mcp_<server>_<name>` → 返回工具清单（复用现有 `McpManager` + `MCPToolWrapper`，🚧 给 McpManager 增加按需注册方法，不重写连接管理）
-- 🚧 会话级状态 `activeMcpServers: Set<String>` 与冷却轮次统计——**运行时状态、不持久化**：放 `AgentRuntime`（或演进后的 `ContextBuilder`）字段，**不改 SessionHeader/Entry 的持久化格式**（参考设计的 `Session.activeMcpServers/serverLastUsed` 落在持久化模型上，会造成序列化大改，不采用）
-- 命名空间 `mcp_<server>_<name>` 保持不变，与现有 `resolveTools()` 的 `_*` 通配符兼容
+- ✅ `load_mcp_toolset(server_id)` 工具（tool/load_mcp_toolset.cj）：**纯激活无网络**——校验服务存在（"未知"）→ 检查已连接（"未连接"）→ 激活 → 返回工具清单；幂等（已激活直接返回）；缺参/错误返回 `(Bool, String)` 结构化结果
+- ✅ 激活状态机（进程级、不持久化，McpManager 持有）：`activeServers`/`lastUsed`/`turnCounter` + Mutex 锁（HTTP 并发安全）；`resolveTools` 的 `_*` 通配展开按 `isActiveTool(name, cooldownTurns)` 过滤
+- ✅ **冷却自动卸载为 agent 级配置、默认关闭**：`AgentConfig.mcpCooldownTurns`（0=永不卸载；>0=N 轮未用自动卸载）；TOML `[[agent]] mcpCooldownTurns` + HTTP DTO 均可配置；`isActiveTool` 对非 mcp 工具名恒返回 true（不受冷却管辖）
+- ✅ 使用标记：mcp 工具真实执行后 `markUsedTool(toolName)` 刷新冷却（hook 拒绝/信任拒绝/超限跳过的工具不刷新）
+- ✅ 系统提示目录段（`SystemPromptBuilder.buildMcpCatalog`）：全部服务（含未激活）显示 `- name (v<version>, N 个工具)` + 工具名/描述列表（启动已缓存）；激活服务标注 `[已加载]`；引导语提示调用 `load_mcp_toolset(server_id)`
+- ✅ 子 agent（AgentTool）共享同一 McpManager（父子激活状态一致）
+- 命名空间 `mcp_<server>_<name>` 保持不变，与 `resolveTools()` 的 `_*` 通配符兼容
 
 ---
 
@@ -521,7 +525,7 @@ public class FindSkillsTool <: Tool {
 | `context/compaction.cj` | ✅ | 上下文压缩（🚧 + `CompactionConfig` 可配置模板） | `compactMessages` |
 | `context/tokens.cj` | ✅ | Token 本地估算 | `estimateTokens` |
 | `context/model_registry.cj` | ✅ | 模型上下文窗口查表 | `ModelContextRegistry.get` |
-| `tool/mcp_manager.cj` | ✅ | MCP 全量连接 + 工具注册 | `McpManager.addServer` |
+| `tool/mcp_manager.cj` | ✅ | MCP 启动连接 + 协议/工具目录缓存 + 激活状态机（Mutex） | `addServer / registerServer / loadToolset / isActiveTool / markUsedTool` |
 | `tool/mcp_tool.cj` | ✅ | MCP 工具适配 | `MCPToolWrapper` |
 | `skill/loader.cj` | ✅ | SKILL.md 解析加载 | `SkillLoader.loadDir / loadSkill` |
 | `skill/validator.cj` | ✅ | frontmatter 校验 | `SkillValidator.validate` |
@@ -530,7 +534,7 @@ public class FindSkillsTool <: Tool {
 | `context/builder.cj` | ✅ | L2 上下文构建器（系统提示注入 + 历史组装 + ChatRequest） | `initMessages / buildChatRequest` |
 | `context/system_prompt_builder.cj` | ✅ | 系统提示分段构建（4 段：systemPrompt/Skills/AGENTS.md/SessionContext） | `build` |
 | `tool/archive_history.cj` | 🚧 | AI 自主归档（LLM 摘要落 L1） | `execute(start, end, summary)` |
-| `tool/load_mcp_toolset.cj` | 🚧 | MCP 按服务加载 | `execute(server_id)` |
+| `tool/load_mcp_toolset.cj` | ✅ | MCP 按服务激活（纯状态翻转，无网络） | `execute(server_id)` |
 | `tool/builtin/use_skills.cj` | 🚧 | Skill 按需激活（渐进披露第 2 层） | `execute(name)` |
 | `tool/builtin/find_skills.cj` | 🚧 | Skill 检索（第 1 层辅助） | `execute(keyword?)` |
 
@@ -585,19 +589,19 @@ P1 / P2 / P3 **互不依赖，可并行**；P4 依赖 P3，排在最后。每个
 
 **验收**：现有 148 测试全绿（行为零变化）；新增构建器单元测试（分段顺序、空段跳过、`[Project Rules]`/`[Session Context]` 格式、无 AGENTS.md 时不挂段）。
 
-### 10.3 P1：MCP 按服务加载（依赖 P0）
+### 10.3 P1：MCP 按服务加载（依赖 P0）✅ 已完成（2026-08-09）
 
-**目标**：从"启动全量注册"改为"目录 + 按需加载"，Token 最优。
+**目标**：减少 LLM tools 定义段 token——启动连接保留（连接不占 token 且能缓存协议信息），`resolveTools` 只暴露已激活且未过冷却期的服务工具。
 
-**任务**：
+**任务**（实施记录，与设计 5.2 一致）：
 
-1. `SystemPromptBuilder.withMcpCatalog(servers)`：注入服务目录段（服务名 + 描述 + 工具数 + `load_mcp_toolset` 引导语）
-2. `McpManager` 增加按需注册方法（复用现有 connect/listTools/MCPToolWrapper，不重写连接管理）
-3. 新建 `tool/load_mcp_toolset.cj` 工具：校验服务存在 → 连接 → 注册 `mcp_<server>_<name>` → 返回工具清单
-4. `AgentRuntime` 增加会话级状态 `activeMcpServers: Set<String>` 与 `serverLastUsed`（运行时、不持久化）；`resolveTools()` 按激活状态过滤 + 冷却期（20 轮）自动卸载
-5. 工具名需加入 `config.tools` 白名单才能被 LLM 调用（现有 `resolveTools` 机制），文档化配置方式
+1. `SystemPromptBuilder.buildMcpCatalog(mcpManager)`：目录段（全部服务显示 name (version, N 工具) + 工具名/描述，激活标注 [已加载]，含 `load_mcp_toolset` 引导语）
+2. `McpManager` 增强：addServer 连接成功后缓存协议信息（version/工具数/工具目录）；激活状态机（进程级 + Mutex）；loadToolset 纯激活（无网络，返回 (Bool, String)）
+3. 新建 `tool/load_mcp_toolset.cj` 工具：校验存在 → 检查连接 → 激活 → 返回工具清单；幂等
+4. `AgentRuntime` 持有 McpManager：每轮 advanceTurn、`resolveTools()` 按 `isActiveTool(name, config.mcpCooldownTurns)` 过滤、工具执行后 markUsedTool；**冷却为 agent 级配置默认关闭**（`AgentConfig.mcpCooldownTurns`，0=不启用，TOML/DTO 可配）
+5. 工具名需加入 `config.tools` 白名单（`mcp_*` 通配）才能被 LLM 调用；`load_mcp_toolset` 工具在 main.cj 启动时注册
 
-**验收**：单元测试覆盖——未激活服务工具不在列表、`load_mcp_toolset` 后出现、重复加载幂等、冷却期后自动卸载、未知服务报错；集成测试可沿用现有 `ProviderIntegrationTest` 标签模式跳过网络。
+**验收**（全部通过）：McpManager 14 单测（状态机/缓存/校验/幂等）+ LoadMcpToolsetTool 3 单测 + 目录段 5 单测 + runtime_test.cj 3 集成测试（未激活过滤/激活可见/冷却过期）+ config 3 测试；全量 191 PASSED + 6 SKIPPED。
 
 ### 10.4 P2：Skills 渐进式披露（依赖 P0，可与 P1/P3 并行）
 
