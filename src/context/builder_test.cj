@@ -118,7 +118,7 @@ func ctxBuilder_initMessages_injectsSystemMessage() {
     match (msgs[0]) {
         case um: UserMessage =>
             match (um.content.blocks()[0]) {
-                case ContentBlock.TextBlock(t) => @Expect(t.startsWith("sys"), true)
+                case ContentBlock.TextBlock(t) => @Expect(t, "sys\n\n")
                 case _ => @Expect(false, true)
             }
         case _ => @Expect(false, true)
@@ -131,6 +131,14 @@ func ctxBuilder_initMessages_emptySystemNoInjection() {
     let history = ArrayList<Message>([UserMessage(ContentList.ofText("hi"), 0)])
     let msgs = b.initMessages("", ArrayList(), history)
     @Expect(msgs.size, 1)
+    match (msgs[0]) {
+        case um: UserMessage =>
+            match (um.content.blocks()[0]) {
+                case ContentBlock.TextBlock(t) => @Expect(t, "hi")
+                case _ => @Expect(false, true)
+            }
+        case _ => @Expect(false, true)
+    }
 }
 
 @Test
@@ -145,6 +153,47 @@ func ctxBuilder_initMessages_appendsHistory() {
         case um: UserMessage =>
             match (um.content.blocks()[0]) {
                 case ContentBlock.TextBlock(t) => @Expect(t, "a")
+                case _ => @Expect(false, true)
+            }
+        case _ => @Expect(false, true)
+    }
+    match (msgs[2]) {
+        case um: UserMessage =>
+            match (um.content.blocks()[0]) {
+                case ContentBlock.TextBlock(t) => @Expect(t, "b")
+                case _ => @Expect(false, true)
+            }
+        case _ => @Expect(false, true)
+    }
+}
+
+@Test
+func ctxBuilder_initMessages_withSkillAndContext() {
+    let reg = SkillRegistry()
+    reg.register(fakeSkill("code-review", "## 审查流程\n1. 读文件"))
+    let ctx = HashMap<String, String>()
+    ctx["workDir"] = "/home/x"
+    let env = SessionEnvironment("", ctx)
+    let b = ContextBuilder(reg, env)
+    let history = ArrayList<Message>([UserMessage(ContentList.ofText("hi"), 0)])
+    let names = ArrayList<String>(["code-review"])
+    let msgs = b.initMessages("sys", names, history)
+    @Expect(msgs.size, 2)
+    match (msgs[0]) {
+        case um: UserMessage =>
+            match (um.content.blocks()[0]) {
+                case ContentBlock.TextBlock(t) =>
+                    @Expect(t.contains("## 审查流程"), true)
+                    @Expect(t.contains("[Session Context]"), true)
+                    @Expect(t.contains("workDir = /home/x"), true)
+                case _ => @Expect(false, true)
+            }
+        case _ => @Expect(false, true)
+    }
+    match (msgs[1]) {
+        case um: UserMessage =>
+            match (um.content.blocks()[0]) {
+                case ContentBlock.TextBlock(t) => @Expect(t, "hi")
                 case _ => @Expect(false, true)
             }
         case _ => @Expect(false, true)
