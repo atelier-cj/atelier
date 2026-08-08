@@ -551,9 +551,11 @@ atelier/
 │   │   └── session.cj        # SessionHeader / Entry / PathToLeaf
 │   │
 │   ├── context/
-│   │   ├── compaction.cj     # 上下文压缩
-│   │   ├── tokens.cj         # Token 估算
-│   │   └── cutpoint.cj       # 压缩切点选择
+│   │   ├── builder.cj               # L2 上下文构建器（系统提示 + 消息组装 + ChatRequest）
+│   │   ├── system_prompt_builder.cj # 系统提示分段构建（固定前缀 + 动态后缀）
+│   │   ├── compaction.cj            # 上下文压缩
+│   │   ├── tokens.cj                # Token 估算
+│   │   └── cutpoint.cj              # 压缩切点选择
 │   │
 │   ├── trust/
 │   │   ├── manager.cj        # 信任状态管理
