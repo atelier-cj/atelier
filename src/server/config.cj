@@ -5,7 +5,6 @@ import atelier.provider.*
 import atelier.tool.McpServerConfig
 import tomlcj.*
 import stdx.serialization.serialization.*
-import stdx.encoding.json.ToJson
 import std.collection.*
 import std.fs.*
 import std.env.*
@@ -244,8 +243,7 @@ public class TomlProvider <: Serializable<TomlProvider> {
 
 public func toProviderConfig(tp: TomlProvider): ProviderConfig {
     let extra = HashMap<String, JsonValue>()
-    let jv = JsonValue.parse(tp.extra.toJson().toJsonString())
-    match (jv) {
+    match (JsonValue.fromDataModel(tp.extra)) {
         case JsonValue.Map(m) =>
             for ((k, v) in m) { extra[k] = v }
         case _ => ()
