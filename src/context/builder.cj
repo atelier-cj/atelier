@@ -38,6 +38,8 @@ public class ContextBuilder {
                 if (catalog != "") { text = text + catalog }
             case None => ()
         }
+        let skillCatalog = this.promptBuilder.buildSkillCatalog(this.skills)
+        if (skillCatalog != "") { text = text + skillCatalog }
         if (text != "") {
             result.add(UserMessage(ContentList.ofText(text), 0))
         }
