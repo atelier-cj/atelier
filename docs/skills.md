@@ -64,6 +64,15 @@ skills = ["code-review", "debugging"]
 ...
 ```
 
+## 动态加载（use_skills）
+
+除 `config.skills` 静态声明外，Agent 可调用 `use_skills(name)` 工具按需加载 Skill：
+
+- 系统提示中的 `[可用 Skills]` 目录段列出全部已注册技能（name + description）
+- LLM 判断需要时调用 `use_skills(name)`，指令全文作为工具结果进入对话历史，立即生效
+- 与静态声明并存：静态声明的技能始终注入，动态技能按需加载
+- 重复调用幂等；技能被上下文压缩后可再次调用加载
+
 ## 校验
 
 Atelier 加载 Skill 时校验 frontmatter 完整性。校验失败仅跳过该 Skill，不阻塞启动。

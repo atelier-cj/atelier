@@ -60,6 +60,7 @@ main(): Int64 {
     handler.setMcpManager(mcpMgr)
     toolReg.register(LoadMcpToolsetTool(mcpMgr, toolReg))
     try { skillReg.loadDirectory(configDir + "/.agents/skills") } catch (_) { () }
+    toolReg.register(UseSkillsTool(skillReg))
     for (a in config.agent) {
         try { agentReg.create(a.name, agentConfigFrom(a)) } catch (_) { () }
     }

@@ -174,12 +174,12 @@ P0 前，系统提示拼接是 runtime.cj 的顶层函数 `buildSystemPromptWith
 ┌──────────────────────────────────────────────────────┐
 │ [固定] config.systemPrompt（Agent 角色定义、核心指令）│  ← 前缀，缓存友好
 ├──────────────────────────────────────────────────────┤
-│ [固定] Skills 指令（config.skills 全量注入）          │  ← 现状；🚧 演进为目录 + use_skills 激活
+│ [固定] Skills 指令（config.skills 全量注入）          │  ← 兼容路径（P2 保留）
 ├──────────────────────────────────────────────────────┤
 │ [动态] [Project Rules] 工作目录 AGENTS.md             │  ← 会话级变动，挂末尾
 │ [动态] [Session Context] env.context 键值对           │  ← 会话级变动
-│ [动态] [可用 MCP 服务] 服务目录（演进，第五章）        │  ← 会话级变动
-│ [动态] [可用 Skills] 目录（演进，第七章）              │  ← 会话级变动
+│ [动态] [可用 MCP 服务] 服务目录（✅ P1，第五章）       │  ← 会话级变动
+│ [动态] [可用 Skills] 目录（✅ P2，第七章）             │  ← 会话级变动
 └──────────────────────────────────────────────────────┘
 ```
 
@@ -406,49 +406,28 @@ public struct Skill {
 
 **注入方式**（✅ SystemPromptBuilder.build 第 2 段）：`config.skills` 声明哪些 Skill 启用，运行时把其 `instructions` **全量拼入系统提示**。
 
-**当前局限**：
+**当前局限（P2 已部分缓解）**：
 
-- 静态声明（AgentConfig.skills），AI 无法自行发现/激活新 Skill
-- 全量注入（即使某个 Skill 本轮用不到也占 token）
-- 无 Skill 目录（name+description）注入，AI 不知道"有什么可用"
+- 静态声明（AgentConfig.skills）仍为唯一自动注入方式——✅ P2 起 AI 可通过 `[可用 Skills]` 目录 + `use_skills(name)` 动态加载未声明的 Skill
+- 全量注入（config.skills 声明的 Skill 固定占 token）——保留为兼容路径，新 Skill 走动态加载
 
-### 6.2 🚧 演进：渐进式披露（对齐 AgentSkills 规范）
+### 6.2 ✅ P2 已实现：渐进式披露（方案 B：工具结果即指令）
 
-规范三层披露，对应两种工具，**核心是 `use_skills`**：
+规范三层披露（AgentSkills），P2 落地第 1、2 层：
 
-| 层级 | Token | 机制 | 工具 |
+| 层级 | Token | 机制 | 落地 |
 |------|-------|------|------|
-| 第 1 层：Metadata | ~100 | 全部 Skill 的 name+description 常驻系统提示（目录） | `find_skills`（可选，动态检索） |
-| 第 2 层：Instructions | <5000 | Skill 激活时注入完整 SKILL.md body | **`use_skills(name)`**（必选） |
-| 第 3 层：Resources | 按需 | scripts/references/assets 需要时读取 | — |
+| 第 1 层：Metadata | ~100 | 全部 Skill 的 name+description 常驻系统提示（目录段） | ✅ `SystemPromptBuilder.buildSkillCatalog`：`[可用 Skills]` 段（name+description+`use_skills` 引导语），ContextBuilder.initMessages 拼接 |
+| 第 2 层：Instructions | <5000 | Skill 激活时加载完整 SKILL.md body | ✅ `use_skills(name)` 工具：返回指令全文作为**工具结果**，进入对话历史立即生效 |
+| 第 3 层：Resources | 按需 | scripts/references/assets 需要时读取 | 🚧 后续 |
 
-```cangjie
-// 🚧 tool/builtin/use_skills.cj（演进方向）
-public class UseSkillsTool <: Tool {
-    public func name() { "use_skills" }
-    public func description() {
-        "按名称激活一个 Skill，将 SKILL.md 完整指令注入后续上下文。"
-        "参数: name: String（技能名，如 \"data-cleaning\"）"
-    }
-    // execute: registry.get(name) → 返回 Skill 指令 + 目录，并记录激活状态
-}
+**关键设计：工具结果即指令（无激活状态）**
 
-// 🚧 tool/builtin/find_skills.cj（演进方向，可选）
-public class FindSkillsTool <: Tool {
-    public func name() { "find_skills" }
-    // execute: 列出全部 Skill 的 name + description，支持关键词过滤
-}
-```
-
-**挂载方式取舍**：
-
-| 方式 | 结论 |
-|------|------|
-| 工具调用（use_skills） | ✅ 主路线：AI 按需激活，token 最优，与 MCP 按需加载一致 |
-| 斜杠命令 `/skill` | ✅ 用户主动触发（REPL 层，与 `/tools` 等命令并列） |
-| 自动匹配（现 config.skills 静态注入） | ⚠️ 保留为"默认常驻"技能集，与 use_skills 并存 |
-
-**冲突处理**：同名 Skill 用户自定义 > 内置（后加载覆盖，与 SkillRegistry 现状一致）；项目本地 > 全局（扫描目录优先级）。
+- `use_skills(name)`（✅ tool/builtin/use_skills.cj）：`SkillRegistry.get(name)` 命中 → `ToolResult("# Skill: " + name + "\n\n" + instructions)`；未知名报错；缺参报错；幂等（重复调用返回同样指令）
+- **无 loadedSkills 状态、无系统提示注入改造**——REPL 每次消息创建新 runtime（无会话对象），状态放进程级会跨 agent 污染、放请求级每次丢失；工具结果进入对话历史，天然按需、天然幂等、跨请求靠会话持久化保持（被压缩 LLM 可再调用）
+- `config.skills` 全量注入**保留为兼容路径**（默认常驻技能集），与 use_skills 动态加载并存
+- `find_skills` **不实现**（YAGNI——目录段已含检索所需全部信息）
+- 冲突处理：同名 Skill 后加载覆盖（与 SkillRegistry 现状一致）；main.cj 启动时注册 UseSkillsTool（serve/repl/run 三模式可用）
 
 ---
 
@@ -536,7 +515,7 @@ public class FindSkillsTool <: Tool {
 | `tool/archive_history.cj` | 🚧 | AI 自主归档（LLM 摘要落 L1） | `execute(start, end, summary)` |
 | `tool/load_mcp_toolset.cj` | ✅ | MCP 按服务激活（纯状态翻转，无网络） | `execute(server_id)` |
 | `tool/builtin/use_skills.cj` | 🚧 | Skill 按需激活（渐进披露第 2 层） | `execute(name)` |
-| `tool/builtin/find_skills.cj` | 🚧 | Skill 检索（第 1 层辅助） | `execute(keyword?)` |
+| `tool/builtin/use_skills.cj` | ✅ | Skill 按需加载（工具结果即指令） | `execute(name)` |
 
 ### 9.2 演进路线（按依赖排序）
 
@@ -603,18 +582,19 @@ P1 / P2 / P3 **互不依赖，可并行**；P4 依赖 P3，排在最后。每个
 
 **验收**（全部通过）：McpManager 14 单测（状态机/缓存/校验/幂等）+ LoadMcpToolsetTool 3 单测 + 目录段 5 单测 + runtime_test.cj 3 集成测试（未激活过滤/激活可见/冷却过期）+ config 3 测试；全量 191 PASSED + 6 SKIPPED。
 
-### 10.4 P2：Skills 渐进式披露（依赖 P0，可与 P1/P3 并行）
+### 10.4 P2：Skills 渐进式披露（依赖 P0，可与 P1/P3 并行）✅ 已完成（2026-08-09）
 
-**目标**：从"config.skills 静态全量注入"改为"目录常驻 + `use_skills` 按需激活"。
+**目标**：从"config.skills 静态全量注入"升级为"目录常驻 + `use_skills` 按需激活"。
 
-**任务**：
+**任务**（实施记录，方案 B 与设计 6.2 一致）：
 
-1. `SystemPromptBuilder.withSkillCatalog(catalog)`：注入 Skill 目录段（name + description + `use_skills` 引导语）；现状的 `withSkillsInstructions`（全量指令）保留为兼容路径
-2. 新建 `tool/builtin/use_skills.cj`：按名激活，返回 SKILL.md 指令 + 目录，记录激活状态；未知 skill 报错；重复激活幂等
-3. （可选）`tool/builtin/find_skills.cj`：关键词过滤列出目录
-4. `AgentRuntime` 会话级 `loadedSkills` 状态（运行时、不持久化）；激活后的指令注入后续轮次系统提示
+1. `SystemPromptBuilder.buildSkillCatalog(skillRegistry)`：目录段（`[可用 Skills]` + name/description + `use_skills` 引导语），ContextBuilder.initMessages 拼接
+2. 新建 `tool/builtin/use_skills.cj`：按名加载，**工具结果即指令全文**（进入对话历史立即生效）；未知 skill 报错；缺参报错；幂等
+3. `find_skills` **不实现**（YAGNI，目录段已含检索信息）
+4. **无 loadedSkills 状态**（REPL 每次消息新建 runtime 无会话对象；工具结果方案无需状态）；`config.skills` 全量注入保留兼容路径
+5. main.cj 启动注册 UseSkillsTool（serve/repl/run 三模式可用）
 
-**验收**：单元测试覆盖——目录段格式、激活后指令进入上下文、幂等、未知名报错、config.skills 旧方式仍工作（兼容）；补 skills 相关回归测试。
+**验收**（全部通过）：UseSkillsTool 3 单测（指令返回/未知报错/缺参报错）+ 目录段 3 单测（含引导语与 name/description、无 skill 空、ContextBuilder 首条含目录段）；config.skills 兼容无回归；全量 197 PASSED + 6 SKIPPED。
 
 ### 10.5 P3：AI 自主归档（依赖 P0，可与 P1/P2 并行）
 
