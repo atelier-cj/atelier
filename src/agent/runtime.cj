@@ -33,33 +33,15 @@ public class AgentRuntime {
     private let askUser: AskUserFn
     private let modelRegistry: ModelContextRegistry
     private let sessionEnv: SessionEnvironment
+    private let mcpManager: McpManager
 
-    public init(config: AgentConfig, provider: Provider,
-        toolRegistry: ToolRegistry, sessionStore: SessionStore,
-        trustManager: TrustManager, skillRegistry: SkillRegistry,
-        agentRegistry: AgentRegistry, providerRegistry: ProviderRegistry,
-        hooks: ArrayList<Hook>, askUser: AskUserFn) {
-        this.config = config
-        this.provider = provider
-        this.toolRegistry = toolRegistry
-        this.sessionStore = sessionStore
-        this.trustManager = trustManager
-        this.skillRegistry = skillRegistry
-        this.agentRegistry = agentRegistry
-        this.providerRegistry = providerRegistry
-        this.toolExecutor = ToolExecutor(this.toolRegistry)
-        this.hooks = hooks
-        this.askUser = askUser
-        this.modelRegistry = ModelContextRegistry()
-        this.sessionEnv = SessionEnvironment()
-    }
-
+    // 13 参：最全签名（hooks + askUser + sessionEnv + mcpManager），其余构造统一委托至此
     public init(config: AgentConfig, provider: Provider,
         toolRegistry: ToolRegistry, sessionStore: SessionStore,
         trustManager: TrustManager, skillRegistry: SkillRegistry,
         agentRegistry: AgentRegistry, providerRegistry: ProviderRegistry,
         hooks: ArrayList<Hook>, askUser: AskUserFn,
-        sessionEnv: SessionEnvironment) {
+        sessionEnv: SessionEnvironment, mcpManager: McpManager) {
         this.config = config
         this.provider = provider
         this.toolRegistry = toolRegistry
@@ -73,25 +55,29 @@ public class AgentRuntime {
         this.askUser = askUser
         this.modelRegistry = ModelContextRegistry()
         this.sessionEnv = sessionEnv
+        this.mcpManager = mcpManager
     }
 
+    // 11 参：hooks + askUser + mcpManager
     public init(config: AgentConfig, provider: Provider,
         toolRegistry: ToolRegistry, sessionStore: SessionStore,
         trustManager: TrustManager, skillRegistry: SkillRegistry,
-        agentRegistry: AgentRegistry, providerRegistry: ProviderRegistry) {
-        this.config = config
-        this.provider = provider
-        this.toolRegistry = toolRegistry
-        this.sessionStore = sessionStore
-        this.trustManager = trustManager
-        this.skillRegistry = skillRegistry
-        this.agentRegistry = agentRegistry
-        this.providerRegistry = providerRegistry
-        this.toolExecutor = ToolExecutor(this.toolRegistry)
-        this.hooks = ArrayList<Hook>()
-        this.askUser = { q => "" }
-        this.modelRegistry = ModelContextRegistry()
-        this.sessionEnv = SessionEnvironment()
+        agentRegistry: AgentRegistry, providerRegistry: ProviderRegistry,
+        hooks: ArrayList<Hook>, askUser: AskUserFn, mcpManager: McpManager) {
+        this(config, provider, toolRegistry, sessionStore, trustManager,
+            skillRegistry, agentRegistry, providerRegistry, hooks, askUser,
+            SessionEnvironment(), mcpManager)
+    }
+
+    // 9 参：config..providerRegistry + mcpManager
+    public init(config: AgentConfig, provider: Provider,
+        toolRegistry: ToolRegistry, sessionStore: SessionStore,
+        trustManager: TrustManager, skillRegistry: SkillRegistry,
+        agentRegistry: AgentRegistry, providerRegistry: ProviderRegistry,
+        mcpManager: McpManager) {
+        this(config, provider, toolRegistry, sessionStore, trustManager,
+            skillRegistry, agentRegistry, providerRegistry,
+            ArrayList<Hook>(), { q => "" }, mcpManager)
     }
 
     public func chat(messages: ArrayList<Message>): EventStream<AgentEvent, ArrayList<Message>> {
@@ -125,6 +111,7 @@ public class AgentRuntime {
                 while (!finished && turnCount < Int64(this.config.maxTurns)) {
                     stream.emit(TurnStartEvent())
                     turnCount++
+                    this.mcpManager.advanceTurn()
                     log.info("turn ${turnCount} start", Array<Attr>())
 
                     stream.emit(MessageStartEvent(currentMessages[0]))
@@ -289,6 +276,7 @@ public class AgentRuntime {
                                         if (resIdx < results.size) {
                                             let r = results[Int64(resIdx)]
                                             log.info("tool ${tc.name} done: err=${r.isError}", Array<Attr>())
+                                            this.mcpManager.markUsedTool(tc.name)
                                             let tr = ToolResultMessage(tc.id, tc.name, ContentList.ofText(r.text), r.isError, 0)
                                             currentMessages.add(tr)
                                             callAfterToolHooks(hookState, turnCount, tc, tr)
@@ -362,7 +350,8 @@ public class AgentRuntime {
                         let tool = AgentTool(agentName, cfg, prov,
                             this.toolRegistry, this.sessionStore,
                             this.trustManager, this.skillRegistry,
-                            this.agentRegistry, this.providerRegistry)
+                            this.agentRegistry, this.providerRegistry,
+                            this.mcpManager)
                         this.toolRegistry.register(tool)
                         result.add(OpenAITool(tool.name(), tool.description(), tool.schema()))
                     case None => ()
@@ -371,6 +360,9 @@ public class AgentRuntime {
                 let prefix = name[0..name.size - 2]
                 for (t in this.toolRegistry.list()) {
                     if (t.name().startsWith(prefix)) {
+                        if (!this.mcpManager.isActiveTool(t.name(), this.config.mcpCooldownTurns)) {
+                            continue
+                        }
                         result.add(OpenAITool(t.name(), t.description(), t.schema()))
                     }
                 }

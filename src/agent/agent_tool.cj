@@ -20,11 +20,13 @@ public class AgentTool <: Tool {
     private let skillRegistry: SkillRegistry
     private let agentRegistry: AgentRegistry
     private let providerRegistry: ProviderRegistry
+    private let mcpManager: McpManager
 
     public init(agentName: String, config: AgentConfig, provider: Provider,
         toolRegistry: ToolRegistry, sessionStore: SessionStore,
         trustManager: TrustManager, skillRegistry: SkillRegistry,
-        agentRegistry: AgentRegistry, providerRegistry: ProviderRegistry) {
+        agentRegistry: AgentRegistry, providerRegistry: ProviderRegistry,
+        mcpManager: McpManager) {
         this.agentName = agentName
         this.config = config
         this.provider = provider
@@ -34,6 +36,7 @@ public class AgentTool <: Tool {
         this.skillRegistry = skillRegistry
         this.agentRegistry = agentRegistry
         this.providerRegistry = providerRegistry
+        this.mcpManager = mcpManager
     }
 
     public func name(): String {
@@ -75,7 +78,8 @@ public class AgentTool <: Tool {
         let runtime = AgentRuntime(this.config, this.provider,
             this.toolRegistry, this.sessionStore,
             this.trustManager, this.skillRegistry,
-            this.agentRegistry, this.providerRegistry)
+            this.agentRegistry, this.providerRegistry,
+            this.mcpManager)
         let msgs = ArrayList<Message>()
         msgs.add(UserMessage(ContentList.ofText(prompt), 0))
         let stream = runtime.chat(msgs)

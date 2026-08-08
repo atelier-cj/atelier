@@ -165,6 +165,7 @@ public class TomlAgent <: Serializable<TomlAgent> {
     public var provider: String = ""
     public var tools: ArrayList<String> = ArrayList()
     public var skills: ArrayList<String> = ArrayList()
+    public var mcpCooldownTurns: Int64 = 0
     public init() {}
 
     public func serialize(): DataModel {
@@ -175,6 +176,7 @@ public class TomlAgent <: Serializable<TomlAgent> {
             .add(field<String>("provider", provider))
             .add(field<ArrayList<String>>("tools", tools))
             .add(field<ArrayList<String>>("skills", skills))
+            .add(field<Int64>("mcpCooldownTurns", mcpCooldownTurns))
     }
 
     public static func deserialize(dm: DataModel): TomlAgent {
@@ -199,6 +201,7 @@ public class TomlAgent <: Serializable<TomlAgent> {
                 }
             case _ => ()
         }
+        r.mcpCooldownTurns = match (dms.get("mcpCooldownTurns")) { case i: DataModelInt => i.getValue(); case _ => Int64(0) }
         r
     }
 }
@@ -348,7 +351,7 @@ public func agentConfigFrom(a: TomlAgent): AgentConfig {
         a.systemPrompt, None,
         a.model,
         if (a.provider == "") { None } else { Some(a.provider) },
-        a.tools, a.skills,
+        a.tools, a.skills, a.mcpCooldownTurns,
         UInt32(20), Float32(0.7), UInt32(4096), None,
         true, UInt32(16384), UInt32(20000), UInt32(50), UInt32(30), UInt32(0),
         ArrayList<String>(), None, 0, 0)

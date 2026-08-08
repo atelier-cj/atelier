@@ -28,6 +28,7 @@ public class REPL {
     private let skillRegistry: SkillRegistry
     private let agentRegistry: AgentRegistry
     private let providerRegistry: ProviderRegistry
+    private let mcpManager: McpManager
     private var running: Bool = true
     private var sessionId: String
     private var messages: ArrayList<Message>
@@ -39,7 +40,7 @@ public class REPL {
         toolRegistry: ToolRegistry, sessionStore: SessionStore,
         trustManager: TrustManager, skillRegistry: SkillRegistry,
         agentRegistry: AgentRegistry, providerRegistry: ProviderRegistry,
-        resumeSessionId: String) {
+        resumeSessionId: String, mcpManager: McpManager) {
         this.agentName = agentName
         this.registry = registry
         this.agentConfig = agentConfig
@@ -50,6 +51,7 @@ public class REPL {
         this.skillRegistry = skillRegistry
         this.agentRegistry = agentRegistry
         this.providerRegistry = providerRegistry
+        this.mcpManager = mcpManager
         this.sessionCounter = 1
         this.modelOverride = ""
         if (resumeSessionId != "") {
@@ -86,6 +88,7 @@ public class REPL {
             this.agentConfig.systemPrompt, this.agentConfig.userPromptTemplate,
             model, this.agentConfig.provider,
             this.agentConfig.tools, this.agentConfig.skills,
+            this.agentConfig.mcpCooldownTurns,
             this.agentConfig.maxTurns, this.agentConfig.temperature,
             this.agentConfig.maxOutputTokens, this.agentConfig.thinkingLevel,
             this.agentConfig.compactionEnabled,
@@ -102,7 +105,7 @@ public class REPL {
                 println("\n[Ask User] " + q)
                 print("> ")
                 readLine()
-            })
+            }, this.mcpManager)
     }
 
     public func run(): Unit {

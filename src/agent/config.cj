@@ -12,6 +12,7 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
     public let provider: Option<String>
     public let tools: ArrayList<String>
     public let skills: ArrayList<String>
+    public let mcpCooldownTurns: Int64
     public let maxTurns: UInt32
     public let temperature: Float32
     public let maxOutputTokens: UInt32
@@ -32,6 +33,7 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
         systemPrompt: String, userPromptTemplate: Option<String>,
         model: String, provider: Option<String>,
         tools: ArrayList<String>, skills: ArrayList<String>,
+        mcpCooldownTurns: Int64,
         maxTurns: UInt32, temperature: Float32, maxOutputTokens: UInt32,
         thinkingLevel: Option<String>,
         compactionEnabled: Bool, compactionReserveTokens: UInt32, keepRecentTokens: UInt32,
@@ -43,6 +45,7 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
         this.systemPrompt = systemPrompt; this.userPromptTemplate = userPromptTemplate
         this.model = model; this.provider = provider
         this.tools = tools; this.skills = skills
+        this.mcpCooldownTurns = mcpCooldownTurns
         this.maxTurns = maxTurns; this.temperature = temperature; this.maxOutputTokens = maxOutputTokens
         this.thinkingLevel = thinkingLevel
         this.compactionEnabled = compactionEnabled
@@ -57,7 +60,7 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
     public static func default(): AgentConfig {
         AgentConfig(
             "", None, "", None, "", None,
-            ArrayList(), ArrayList(),
+            ArrayList(), ArrayList(), Int64(0),
             UInt32(20), Float32(0.7), UInt32(4096), None,
             true, UInt32(16384), UInt32(20000), UInt32(50), UInt32(30), UInt32(0),
             ArrayList(), None, Int64(0), Int64(0))
@@ -86,6 +89,7 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
         w.writeName("createdBy").writeValue(this.createdBy)
         w.writeName("tools").writeValue(this.tools)
         w.writeName("skills").writeValue(this.skills)
+        w.writeName("mcpCooldownTurns").writeValue(this.mcpCooldownTurns)
         w.writeName("tags").writeValue(this.tags)
         w.endObject()
     }
@@ -95,6 +99,7 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
         var systemPrompt = ""; var userPromptTemplate: Option<String> = None
         var model = ""; var provider: Option<String> = None
         var tools = ArrayList<String>(); var skills = ArrayList<String>()
+        var mcpCooldownTurns = Int64(0)
         var maxTurns = UInt32(20); var temperature = Float32(0.7); var maxOutputTokens = UInt32(4096)
         var thinkingLevel: Option<String> = None
         var compactionEnabled = true
@@ -116,6 +121,7 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
                 case "provider" => provider = r.readValue<Option<String>>()
                 case "tools" => tools = r.readValue<ArrayList<String>>()
                 case "skills" => skills = r.readValue<ArrayList<String>>()
+                case "mcpCooldownTurns" => mcpCooldownTurns = r.readValue<Int64>()
                 case "maxTurns" => maxTurns = UInt32(r.readValue<Int64>())
                 case "temperature" => temperature = Float32(r.readValue<Float64>())
                 case "maxOutputTokens" => maxOutputTokens = UInt32(r.readValue<Int64>())
@@ -136,7 +142,7 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
         r.endObject()
 
         AgentConfig(name, description, systemPrompt, userPromptTemplate,
-            model, provider, tools, skills,
+            model, provider, tools, skills, mcpCooldownTurns,
             maxTurns, temperature, maxOutputTokens, thinkingLevel,
             compactionEnabled, compactionReserveTokens, keepRecentTokens, maxToolCalls,
             toolTimeout, minToolInterval,

@@ -4,6 +4,7 @@ import atelier.message.*
 import atelier.provider.*
 import atelier.session.*
 import atelier.skill.*
+import atelier.tool.*
 import std.collection.*
 import std.fs.*
 
@@ -218,4 +219,84 @@ func ctxBuilder_buildChatRequest_fields() {
     @Expect(req.maxTokens, 4096)
     @Expect(req.reasoningEffort, Some("low"))
     @Expect(req.tools.size, 0)
+}
+
+func mcpManagerWithTools(name: String): McpManager {
+    let m = McpManager()
+    m.registerServer(McpServerConfig(name, "stdio", "echo", ""))
+    m.updateServerInfo(name, "1.2.3", 2)
+    let tools = ArrayList<(String, String)>()
+    tools.add(("search_repos", "在 GitHub 上搜索仓库"))
+    tools.add(("list_issues", "列出仓库 issues"))
+    m.cacheServerTools(name, tools)
+    m
+}
+
+@Test
+func sysPrompt_mcpCatalogInjected() {
+    let spb = SystemPromptBuilder()
+    let out = spb.buildMcpCatalog(mcpManagerWithTools("github"))
+    @Expect(out.contains("load_mcp_toolset"), true)
+    @Expect(out.contains("github (v1.2.3, 2 个工具)"), true)
+    @Expect(out.contains("search_repos"), true)
+    @Expect(out.contains("在 GitHub 上搜索仓库"), true)
+}
+
+@Test
+func sysPrompt_mcpCatalogActiveMarked() {
+    let m = mcpManagerWithTools("github")
+    m.activate("github")
+    let spb = SystemPromptBuilder()
+    let out = spb.buildMcpCatalog(m)
+    @Expect(out.contains("[已加载]"), true)
+}
+
+@Test
+func sysPrompt_mcpCatalogMissingVersionFallback() {
+    let m = McpManager()
+    m.registerServer(McpServerConfig("github", "stdio", "echo", ""))
+    let tools = ArrayList<(String, String)>()
+    tools.add(("search_repos", "在 GitHub 上搜索仓库"))
+    m.cacheServerTools("github", tools)
+    let spb = SystemPromptBuilder()
+    let out = spb.buildMcpCatalog(m)
+    @Expect(out.contains("github (v?, 1 个工具)"), true)
+}
+
+@Test
+func sysPrompt_mcpCatalogEmptyWithoutServers() {
+    let spb = SystemPromptBuilder()
+    @Expect(spb.buildMcpCatalog(McpManager()), "")
+}
+
+@Test
+func ctxBuilder_mcpCatalogInSystemMessage() {
+    let b = ContextBuilder(SkillRegistry(), SessionEnvironment(), mcpManagerWithTools("github"))
+    let msgs = b.initMessages("sys", ArrayList(), ArrayList())
+    @Expect(msgs.size, 1)
+    match (msgs[0]) {
+        case um: UserMessage =>
+            match (um.content.blocks()[0]) {
+                case ContentBlock.TextBlock(t) =>
+                    @Expect(t.contains("load_mcp_toolset"), true)
+                    @Expect(t.contains("github"), true)
+                case _ => @Expect(false, true)
+            }
+        case _ => @Expect(false, true)
+    }
+}
+
+@Test
+func ctxBuilder_noMcpNoCatalog() {
+    let b = ContextBuilder(SkillRegistry(), SessionEnvironment())
+    let msgs = b.initMessages("sys", ArrayList(), ArrayList())
+    @Expect(msgs.size, 1)
+    match (msgs[0]) {
+        case um: UserMessage =>
+            match (um.content.blocks()[0]) {
+                case ContentBlock.TextBlock(t) => @Expect(t.contains("load_mcp_toolset"), false)
+                case _ => @Expect(false, true)
+            }
+        case _ => @Expect(false, true)
+    }
 }

@@ -41,20 +41,29 @@ description = "通用助手"       # 描述（可选）
 model = "gpt-4o"               # 模型名称
 provider = "default"           # 使用的 Provider（可选，不指定则按 model 在 registry 中查找）
 systemPrompt = "你是一个有用的助手"
-tools = ["bash", "read_file"]  # 可用工具列表
+tools = ["bash", "read_file", "mcp_*"]  # 可用工具列表（mcp_* 通配暴露已激活的 MCP 工具）
 skills = ["code_review"]       # Skill 列表（可选）
+mcpCooldownTurns = 0           # MCP 冷却卸载轮数（可选，0=不启用默认；>0=N 轮未用自动卸载）
 
 [logging]
 level = "info"                 # 日志级别，覆盖 server.logLevel
 
 [[mcpServer]]
-name = "playwright"            # MCP 服务器名称
+name = "playwright"            # MCP 服务器名称（不能含下划线）
 transport = "stdio"            # 传输方式：stdio / streamable-http / session-http
 command = "npx @playwright/mcp"
 # streamable-http 时：
 # transport = "streamable-http"
 # url = "http://localhost:3100"
 ```
+
+### MCP 服务
+
+- 启动时连接全部 `[[mcpServer]]`（连接不占用 LLM token），工具定义**不直接进入 LLM 工具列表**
+- LLM 通过调用 `load_mcp_toolset(server_id)` 工具**激活**服务后，其 `mcp_<server>_<tool>` 工具才进入可用列表（需在 `tools` 白名单配置 `mcp_*` 通配）
+- 激活状态进程级共享、不持久化；`mcpCooldownTurns > 0` 时，连续 N 轮未使用该服务的工具会自动卸载
+- 系统提示中的 `[可用 MCP 服务]` 目录段展示全部服务（名称/版本/工具清单），激活服务标注 `[已加载]`
+- 服务名不能包含下划线（工具名 `mcp_<server>_<tool>` 前缀解析依赖）
 
 ### 会话环境
 

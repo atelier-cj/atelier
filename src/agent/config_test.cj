@@ -14,7 +14,7 @@ func config_createWithAllFields() {
         "data-assistant", Some("帮助分析业务数据的智能助手"),
         "你是一个数据分析专家", Some("用户的问题是：{{query}}"),
         "gpt-4o", Some("openai"),
-        tools, skills,
+        tools, skills, Int64(0),
         UInt32(10), Float32(0.3), UInt32(8192), Some("low"),
         true, UInt32(20000), UInt32(30000), UInt32(30), UInt32(30), UInt32(0),
         tags, Some("admin"), Int64(1000), Int64(2000))
@@ -42,7 +42,7 @@ func config_withOptionalsNone() {
     let cfg = AgentConfig(
         "minimal", None, "Be helpful", None,
         "claude-3-haiku", None,
-        ArrayList(), ArrayList(),
+        ArrayList(), ArrayList(), Int64(0),
         UInt32(5), Float32(1.0), UInt32(2048), None,
         false, UInt32(8192), UInt32(10000), UInt32(50), UInt32(30), UInt32(0),
         ArrayList(), None, Int64(0), Int64(0))
@@ -91,7 +91,7 @@ func config_jsonRoundTrip_allFields() {
         "json-test", Some("JSON round-trip test"),
         "You are a test agent", Some("User query: {{input}}"),
         "gpt-4o-mini", Some("openai"),
-        tools, skills,
+        tools, skills, Int64(7),
         UInt32(15), Float32(0.5), UInt32(2048), Some("medium"),
         true, UInt32(16384), UInt32(25000), UInt32(50), UInt32(30), UInt32(0),
         tags, Some("tester"), Int64(100), Int64(200))
@@ -107,6 +107,7 @@ func config_jsonRoundTrip_allFields() {
     @Expect(restored.provider, original.provider)
     @Expect(restored.tools[0], original.tools[0]); @Expect(restored.tools[1], original.tools[1])
     @Expect(restored.skills[0], original.skills[0])
+    @Expect(restored.mcpCooldownTurns, original.mcpCooldownTurns)
     @Expect(restored.maxTurns, original.maxTurns)
     @Expect(restored.temperature, original.temperature)
     @Expect(restored.maxOutputTokens, original.maxOutputTokens)
@@ -142,7 +143,7 @@ func config_jsonRoundTrip_withOptionals() {
     let original = AgentConfig(
         "optionals-test", None, "System prompt here", None,
         "deepseek-chat", None,
-        ArrayList(), ArrayList(),
+        ArrayList(), ArrayList(), Int64(0),
         UInt32(5), Float32(1.0), UInt32(1024), None,
         false, UInt32(4096), UInt32(8000), UInt32(50), UInt32(30), UInt32(0),
         ArrayList(), None, Int64(0), Int64(0))
@@ -165,4 +166,34 @@ func config_jsonRoundTrip_withOptionals() {
 func config_toString_containsName() {
     let cfg = AgentConfig.default()
     @Expect(cfg.toString().contains("AgentConfig"), true)
+}
+
+@Test
+func config_mcpCooldownDefaultZero() {
+    let cfg = AgentConfig.default()
+    @Expect(cfg.mcpCooldownTurns, Int64(0))
+}
+
+@Test
+func config_mcpCooldownRoundTrip() {
+    let cfg = AgentConfig("a", None, "", None, "", None,
+        ArrayList(), ArrayList(), Int64(5),
+        UInt32(20), Float32(0.7), UInt32(4096), None,
+        true, UInt32(16384), UInt32(20000), UInt32(50), UInt32(30), UInt32(0),
+        ArrayList(), None, Int64(0), Int64(0))
+    let v = JsonValue.fromObject(cfg)
+    let back = JsonValue.toObject<AgentConfig>(v)
+    @Expect(back.mcpCooldownTurns, Int64(5))
+}
+
+@Test
+func config_mcpCooldownFromJsonMissingFieldDefaultsZero() {
+    let v = JsonValue.fromObject(AgentConfig.default())
+    let obj = match (v) {
+        case JsonValue.Map(m) => m
+        case _ => HashMap<String, JsonValue>()
+    }
+    obj.remove("mcpCooldownTurns")
+    let back = JsonValue.toObject<AgentConfig>(JsonValue.Map(obj))
+    @Expect(back.mcpCooldownTurns, Int64(0))
 }
