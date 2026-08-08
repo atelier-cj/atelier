@@ -15,12 +15,18 @@ public class OpenAIProvider <: Provider {
     private let provName: String
     private let baseURL: String
     private let apiKey: String
+    private let headers: ArrayList<String>
     private let httpClient: Client
 
     public init(name: String, baseURL: String, apiKey: String) {
+        this(name, baseURL, apiKey, ArrayList<String>())
+    }
+
+    public init(name: String, baseURL: String, apiKey: String, headers: ArrayList<String>) {
         this.provName = name
         this.baseURL = baseURL.trimEnd('/')
         this.apiKey = apiKey
+        this.headers = headers
         let httpLogger = NoopLogger()
         httpLogger.level = LogLevel.OFF
         let b = ClientBuilder().logger(httpLogger)
@@ -39,13 +45,14 @@ public class OpenAIProvider <: Provider {
     public func chat(req: ChatRequest): ChatResponse {
         let oaiReq = buildRequest(req, false)
         let bodyJson = toJsonString(oaiReq)
-        let httpReq = HttpRequestBuilder()
-            .url(this.baseURL + "/chat/completions")
-            .header("Content-Type", "application/json")
-            .header("Authorization", "Bearer " + this.apiKey)
-            .body(bodyJson)
-            .post()
-            .build()
+        let b = HttpRequestBuilder()
+        b.url(this.baseURL + "/chat/completions")
+        b.header("Content-Type", "application/json")
+        b.header("Authorization", "Bearer " + this.apiKey)
+        applyExtraHeaders(b, this.headers)
+        b.body(bodyJson)
+        b.post()
+        let httpReq = b.build()
         let resp = this.httpClient.send(httpReq)
         if (resp.status != 200) {
             throw Exception("OpenAI API error [" + resp.status.toString() + "]: " + readAll(resp.body))
@@ -66,7 +73,7 @@ public class OpenAIProvider <: Provider {
         let oaiReq = buildRequest(req, true)
         let bodyJson = toJsonString(oaiReq)
         spawn {
-            doStreamRequest(this.httpClient, this.baseURL, this.apiKey, bodyJson, stream)
+            doStreamRequest(this.httpClient, this.baseURL, this.apiKey, this.headers, bodyJson, stream)
         }
         stream
     }
@@ -78,16 +85,17 @@ func buildRequest(req: ChatRequest, stream: Bool): OpenAIRequest {
         req.tools)
 }
 
-func doStreamRequest(client: Client, baseURL: String, apiKey: String,
+func doStreamRequest(client: Client, baseURL: String, apiKey: String, headers: ArrayList<String>,
     bodyJson: String, stream: EventStream<ChatDelta, AssistantMessage>): Unit {
     try {
-        let httpReq = HttpRequestBuilder()
-            .url(baseURL + "/chat/completions")
-            .header("Content-Type", "application/json")
-            .header("Authorization", "Bearer " + apiKey)
-            .body(bodyJson)
-            .post()
-            .build()
+        let b = HttpRequestBuilder()
+        b.url(baseURL + "/chat/completions")
+        b.header("Content-Type", "application/json")
+        b.header("Authorization", "Bearer " + apiKey)
+        applyExtraHeaders(b, headers)
+        b.body(bodyJson)
+        b.post()
+        let httpReq = b.build()
         let resp = client.send(httpReq)
         if (resp.status != 200) {
             let errBody = readAll(resp.body)
@@ -229,6 +237,18 @@ func readAll(input: InputStream): String {
     let raw = Array<Byte>(all.size, repeat: 0)
     for (i in 0..all.size) { raw[i] = all[i] }
     String.fromUtf8(raw)
+}
+
+func applyExtraHeaders(b: HttpRequestBuilder, headers: ArrayList<String>): Unit {
+    for (h in headers) {
+        match (h.indexOf(":")) {
+            case Some(i) =>
+                let hName = h[0..i].trimAscii()
+                let hVal = h[i + 1..].trimAscii()
+                if (hName != "") { b.header(hName, hVal) }
+            case None => ()
+        }
+    }
 }
 
 func mergeToolCalls(acc: ArrayList<JsonValue>, incoming: ArrayList<JsonValue>): Unit {

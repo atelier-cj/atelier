@@ -17,11 +17,17 @@ import stdx.log.*
 public class OllamaProvider <: Provider {
     private let provName: String
     private let baseURL: String
+    private let headers: ArrayList<String>
     private let httpClient: Client
 
     public init(name: String, baseURL: String) {
+        this(name, baseURL, ArrayList<String>())
+    }
+
+    public init(name: String, baseURL: String, headers: ArrayList<String>) {
         this.provName = name
         this.baseURL = baseURL.trimEnd('/')
+        this.headers = headers
         let httpLogger = NoopLogger()
         httpLogger.level = LogLevel.OFF
         let b = ClientBuilder().logger(httpLogger)
@@ -39,12 +45,13 @@ public class OllamaProvider <: Provider {
 
     public func chat(req: ChatRequest): ChatResponse {
         let bodyJson = buildOllamaRequest(req, false)
-        let httpReq = HttpRequestBuilder()
-            .url(this.baseURL + "/api/chat")
-            .header("Content-Type", "application/json")
-            .body(bodyJson)
-            .post()
-            .build()
+        let b = HttpRequestBuilder()
+        b.url(this.baseURL + "/api/chat")
+        b.header("Content-Type", "application/json")
+        applyExtraHeaders(b, this.headers)
+        b.body(bodyJson)
+        b.post()
+        let httpReq = b.build()
         let resp = this.httpClient.send(httpReq)
         if (resp.status != 200) {
             throw Exception("Ollama API error [" + resp.status.toString() + "]: " + readAll(resp.body))
@@ -63,7 +70,7 @@ public class OllamaProvider <: Provider {
         let stream = EventStream<ChatDelta, AssistantMessage>()
         let bodyJson = buildOllamaRequest(req, true)
         spawn {
-            doOllamaStream(this.httpClient, this.baseURL, bodyJson, stream)
+            doOllamaStream(this.httpClient, this.baseURL, this.headers, bodyJson, stream)
         }
         stream
     }
@@ -121,15 +128,16 @@ func messagesToOllama(msgs: ArrayList<Message>): ArrayList<JsonValue> {
     result
 }
 
-func doOllamaStream(client: Client, baseURL: String,
+func doOllamaStream(client: Client, baseURL: String, headers: ArrayList<String>,
     bodyJson: String, stream: EventStream<ChatDelta, AssistantMessage>): Unit {
     try {
-        let httpReq = HttpRequestBuilder()
-            .url(baseURL + "/api/chat")
-            .header("Content-Type", "application/json")
-            .body(bodyJson)
-            .post()
-            .build()
+        let b = HttpRequestBuilder()
+        b.url(baseURL + "/api/chat")
+        b.header("Content-Type", "application/json")
+        applyExtraHeaders(b, headers)
+        b.body(bodyJson)
+        b.post()
+        let httpReq = b.build()
         let resp = client.send(httpReq)
         if (resp.status != 200) {
             let errBody = readAll(resp.body)
