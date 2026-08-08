@@ -29,8 +29,6 @@ public struct McpServerConfig {
 }
 
 public class McpManager {
-    public static let COOLDOWN_TURNS: Int64 = 20
-
     let servers = HashMap<String, McpServerConfig>()
     let clients = HashMap<String, McpClient>()
     let activeServers = HashSet<String>()
@@ -42,7 +40,12 @@ public class McpManager {
 
     public init() {}
 
+    // 服务名含 _ 会与工具名前缀解析（mcp_<server>_<tool>）冲突，拒绝注册
     public func registerServer(cfg: McpServerConfig): Unit {
+        if (cfg.name.contains("_")) {
+            getGlobalLogger([("name", "McpManager")]).warn("mcp 服务名不能包含下划线，拒绝注册: ${cfg.name}", Array<Attr>())
+            return
+        }
         this.servers[cfg.name] = cfg
     }
 
@@ -69,25 +72,35 @@ public class McpManager {
 
     public func markUsed(name: String): Unit { this.lastUsed[name] = this.turnCounter }
 
-    public func markUsedTool(toolName: String): Unit {
-        for (s in this.activeServers) {
-            if (toolName.startsWith("mcp_" + s + "_")) { this.lastUsed[s] = this.turnCounter; return }
+    // 工具名 mcp_<server>_<tool> → 服务名（mcp_ 前缀后第一个 _ 之前；非 mcp_ 前缀返回空）
+    public func serverFromToolName(toolName: String): String {
+        if (!toolName.startsWith("mcp_")) { return "" }
+        let rest = toolName.removePrefix("mcp_")
+        match (rest.indexOf("_")) {
+            case Some(idx) => rest[0..idx]
+            case None => ""
         }
     }
 
-    public func isActive(name: String): Bool {
+    public func markUsedTool(toolName: String): Unit {
+        let s = this.serverFromToolName(toolName)
+        if (this.activeServers.contains(s)) { this.lastUsed[s] = this.turnCounter }
+    }
+
+    // cooldownTurns <= 0：不启用冷却（默认，一直活跃）；>0：N 轮未用自动卸载
+    public func isActive(name: String, cooldownTurns: Int64): Bool {
         if (!this.activeServers.contains(name)) { return false }
+        if (cooldownTurns <= 0) { return true }
         match (this.lastUsed.get(name)) {
-            case Some(t) => this.turnCounter - t < McpManager.COOLDOWN_TURNS
+            case Some(t) => this.turnCounter - t < cooldownTurns
             case None => false
         }
     }
 
-    public func isActiveTool(toolName: String): Bool {
-        for (s in this.activeServers) {
-            if (toolName.startsWith("mcp_" + s + "_")) { return this.isActive(s) }
-        }
-        false
+    public func isActiveTool(toolName: String, cooldownTurns: Int64): Bool {
+        let s = this.serverFromToolName(toolName)
+        if (s == "") { return false }
+        this.isActive(s, cooldownTurns)
     }
 
     // ---- 协议/工具目录缓存（addServer 连接成功后记录；目录段展示） ----
@@ -114,20 +127,21 @@ public class McpManager {
 
     // ---- 按需激活（无网络：启动 addServer 已连接注册，这里只翻状态） ----
 
-    public func loadToolset(reg: ToolRegistry, name: String): String {
+    // 返回 (isError, text)：错误信息与成功结果结构化，消费方不靠字符串匹配
+    public func loadToolset(reg: ToolRegistry, name: String): (Bool, String) {
         match (this.servers.get(name)) {
-            case None => "未知 MCP 服务: ${name}"
+            case None => (true, "未知 MCP 服务: ${name}")
             case Some(_) =>
                 if (this.activeServers.contains(name)) {
                     let names = this.activeToolNames(reg, name)
-                    return "已加载 MCP 服务 '${name}'，共 ${names.size} 个工具：${String.join(names.toArray(), delimiter: ", ")}"
+                    return (false, "已加载 MCP 服务 '${name}'，共 ${names.size} 个工具：${String.join(names.toArray(), delimiter: ", ")}")
                 }
                 if (!this.serverTools.contains(name)) {
-                    return "MCP 服务 '${name}' 未连接（启动连接失败或未配置）"
+                    return (true, "MCP 服务 '${name}' 未连接（启动连接失败或未配置）")
                 }
                 this.activate(name)
                 let names = this.activeToolNames(reg, name)
-                "已加载 MCP 服务 '${name}'，共 ${names.size} 个工具：${String.join(names.toArray(), delimiter: ", ")}"
+                (false, "已加载 MCP 服务 '${name}'，共 ${names.size} 个工具：${String.join(names.toArray(), delimiter: ", ")}")
         }
     }
 
@@ -144,6 +158,10 @@ public class McpManager {
 
     public func addServer(reg: ToolRegistry, cfg: McpServerConfig): Unit {
         let log = getGlobalLogger([("name", "McpManager")])
+        if (cfg.name.contains("_")) {
+            log.warn("mcp 服务名不能包含下划线，拒绝注册: ${cfg.name}", Array<Attr>())
+            return
+        }
         this.servers[cfg.name] = cfg
         let transportObj = createTransport(cfg)
         match (transportObj) {

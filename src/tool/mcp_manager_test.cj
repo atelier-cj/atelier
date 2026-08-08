@@ -18,15 +18,40 @@ func mcpManager_registerAndList() {
 }
 
 @Test
+func mcpManager_underscoreNameRejected() {
+    let m = McpManager()
+    m.registerServer(mcpCfg("my_server"))
+    @Expect(m.hasServer("my_server"), false)
+}
+
+@Test
+func mcpManager_serverFromToolName() {
+    let m = McpManager()
+    @Expect(m.serverFromToolName("mcp_github_search_repos"), "github")
+    @Expect(m.serverFromToolName("mcp_slack_send"), "slack")
+    @Expect(m.serverFromToolName("read_file"), "")
+}
+
+@Test
+func mcpManager_noCooldownStaysActive() {
+    let m = McpManager()
+    m.registerServer(mcpCfg("github"))
+    m.activate("github")
+    var i: Int64 = 0
+    while (i < 100) { m.advanceTurn(); i++ }
+    @Expect(m.isActive("github", 0), true)
+}
+
+@Test
 func mcpManager_activationAndCooldown() {
     let m = McpManager()
     m.registerServer(mcpCfg("github"))
     m.activate("github")
-    @Expect(m.isActive("github"), true)
-    @Expect(m.isActive("slack"), false)
+    @Expect(m.isActive("github", 20), true)
+    @Expect(m.isActive("slack", 20), false)
     var i: Int64 = 0
-    while (i < McpManager.COOLDOWN_TURNS) { m.advanceTurn(); i++ }
-    @Expect(m.isActive("github"), false)
+    while (i < 20) { m.advanceTurn(); i++ }
+    @Expect(m.isActive("github", 20), false)
 }
 
 @Test
@@ -35,10 +60,10 @@ func mcpManager_markUsedKeepsActive() {
     m.registerServer(mcpCfg("github"))
     m.activate("github")
     var i: Int64 = 0
-    while (i < McpManager.COOLDOWN_TURNS - 1) { m.advanceTurn(); i++ }
+    while (i < 19) { m.advanceTurn(); i++ }
     m.markUsed("github")
     m.advanceTurn()
-    @Expect(m.isActive("github"), true)
+    @Expect(m.isActive("github", 20), true)
 }
 
 @Test
@@ -47,10 +72,10 @@ func mcpManager_markUsedToolRefreshes() {
     m.registerServer(mcpCfg("github"))
     m.activate("github")
     var i: Int64 = 0
-    while (i < McpManager.COOLDOWN_TURNS - 1) { m.advanceTurn(); i++ }
+    while (i < 19) { m.advanceTurn(); i++ }
     m.markUsedTool("mcp_github_search_repos")
     m.advanceTurn()
-    @Expect(m.isActive("github"), true)
+    @Expect(m.isActive("github", 20), true)
 }
 
 @Test
@@ -58,9 +83,9 @@ func mcpManager_isActiveToolResolvesServer() {
     let m = McpManager()
     m.registerServer(mcpCfg("github"))
     m.activate("github")
-    @Expect(m.isActiveTool("mcp_github_search_repos"), true)
-    @Expect(m.isActiveTool("mcp_slack_send"), false)
-    @Expect(m.isActiveTool("read_file"), false)
+    @Expect(m.isActiveTool("mcp_github_search_repos", 20), true)
+    @Expect(m.isActiveTool("mcp_slack_send", 20), false)
+    @Expect(m.isActiveTool("read_file", 20), false)
 }
 
 @Test
@@ -68,8 +93,9 @@ func mcpManager_loadToolsetUnknownServer() {
     let m = McpManager()
     let reg = ToolRegistry()
     let r = m.loadToolset(reg, "nope")
-    @Expect(r.contains("未知"), true)
-    @Expect(m.isActive("nope"), false)
+    @Expect(r[0], true)
+    @Expect(r[1].contains("未知"), true)
+    @Expect(m.isActive("nope", 0), false)
 }
 
 @Test
@@ -78,8 +104,9 @@ func mcpManager_loadToolsetNotConnected() {
     m.registerServer(mcpCfg("github"))
     let reg = ToolRegistry()
     let r = m.loadToolset(reg, "github")
-    @Expect(r.contains("未连接"), true)
-    @Expect(m.isActive("github"), false)
+    @Expect(r[0], true)
+    @Expect(r[1].contains("未连接"), true)
+    @Expect(m.isActive("github", 0), false)
 }
 
 @Test
@@ -91,8 +118,9 @@ func mcpManager_loadToolsetActivates() {
     toolList.add(("search_repos", "在 GitHub 上搜索仓库"))
     m.cacheServerTools("github", toolList)
     let r = m.loadToolset(reg, "github")
-    @Expect(m.isActive("github"), true)
-    @Expect(r.contains("已加载"), true)
+    @Expect(r[0], false)
+    @Expect(m.isActive("github", 0), true)
+    @Expect(r[1].contains("已加载"), true)
 }
 
 @Test
@@ -102,7 +130,8 @@ func mcpManager_loadToolsetAlreadyActiveIdempotent() {
     let reg = ToolRegistry()
     m.activate("github")
     let r = m.loadToolset(reg, "github")
-    @Expect(r.contains("已加载"), true)
+    @Expect(r[0], false)
+    @Expect(r[1].contains("已加载"), true)
 }
 
 @Test
