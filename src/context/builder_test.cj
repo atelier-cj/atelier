@@ -97,16 +97,23 @@ func sysPrompt_noContextNoSection() {
 
 @Test
 func sysPrompt_sectionOrder() {
-    let reg = SkillRegistry()
-    reg.register(fakeSkill("s1", "SKILL-BODY"))
-    let ctx = HashMap<String, String>()
-    ctx["k"] = "v"
-    let env = SessionEnvironment("", ctx)
-    let spb = SystemPromptBuilder()
-    let names = ArrayList<String>(["s1"])
-    let out = buildText(spb, "SYS", names, reg, env)
-    @Expect(pos(out, "SYS") < pos(out, "SKILL-BODY"), true)
-    @Expect(pos(out, "SKILL-BODY") < pos(out, "[Session Context]"), true)
+    let dir = Directory.createTemp(Path("/tmp"))
+    File.writeTo(dir.toString() + "/AGENTS.md", "AGENTS-CONTENT".toArray())
+    try {
+        let reg = SkillRegistry()
+        reg.register(fakeSkill("s1", "SKILL-BODY"))
+        let ctx = HashMap<String, String>()
+        ctx["k"] = "v"
+        let env = SessionEnvironment(dir.toString(), ctx)
+        let spb = SystemPromptBuilder()
+        let names = ArrayList<String>(["s1"])
+        let out = buildText(spb, "SYS", names, reg, env)
+        @Expect(pos(out, "SYS") < pos(out, "SKILL-BODY"), true)
+        @Expect(pos(out, "SKILL-BODY") < pos(out, "[Project Rules]"), true)
+        @Expect(pos(out, "[Project Rules]") < pos(out, "[Session Context]"), true)
+    } finally {
+        try { remove(Path(dir.toString()), recursive: true) } catch (_: Exception) {}
+    }
 }
 
 @Test
