@@ -486,7 +486,7 @@ git commit -m "feat(provider): ProviderConfig 增加 type，extra 透传进三�
 - Modify: `src/server/config.cj`
 - Test: 无（配置解析在 CLI 集成验证）
 
-**Step 1: TomlProvider 加 extra 字段**
+**Step 1: TomlProvider 加 extra 字段（用 DataModel，TOML 原生 any）**
 
 ```cangjie
 public class TomlProvider <: Serializable<TomlProvider> {
@@ -495,29 +495,72 @@ public class TomlProvider <: Serializable<TomlProvider> {
     public var baseURL: String = ""
     public var apiKey: String = ""
     public var headers: ArrayList<String> = ArrayList()
-    public var extra: HashMap<String, JsonValue> = HashMap()   // 新增
+    public var extra: DataModel = DataModelNull()   // 新增：TOML 原生值，原样存取
     public init() {}
-    // serialize/deserialize 加 extra（TOML table → HashMap<String, JsonValue>）
+
+    public func serialize(): DataModel {
+        DataModelStruct()
+            .add(field<String>("name", name))
+            .add(field<String>("type", providerType))
+            .add(field<String>("baseURL", baseURL))
+            .add(field<String>("apiKey", apiKey))
+            .add(field<ArrayList<String>>("headers", headers))
+            .add(Field("extra", this.extra))   // 零转换：extra 本身就是 DataModel
+    }
+
+    public static func deserialize(dm: DataModel): TomlProvider {
+        let dms = match (dm) { case s: DataModelStruct => s; case _ => throw Exception("expected struct") }
+        let r = TomlProvider()
+        r.name = match (dms.get("name")) { case s: DataModelString => s.getValue(); case _ => "" }
+        r.providerType = match (dms.get("type")) { case s: DataModelString => s.getValue(); case _ => "openai" }
+        r.baseURL = match (dms.get("baseURL")) { case s: DataModelString => s.getValue(); case _ => "" }
+        r.apiKey = match (dms.get("apiKey")) { case s: DataModelString => s.getValue(); case _ => "" }
+        match (dms.get("headers")) {
+            case seq: DataModelSeq =>
+                for (e in seq.getItems()) {
+                    match (e) { case s: DataModelString => r.headers.add(s.getValue()); case _ => () }
+                }
+            case _ => ()
+        }
+        r.extra = dms.get("extra")   // 零转换：原样取出 DataModel
+        r
+    }
 }
 ```
 
-extra 的 TOML 解析：`extra = { reasoning_effort = "high" }` → 从 `DataModelStruct` 转 `HashMap<String, JsonValue>`。
+要点：
+- `Field(name: String, data: DataModel)` 构造是 public 的（data_model.cj:314），可直接用
+- `DataModelStruct.get(key): DataModel`（data_model.cj:283）返回 DataModel，缺失时返回 DataModelNull
+- `extra` 类型是 `DataModel`（抽象基类），存 `DataModelStruct` 实例即可
 
-**Step 2: 转换函数**
+**Step 2: 转换函数（toProviderConfig，三行官方 API）**
 
 ```cangjie
-// config.cj 或 cli/main.cj
-func toProviderConfig(tp: TomlProvider): ProviderConfig {
+// config.cj
+public func toProviderConfig(tp: TomlProvider): ProviderConfig {
+    let extra = HashMap<String, JsonValue>()
+    // 三行官方转换：DataModel → stdx JsonValue → JSON 字符串 → jsonvalue JsonValue
+    let jv = JsonValue.parse(tp.extra.toJson().toJsonString())
+    match (jv) {
+        case JsonValue.Map(m) => for ((k, v) in m) { extra[k] = v }
+        case _ => ()
+    }
     ProviderConfig(tp.providerType, tp.name, tp.baseURL, tp.apiKey,
-        tp.headers, tp.extra)
+        tp.headers, extra)
 }
 ```
+
+要点：
+- `tp.extra.toJson()`：stdx 官方扩展（`stdx.encoding.json` 的 ToJson，to_json.cj:113）
+- `toJsonString()`：stdx JsonValue 方法（json_value.cj:49）
+- `JsonValue.parse(str)`：jsonvalue 包静态方法（jsonvalue.cj:58）
+- **import 冲突注意**：`stdx.encoding.json.*` 与 `jsonvalue.*` 都有 JsonValue 同名，需要限定导入或别名（如 `import stdx.encoding.json.toJson` 只引扩展接口，或给 jsonvalue 的 JsonValue 起别名）
 
 **Step 3: 提交**
 
 ```bash
 git add src/server/config.cj
-git commit -m "feat(config): TomlProvider 增加 extra 字段与 ProviderConfig 转换"
+git commit -m "feat(config): TomlProvider.extra 用 DataModel 原生存取，toProviderConfig 三行官方 API 转换"
 ```
 
 ---

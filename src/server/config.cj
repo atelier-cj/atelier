@@ -1,12 +1,15 @@
 package atelier.server
 
 import atelier.agent.*
+import atelier.provider.*
 import atelier.tool.McpServerConfig
 import tomlcj.*
 import stdx.serialization.serialization.*
+import stdx.encoding.json.ToJson
 import std.collection.*
 import std.fs.*
 import std.env.*
+import jsonvalue.*
 
 public struct StoreType {
     public let name: String
@@ -207,6 +210,7 @@ public class TomlProvider <: Serializable<TomlProvider> {
     public var baseURL: String = ""
     public var apiKey: String = ""
     public var headers: ArrayList<String> = ArrayList()
+    public var extra: DataModel = DataModelNull()
     public init() {}
 
     public func serialize(): DataModel {
@@ -216,6 +220,7 @@ public class TomlProvider <: Serializable<TomlProvider> {
             .add(field<String>("baseURL", baseURL))
             .add(field<String>("apiKey", apiKey))
             .add(field<ArrayList<String>>("headers", headers))
+            .add(Field("extra", this.extra))
     }
 
     public static func deserialize(dm: DataModel): TomlProvider {
@@ -232,8 +237,21 @@ public class TomlProvider <: Serializable<TomlProvider> {
                 }
             case _ => ()
         }
+        r.extra = dms.get("extra")
         r
     }
+}
+
+public func toProviderConfig(tp: TomlProvider): ProviderConfig {
+    let extra = HashMap<String, JsonValue>()
+    let jv = JsonValue.parse(tp.extra.toJson().toJsonString())
+    match (jv) {
+        case JsonValue.Map(m) =>
+            for ((k, v) in m) { extra[k] = v }
+        case _ => ()
+    }
+    ProviderConfig(tp.providerType, tp.name, tp.baseURL, tp.apiKey,
+        tp.headers, extra)
 }
 
 public class TomlMcpServer <: Serializable<TomlMcpServer> {
@@ -309,21 +327,6 @@ public class TomlLogging <: Serializable<TomlLogging> {
         r.level = match (dms.get("level")) { case s: DataModelString => s.getValue(); case _ => "" }
         r
     }
-}
-
-public struct ProviderConfig {
-    public let name: String
-    public let baseURL: String
-    public let apiKey: String
-    public init(name: String, baseURL: String, apiKey: String) {
-        this.name = name; this.baseURL = baseURL; this.apiKey = apiKey
-    }
-}
-
-public func resolveProvider(model: String): ProviderConfig {
-    let baseURL = getEnv("OPENAI_BASE_URL", "https://api.openai.com/v1")
-    let apiKey = getEnv("OPENAI_API_KEY", "")
-    ProviderConfig("default", baseURL, apiKey)
 }
 
 public func resolveModel(cfgModel: String): String {
