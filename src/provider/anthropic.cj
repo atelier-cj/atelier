@@ -19,13 +19,19 @@ public class AnthropicProvider <: Provider {
     private let baseURL: String
     private let apiKey: String
     private let apiHost: String
+    private let headers: ArrayList<String>
     private let httpClient: Client
 
     public init(name: String, baseURL: String, apiKey: String) {
+        this(name, baseURL, apiKey, ArrayList<String>())
+    }
+
+    public init(name: String, baseURL: String, apiKey: String, headers: ArrayList<String>) {
         this.provName = name
         this.baseURL = baseURL.trimEnd('/')
         this.apiKey = apiKey
         this.apiHost = extractHost(baseURL)
+        this.headers = headers
         let httpLogger = NoopLogger()
         httpLogger.level = LogLevel.OFF
         let b = ClientBuilder().logger(httpLogger)
@@ -42,14 +48,15 @@ public class AnthropicProvider <: Provider {
 
     public func chat(req: ChatRequest): ChatResponse {
         let bodyJson = buildAnthropicRequest(req, false)
-        let httpReq = HttpRequestBuilder()
-            .url(this.baseURL + "/v1/messages")
-            .header("Content-Type", "application/json")
-            .header("x-api-key", this.apiKey)
-            .header("anthropic-version", "2023-06-01")
-            .body(bodyJson)
-            .post()
-            .build()
+        let b = HttpRequestBuilder()
+        b.url(this.baseURL + "/v1/messages")
+        b.header("Content-Type", "application/json")
+        b.header("x-api-key", this.apiKey)
+        b.header("anthropic-version", "2023-06-01")
+        applyExtraHeaders(b, this.headers)
+        b.body(bodyJson)
+        b.post()
+        let httpReq = b.build()
         let resp = this.httpClient.send(httpReq)
         if (resp.status != 200) {
             let errBody = readAll(resp.body)
@@ -79,7 +86,7 @@ public class AnthropicProvider <: Provider {
         let stream = EventStream<ChatDelta, AssistantMessage>()
         let bodyJson = buildAnthropicRequest(req, true)
         spawn {
-            doAnthropicStream(this.httpClient, this.baseURL, this.apiKey, this.provName, bodyJson, stream)
+            doAnthropicStream(this.httpClient, this.baseURL, this.apiKey, this.provName, this.headers, bodyJson, stream)
         }
         stream
     }
@@ -168,6 +175,12 @@ func buildAnthropicRequest(req: ChatRequest, stream: Bool): String {
         }
         obj["tools"] = JsonValue.Array(tools)
     }
+    // Extra params: passthrough, fixed fields take priority
+    for ((k, v) in req.extra) {
+        if (!obj.contains(k)) {
+            obj[k] = v
+        }
+    }
     toJsonString(JsonValue.Map(obj))
 }
 
@@ -179,16 +192,18 @@ func messageToAnthropic(role: String, text: String): JsonValue {
 }
 
 func doAnthropicStream(client: Client, baseURL: String, apiKey: String, provName: String,
-    bodyJson: String, stream: EventStream<ChatDelta, AssistantMessage>): Unit {
+    headers: ArrayList<String>, bodyJson: String,
+    stream: EventStream<ChatDelta, AssistantMessage>): Unit {
     try {
-        let httpReq = HttpRequestBuilder()
-            .url(baseURL + "/v1/messages")
-            .header("Content-Type", "application/json")
-            .header("x-api-key", apiKey)
-            .header("anthropic-version", "2023-06-01")
-            .body(bodyJson)
-            .post()
-            .build()
+        let b = HttpRequestBuilder()
+        b.url(baseURL + "/v1/messages")
+        b.header("Content-Type", "application/json")
+        b.header("x-api-key", apiKey)
+        b.header("anthropic-version", "2023-06-01")
+        applyExtraHeaders(b, headers)
+        b.body(bodyJson)
+        b.post()
+        let httpReq = b.build()
         let resp = client.send(httpReq)
         if (resp.status != 200) {
             let errBody = readAll(resp.body)

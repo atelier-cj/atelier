@@ -141,6 +141,8 @@ match (reg.get("deepseek")) {
 }
 ```
 
+`ProviderRegistry.default()` 返回带内置工厂的实例（CLI 默认），空构造 `ProviderRegistry()` 供库集成完全自控。工厂注册与按配置创建见下文「自定义 Provider」。
+
 Agent 通过 `provider` 字段指定使用的 Provider：
 
 ```toml
@@ -169,6 +171,10 @@ Atelier 内置 `ModelContextRegistry` 查表：
 | 未知模型 | 8,192（兜底） |
 
 ## 自定义 Provider
+
+两种方式：**直接注册实例**（代码内）或**注册工厂**（配置驱动）。
+
+### 方式一：直接注册实例（代码内）
 
 实现 `Provider` 接口即可对接任意 LLM API：
 
@@ -209,6 +215,93 @@ class MyProvider <: Provider {
 
 // 注册
 providerReg.register("my-provider", MyProvider("my-provider"))
+```
+
+### 方式二：注册工厂（配置驱动）
+
+适合需要在 `~/.atelier.toml` 里用 `type` 配置的自定义 Provider：
+
+```cangjie
+import atelier.provider.*
+
+class DeepSeekFactory <: ProviderFactory {
+    public func `type`(): String { "deepseek" }
+    public func create(cfg: ProviderConfig): Provider {
+        // cfg.name / cfg.baseURL / cfg.apiKey / cfg.headers / cfg.extra 均可用
+        DeepSeekProvider(cfg)
+    }
+}
+
+// 注册工厂
+providerReg.registerFactory(DeepSeekFactory())
+```
+
+配置：
+
+```toml
+[[provider]]
+name = "deepseek"
+type = "deepseek"          # 匹配工厂 type()
+baseURL = "https://api.deepseek.com"
+apiKey = "${DEEPSEEK_API_KEY}"
+headers = ["x-custom: value"]          # 自定义请求头
+extra = { reasoning_effort = "high" }  # 透传扩展参数
+```
+
+**内置工厂**（`ProviderRegistry.default()` 自动注册，无需手动）：
+
+| type | 工厂 |
+|------|------|
+| `openai` | `OpenAIFactory` |
+| `anthropic` | `AnthropicFactory` |
+| `ollama` | `OllamaFactory` |
+
+### ChatRequest.extra 扩展参数
+
+`ChatRequest.extra: HashMap<String, JsonValue>` 可携带任意扩展参数，透传进请求体：
+
+```cangjie
+let extra = HashMap<String, JsonValue>()
+extra["reasoning_effort"] = JsonValue.String("high")
+extra["top_p"] = JsonValue.Number(0.9)
+
+let req = ChatRequest("model", msgs, 0.7, 100, None, tools, extra)
+```
+
+- 三种内置 Provider 会把 extra 里**非保留字段**（model/messages/stream 等除外）原样写入请求体
+- 值类型保真：`"high"` 写字符串，`0.9` 写数字
+- 自定义 Provider 可完全自行决定如何使用 extra
+
+### 自定义请求头
+
+三种内置 Provider 的构造均支持 `headers: ArrayList<String>`（`"Name: value"` 格式）：
+
+```cangjie
+let provider = OpenAIProvider("default", "https://api.openai.com/v1", "sk-xxx",
+    ["x-custom: value"])
+```
+
+配置层通过 `headers` 字段配置：
+
+```toml
+[[provider]]
+name = "default"
+type = "openai"
+baseURL = "https://api.openai.com/v1"
+apiKey = "${OPENAI_API_KEY}"
+headers = ["x-custom: value", "x-org: my-org"]
+```
+
+### ProviderRegistry.default()
+
+`ProviderRegistry.default()` 返回已注册内置工厂的实例（CLI 默认使用）；`ProviderRegistry()` 空构造供完全自控：
+
+```cangjie
+let reg = ProviderRegistry.default()   // 带 openai/anthropic/ollama 工厂
+let reg = ProviderRegistry()           // 空，完全自控
+
+// 按配置创建 Provider（工厂查 type 创建）
+let prov = reg.create(cfg)
 ```
 
 ## 思考模式（DeepSeek）

@@ -133,20 +133,30 @@ extra = { reasoning_effort = "high" }  # 透传扩展参数
 ### 数据流
 
 ```
-TOML 配置
-   │  TomlProvider.deserialize()
+TOML:  extra = { reasoning_effort = "high", top_p = 0.9 }
+   │  tomlcj（DataModel 原生，类型保真：String + Float）
    ▼
-TomlProvider { name, type, baseURL, apiKey, headers, extra }
-   │  转换函数（CLI/HTTP 复用）
+TomlProvider.extra: DataModel           ← 零转换（serialize/deserialize 原样存取）
+   │  toProviderConfig 边界（三行官方 API 转换）
    ▼
-ProviderConfig { name, baseURL, apiKey, headers, extra }
+ProviderConfig.extra: HashMap<String, JsonValue>   ← 类型保真
    │  providerReg.create(cfg) → 按 cfg.type 查工厂
    ▼
 DeepSeekProvider（工厂 create 构造）
    │  runtime.chat(ChatRequest(..., extra))
    ▼
-请求体组装：base 字段 + extra 里关心的 key
+JSON 请求体: {"reasoning_effort": "high", "top_p": 0.9}   ← 数字保真
 ```
+
+**extra 类型分层**（配置与请求各自用本体系，互不侵入）：
+
+| 层 | 类型 | 序列化 | 转换 |
+|---|---|---|---|
+| 配置 DTO（TomlProvider.extra） | `DataModel` | tomlcj 原生（`Field("extra", dm)` 原样存取） | 无 |
+| 边界（toProviderConfig） | — | — | 三行官方 API：`dm.toJson()`（stdx）→ `toJsonString()` → `JsonValue.parse()`（jsonvalue） |
+| Provider/请求（ProviderConfig.extra / ChatRequest.extra） | `HashMap<String, JsonValue>` | jsonvalue 原生 | 无 |
+
+TOML 与 JSON 是两个独立体系，各用各的 any 类型（`DataModel` / `JsonValue`），中间转换只发生在边界一次，利用 stdx 官方 `DataModel.toJson()` 扩展 + `toJsonString()` + jsonvalue `JsonValue.parse()`，零手写遍历。
 
 ### 关键改造点
 
@@ -158,7 +168,7 @@ DeepSeekProvider（工厂 create 构造）
 | `src/provider/openai.cj` | 构造支持 headers + extra 读 key 并入请求体 |
 | `src/provider/anthropic.cj` | 构造支持 headers + extra 读 key |
 | `src/provider/ollama.cj` | 构造支持 headers + extra 读 key |
-| `src/server/config.cj` | TomlProvider 加 extra；转换到 ProviderConfig |
+| `src/server/config.cj` | TomlProvider.extra 用 `DataModel`（原生）；toProviderConfig 三行官方 API 转 `HashMap<String, JsonValue>` |
 | `src/cli/main.cj` | 用 ProviderRegistry.default() + create(cfg) 替换 match 分支 |
 | `src/server/handler.cj` | resolveProvider 用 create(cfg)（若涉及） |
 

@@ -18,9 +18,11 @@ rateLimit = 0                  # 每分钟请求限制（0 表示不限）
 
 [[provider]]
 name = "default"               # Provider 名称
-type = "openai"                # 类型：openai / anthropic / ollama
+type = "openai"                # 类型：openai / anthropic / ollama（或注册的自定义工厂 type）
 baseURL = "https://api.openai.com/v1"
 apiKey = "${OPENAI_API_KEY}"   # 支持 ${ENV_VAR} 引用环境变量（ollama 不需要）
+headers = ["x-custom: value"]  # 自定义请求头（可选，Name: value 格式）
+extra = { reasoning_effort = "high" }  # 透传扩展参数（可选，写入请求体）
 
 [[provider]]
 name = "ollama"
