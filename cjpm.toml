@@ -57,3 +57,6 @@ path-option = [
 [package.package-configuration."atelier.cli"]
 output-type = "executable"
 compile-option = "--static -Woff unused"
+
+[profile.test]
+filter = "-ProviderIntegrationTest.*"

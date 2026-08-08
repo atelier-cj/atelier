@@ -478,17 +478,15 @@ let messages = stream.result()
 
 ### 自定义钩子
 
-实现 `Hook` 接口可介入 Agent 生命周期：
+实现 `Hook` 接口可介入 Agent 生命周期。钩子是**决策型拦截器**——6 个相位（beforeRun/afterRun/beforeTurn/afterTurn/beforeTool/afterTool）可观察、改写或短路运行流程：
 
 ```cangjie
 import atelier.agent.*
 
 class AuditHook <: Hook {
-    public func beforeTool(ctx: HookContext): Unit {
-        println(">>> 调用工具: ${ctx.toolCalls[0].name}")
-    }
-    public func afterTool(ctx: HookContext): Unit {
-        println(">>> 工具结果: ${ctx.toolResults[0].text.size} 字符")
+    public override func beforeTool(ctx: HookContext, call: ToolCallBlock): BeforeToolDecision {
+        println(">>> 调用工具: ${call.name}")
+        BeforeToolDecision.Allow
     }
 }
 
@@ -498,18 +496,7 @@ let runtime = AgentRuntime(config, provider, toolReg,
     hooks, askUserFn)
 ```
 
-6 个钩子按执行顺序：
-
-| 钩子 | 触发时机 |
-|------|----------|
-| `beforeRun` | Run 开始后，第一轮 Turn 前 |
-| `afterRun` | Run 结束时 |
-| `beforeTurn` | 每轮推理开始前 |
-| `afterTurn` | 每轮推理结束后（含工具调用） |
-| `beforeTool` | 工具执行前 |
-| `afterTool` | 工具执行后 |
-
-所有钩子都有空默认实现，只需覆写需要的。
+所有钩子都有空默认实现，只需覆写需要的。完整的决策类型、状态共享、融合顺序与最佳实践见 **[Hook 文档](hooks.md)**。
 
 ### 注入依赖
 

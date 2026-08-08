@@ -25,6 +25,7 @@
 | [事件流](events.md) | AgentEvent 密封接口 + 11 种事件 + EventStream |
 | [工具](tools.md) | Tool 接口 + 内置工具 + 自定义 + MCP + Agent-as-Tool |
 | [Provider](providers.md) | Provider 接口 + OpenAI/Anthropic/Ollama + 上下文窗口 |
+| [Hook](hooks.md) | 决策型拦截器：观察/改写/短路 Agent 生命周期 |
 
 ## 进阶功能
 

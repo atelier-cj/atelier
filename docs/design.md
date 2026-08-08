@@ -892,21 +892,59 @@ class StormSessionStore <: SessionStore {
 
 ### 8.4 钩子（Hooks）
 
+钩子是**决策型拦截器**：保留 6 个相位，每个相位可返回决策影响运行流程。`Hook` 名保持，注册序 = 执行序，先注册的先处理、可短路。
+
 ```cangjie
-interface AgentHooks {
-    // 工具执行前（权限闸门）
-    beforeToolCall(ctx: Context, call: ToolCall): BeforeToolCallDecision
-    
-    // 工具执行后（结果改写/审计）
-    afterToolCall(ctx: Context, call: ToolCall, result: ToolResult): AfterToolCallResult
-    
-    // 每轮结束后（状态更新）
-    afterTurn(ctx: Context, turn: Turn): TurnUpdate
-    
-    // Run 结束前（清理/统计）
-    beforeRunEnd(ctx: Context): Result<Unit>
+public class HookContext {
+    public let config: AgentConfig
+    public let toolRegistry: ToolRegistry
+    public let turnCount: Int64
+    public let state: HookState   // 每次 run 独立共享，跨相位传递数据
+}
+
+public enum BeforeToolDecision {
+    | Allow
+    | Deny(reason: String)
+    | Modify(args: JsonValue)
+}
+
+public enum TurnDecision {
+    | Continue(request: ChatRequest)   // 放行并可能改写请求（模型路由）
+    | ShortCircuit(message: String)    // 终止 run
+}
+
+public class AfterTurnUpdate {
+    public let messages: Option<ArrayList<Message>>  // 改写上下文
+    public let shortCircuit: Bool                     // 短路
+}
+
+public interface Hook {
+    public func beforeRun(ctx: HookContext): Unit {}
+    public func afterRun(ctx: HookContext): Unit {}
+    public func beforeTurn(ctx: HookContext, request: ChatRequest): TurnDecision {
+        TurnDecision.Continue(request)
+    }
+    public func afterTurn(ctx: HookContext): AfterTurnUpdate {
+        AfterTurnUpdate.none()
+    }
+    public func beforeTool(ctx: HookContext, call: ToolCallBlock): BeforeToolDecision {
+        BeforeToolDecision.Allow
+    }
+    public func afterTool(ctx: HookContext, call: ToolCallBlock, result: ToolResultMessage): Unit {}
 }
 ```
+
+**决策语义**：
+
+- `TurnDecision.Continue` 放行，可携带改写后的 `ChatRequest`（模型路由）；`ShortCircuit` 终止 run
+- `BeforeToolDecision.Allow` 放行 / `Deny` 拦截 / `Modify` 改写工具参数
+- `AfterTurnUpdate` 可改写上下文消息或短路；`HookState` 每次 run 独立创建，跨相位共享
+
+**融合顺序**：
+
+1. 工具执行前：**信任闸门先判定**（`shouldAllow`），通过后 **beforeTool hook 再判定**；两者任一 Deny 即拦截
+2. 每轮结束：**afterTurn hook 先改写**上下文，之后内置 **compaction** 再压缩
+3. 内置限流（maxToolCalls / minToolInterval）与 hook 无关，始终生效
 
 ---
 
