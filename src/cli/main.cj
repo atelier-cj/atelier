@@ -54,8 +54,11 @@ main(): Int64 {
     }
     initLogger(config.logging)
 
+    let mcpMgr = McpManager()
     let handler = AtelierHttpHandler(agentReg, toolReg, sessionStore, trustMgr, skillReg)
     handler.setProviderRegistry(providerReg)
+    handler.setMcpManager(mcpMgr)
+    toolReg.register(LoadMcpToolsetTool(mcpMgr, toolReg))
     try { skillReg.loadDirectory(configDir + "/.agents/skills") } catch (_) { () }
     for (a in config.agent) {
         try { agentReg.create(a.name, agentConfigFrom(a)) } catch (_) { () }
@@ -69,7 +72,6 @@ main(): Int64 {
             eprintln("warning: provider '${p.name}' (type '${p.providerType}') skipped: ${e.message}")
         }
     }
-    let mcpMgr = McpManager()
     for (ms in config.mcpServer) {
         let cfg = ms.toMcpServerConfig()
         mcpMgr.addServer(toolReg, cfg)
@@ -91,7 +93,7 @@ main(): Int64 {
             let prov = resolveProviderFor(cfg, providerRegForCli)
             let repl = REPL(agentName, slashReg, cfg, prov,
                 toolReg, sessionStore, trustMgr, skillReg,
-                agentReg, providerRegForCli, resumeId)
+                agentReg, providerRegForCli, resumeId, mcpMgr)
             repl.run()
 
         case "run" =>
@@ -125,7 +127,7 @@ main(): Int64 {
                     c
             }
             let prov = resolveProviderFor(cfg, providerRegForCli)
-            let runtime = AgentRuntime(cfg, prov, toolReg, sessionStore, trustMgr, skillReg, agentReg, providerRegForCli)
+            let runtime = AgentRuntime(cfg, prov, toolReg, sessionStore, trustMgr, skillReg, agentReg, providerRegForCli, mcpMgr)
             let msgs = ArrayList<Message>()
             msgs.add(UserMessage(ContentList.ofText(prompt), 0))
             let stream = runtime.chat(msgs)

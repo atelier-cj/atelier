@@ -23,6 +23,7 @@ public class AtelierHttpHandler {
     private let trustManager: TrustManager
     private let skillRegistry: SkillRegistry
     private var providerRegistry: ProviderRegistry
+    private var mcpManager: McpManager = McpManager()
     let pendingInputs = HashMap<String, LinkedBlockingQueue<String>>()
 
     public init(agentRegistry: AgentRegistry, toolRegistry: ToolRegistry,
@@ -37,6 +38,8 @@ public class AtelierHttpHandler {
     }
 
     public func setProviderRegistry(reg: ProviderRegistry): Unit { this.providerRegistry = reg }
+
+    public func setMcpManager(m: McpManager): Unit { this.mcpManager = m }
 
     public func registerRoutes(distributor: HttpRequestDistributor): Unit {
         let h = this
@@ -109,7 +112,7 @@ public class AtelierHttpHandler {
             if (m.role == "user") { msgs.add(UserMessage(ContentList.ofText(m.content), 0)) }
         }
         let provider = resolveProvider(agentCfg.model)
-        let runtime = AgentRuntime(agentCfg, provider, this.toolRegistry, this.sessionStore, this.trustManager, this.skillRegistry, this.agentRegistry, this.providerRegistry, ArrayList<Hook>(), { q => "[User input not available in HTTP mode. Question was: " + q + "]" })
+        let runtime = AgentRuntime(agentCfg, provider, this.toolRegistry, this.sessionStore, this.trustManager, this.skillRegistry, this.agentRegistry, this.providerRegistry, ArrayList<Hook>(), { q => "[User input not available in HTTP mode. Question was: " + q + "]" }, this.mcpManager)
         let eventStream = runtime.chat(msgs)
         let msgsResult = eventStream.result()
         let lastText = lastAssistantText(msgsResult)
@@ -149,7 +152,7 @@ public class AtelierHttpHandler {
             let answer = queue.remove()
             log.info("askUser: got answer", Array<Attr>())
             answer
-        })
+        }, this.mcpManager)
         let eventStream = runtime.chat(msgs)
         try {
             doSSEStream(ctx, eventStream, writer)
@@ -323,7 +326,7 @@ public class AtelierHttpHandler {
         let runtime = AgentRuntime(agentCfg, provider, this.toolRegistry,
             this.sessionStore, this.trustManager, this.skillRegistry,
             this.agentRegistry, this.providerRegistry, ArrayList<Hook>(),
-            { q => "[User input not available]" })
+            { q => "[User input not available]" }, this.mcpManager)
 
         if (dto.stream) {
             doV1ChatStream(ctx, runtime, msgs, dto.model)
@@ -496,7 +499,7 @@ func sseFromEvent(ev: AgentEvent): String {
 
 func configFromDTO(dto: AgentConfigDTO): AgentConfig {
     AgentConfig(dto.name, dto.description, dto.systemPrompt, None,
-        dto.model, dto.provider, dto.tools, dto.skills,
+        dto.model, dto.provider, dto.tools, dto.skills, Int64(0),
         UInt32(dto.maxTurns), Float32(dto.temperature), UInt32(4096), None,
         true, UInt32(16384), UInt32(20000), UInt32(50), UInt32(30), UInt32(0),
         ArrayList(), None, 0, 0)
