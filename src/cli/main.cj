@@ -62,8 +62,12 @@ main(): Int64 {
     }
     for (p in config.provider) {
         let cfg = toProviderConfig(p)
-        let prov = providerReg.create(cfg)
-        providerReg.register(p.name, prov)
+        try {
+            let prov = providerReg.create(cfg)
+            providerReg.register(p.name, prov)
+        } catch (e: Exception) {
+            eprintln("warning: provider '${p.name}' (type '${p.providerType}') skipped: ${e.message}")
+        }
     }
     let mcpMgr = McpManager()
     for (ms in config.mcpServer) {
