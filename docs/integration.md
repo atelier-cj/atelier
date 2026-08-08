@@ -478,51 +478,25 @@ let messages = stream.result()
 
 ### 自定义钩子
 
-实现 `Hook` 接口可介入 Agent 生命周期。钩子是**决策型拦截器**——保留 6 个相位，每个相位可返回决策影响运行流程：
+实现 `Hook` 接口可介入 Agent 生命周期。钩子是**决策型拦截器**——6 个相位（beforeRun/afterRun/beforeTurn/afterTurn/beforeTool/afterTool）可观察、改写或短路运行流程：
 
 ```cangjie
 import atelier.agent.*
 
-// 观察型：记录工具调用
 class AuditHook <: Hook {
     public override func beforeTool(ctx: HookContext, call: ToolCallBlock): BeforeToolDecision {
         println(">>> 调用工具: ${call.name}")
         BeforeToolDecision.Allow
     }
-    public override func afterTool(ctx: HookContext, call: ToolCallBlock, result: ToolResultMessage): Unit {
-        println(">>> 工具结果: ${result.content.blocks().size} 块")
-    }
 }
 
-// 拦截型：阻止敏感工具
-class GuardHook <: Hook {
-    public override func beforeTool(ctx: HookContext, call: ToolCallBlock): BeforeToolDecision {
-        if (call.name == "bash") {
-            BeforeToolDecision.Deny("bash 工具被策略禁止")
-        } else {
-            BeforeToolDecision.Allow
-        }
-    }
-}
-
-let hooks = ArrayList<Hook>([AuditHook(), GuardHook()])
+let hooks = ArrayList<Hook>([AuditHook()])
 let runtime = AgentRuntime(config, provider, toolReg,
     sessionStore, trustMgr, skillReg, agentReg, providerReg,
     hooks, askUserFn)
 ```
 
-6 个钩子按执行顺序：
-
-| 钩子 | 触发时机 | 决策 |
-|------|----------|------|
-| `beforeRun` | Run 开始后，第一轮 Turn 前 | 观察 |
-| `afterRun` | Run 结束时 | 观察 |
-| `beforeTurn` | 每轮推理开始前 | `TurnDecision.Continue`（可改写请求）`/ ShortCircuit` |
-| `afterTurn` | 每轮推理结束后 | `AfterTurnUpdate`（可改写上下文 `/` 短路） |
-| `beforeTool` | 工具执行前 | `Allow` `/` `Deny` `/` `Modify` |
-| `afterTool` | 工具执行后 | 观察 |
-
-所有钩子都有空默认实现，只需覆写需要的。`HookContext.state` 在每次 run 内共享，可跨相位传递数据（如成本累计、token 统计）。
+所有钩子都有空默认实现，只需覆写需要的。完整的决策类型、状态共享、融合顺序与最佳实践见 **[Hook 文档](hooks.md)**。
 
 ### 注入依赖
 
