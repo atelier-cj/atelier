@@ -261,17 +261,18 @@ workDir = /home/ystyle/Projects/atelier
 - 压缩结果只影响**本次 run 的内存上下文**，不落库、不持久化
 - Provider 报告的 `usage.promptTokens` 已在 ChatResponse 中携带，优先使用为演进方向
 
-### 4.2 🚧 演进：AI 自主归档（archive_history 工具）
+### 4.2 ✅ P3 已实现：AI 自主归档（archive_history 工具）
 
 由 LLM 判断"哪些历史可以归档"（代码无法判断语义），调用 `archive_history(start_index, end_index, summary)` 工具。
 
-**实现要点（基于现有 Message 密封接口，不动 Entry 结构）**：
+**实现要点（基于现有 Message 密封接口，Entry/store 零改动）**：
 
-- Message 密封接口（User/Assistant/ToolResult/Compaction）是既定扩展点 → 🚧 新增第 5 个实现类 `ArchiveMessage {startIndex, endIndex, summary, timestamp}`（对应参考设计里的 archiveMarker，但**不新增 Entry 字段、不引入 system_internal 角色**）
-- `archive_history` 工具执行时在 L1 追加一条 `ArchiveMessage` 的 Entry（只增不改，不删旧数据）
-- L2 构建时解析：范围内（startIndex..endIndex，按 Entry 顺序全局序号）的原始消息跳过，插入摘要消息
-- 影响面最小：`serialize.cj` 的 `readMessageFromJson` 加一个 case，store 零改动
-- `startIndex/endIndex` 使用 Entry 在会话中的顺序序号（现有 `Entry.id` 形如 `sess_0_3`，序号可解析，🚧 演进时也可给 Entry 加只读序号视图，不改存储格式）
+- ✅ Message 密封接口新增第 5 个实现类 `ArchiveMessage {startIndex, endIndex, summary, timestamp}`（role() → MessageRole.Archive；不新增 Entry 字段、不引入 system_internal 角色）；`serialize.cj` 的 `readMessageFromJson` 加一个 case，旧文件加载不受影响（缺字段默认 0）
+- ✅ `archive_history` 工具（tool/archive_history.cj）：校验 start ≥ 0、end ≥ start、summary 非空 → 返回归档确认；三参数缺失/非法报错
+- ✅ `ContextBuilder.applyArchives(messages)`：扫描 `archive_history` 调用对（ToolCall + ToolResult），**范围钳制**（start ≥ 0；上限钳到调用对前一条，归档不能越过调用对自身）→ 替换为 ArchiveMessage → 调用对自身移除（天然幂等）；无调用对返回原列表；多调用对从后往前处理
+- ✅ runtime 每轮构建 ChatRequest 前应用（`TurnStartEvent` 后）
+- ✅ 三 Provider 消息转换：ArchiveMessage → `[Archived <start>-<end>: <summary>]`（user 消息）
+- **持久化策略**：归档在 run 内应用（内存替换），run 结束 REPL save 时 ArchiveMessage 随消息序列化入库（store 保留归档痕迹：范围 + 摘要）；**严格 L1 只增不改**（appendBranch 追加归档 Entry、原始消息不删）需 runtime 会话链路（sessionId/parentLeafId），当前 runtime 无会话对象——🚧 后续演进
 
 | 方案 | 判断主体 | 准确度 | 实现复杂度 |
 |------|----------|--------|------------|
@@ -512,7 +513,7 @@ public struct Skill {
 | `agent/hook*.cj` | ✅ | 决策型拦截器（上下文闸门） | `beforeTurn / afterTurn / beforeTool / afterTool` |
 | `context/builder.cj` | ✅ | L2 上下文构建器（系统提示注入 + 历史组装 + ChatRequest） | `initMessages / buildChatRequest` |
 | `context/system_prompt_builder.cj` | ✅ | 系统提示分段构建（4 段：systemPrompt/Skills/AGENTS.md/SessionContext） | `build` |
-| `tool/archive_history.cj` | 🚧 | AI 自主归档（LLM 摘要落 L1） | `execute(start, end, summary)` |
+| `tool/archive_history.cj` | ✅ | AI 自主归档（校验 + 确认；run 内应用） | `execute(start, end, summary)` |
 | `tool/load_mcp_toolset.cj` | ✅ | MCP 按服务激活（纯状态翻转，无网络） | `execute(server_id)` |
 | `tool/builtin/use_skills.cj` | 🚧 | Skill 按需激活（渐进披露第 2 层） | `execute(name)` |
 | `tool/builtin/use_skills.cj` | ✅ | Skill 按需加载（工具结果即指令） | `execute(name)` |
@@ -596,15 +597,17 @@ P1 / P2 / P3 **互不依赖，可并行**；P4 依赖 P3，排在最后。每个
 
 **验收**（全部通过）：UseSkillsTool 3 单测（指令返回/未知报错/缺参报错）+ 目录段 3 单测（含引导语与 name/description、无 skill 空、ContextBuilder 首条含目录段）；config.skills 兼容无回归；全量 197 PASSED + 6 SKIPPED。
 
-### 10.5 P3：AI 自主归档（依赖 P0，可与 P1/P2 并行）
+### 10.5 P3：AI 自主归档（依赖 P0，可与 P1/P2 并行）✅ 已完成（2026-08-09）
 
-**目标**：LLM 通过 `archive_history` 自主压缩历史，L1 只增不改。
+**目标**：LLM 通过 `archive_history` 自主压缩历史，判断权交给 AI，代码只做校验与容错。
 
-**任务**：
+**任务**（实施记录，与设计 4.2 一致）：
 
-1. Message 密封接口新增 `ArchiveMessage {startIndex, endIndex, summary, timestamp}`；`serialize.cj` 的 `readMessageFromJson`/`Entry.toJson` 加分支（旧文件加载不受影响）
-2. 新建 `tool/archive_history.cj`：校验范围（0 ≤ start ≤ end < 当前消息数）→ `store.appendBranch` 追加 ArchiveMessage Entry → 返回确认
-3. `ContextBuilder` 解析归档标记：范围内消息跳过，插入摘要；范围外的旧归档标记（startIndex 变化后）按"仅跳过未越界部分"容错
+1. Message 密封接口新增 `ArchiveMessage {startIndex, endIndex, summary, timestamp}`（第 5 角色）；`serialize.cj` 加 case，旧文件兼容
+2. 新建 `tool/archive_history.cj`：校验（start ≥ 0 / end ≥ start / summary 非空）→ 返回归档确认；**不碰 store**（run 内应用）
+3. `ContextBuilder.applyArchives`：调用对扫描 → 范围钳制（上限 = 调用对前一条）→ 替换为 ArchiveMessage → 调用对移除（幂等）；runtime 每轮应用
+4. 三 Provider 消息转换加 ArchiveMessage case（`[Archived <start>-<end>: <summary>]`）
+5. 🚧 后续演进：严格 L1 追加（appendBranch）需 runtime 会话链路（sessionId/parentLeafId）
 
 **验收**：单元测试覆盖——序列化往返（新消息类型 + 旧文件兼容）、范围校验边界（负值/越界/倒序）、解析后消息替换正确、多条归档叠加、store 追加语义（原消息仍在 L1）。
 

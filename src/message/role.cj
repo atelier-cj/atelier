@@ -5,6 +5,7 @@ public enum MessageRole {
     | Assistant
     | ToolResult
     | Compaction
+    | Archive
 }
 
 public enum StopReason {

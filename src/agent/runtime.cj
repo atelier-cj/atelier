@@ -113,6 +113,7 @@ public class AgentRuntime {
                     turnCount++
                     this.mcpManager.advanceTurn()
                     log.info("turn ${turnCount} start", Array<Attr>())
+                    currentMessages = ctxBuilder.applyArchives(currentMessages)
 
                     stream.emit(MessageStartEvent(currentMessages[0]))
                     let actualModel = this.pickModel(this.config.model)
