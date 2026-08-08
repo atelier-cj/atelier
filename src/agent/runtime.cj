@@ -137,12 +137,19 @@ public class AgentRuntime {
                     var chatReq = ChatRequest(actualModel, currentMessages,
                         Float64(this.config.temperature), Int64(this.config.maxOutputTokens),
                         this.config.thinkingLevel, tools)
-                    chatReq = runBeforeTurnHooks(hookState, turnCount, chatReq)
-                    if (chatReq.model == "") {
-                        log.info("beforeTurn hook short-circuited run", Array<Attr>())
-                        stream.emit(TurnEndEvent(AssistantMessage(ContentList.ofText("[Run short-circuited by hook]"), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0), ArrayList<ToolResultMessage>()))
-                        finished = true
-                        break
+                    match (runBeforeTurnHooks(hookState, turnCount, chatReq)) {
+                        case Some(r) =>
+                            chatReq = r
+                            if (chatReq.model != actualModel) {
+                                log.info("model routed: ${actualModel} -> ${chatReq.model}", Array<Attr>())
+                            }
+                            // 若 hook 改写了请求的 messages，同步回运行时上下文，避免分叉
+                            currentMessages = chatReq.messages
+                        case None =>
+                            log.info("beforeTurn hook short-circuited run", Array<Attr>())
+                            stream.emit(TurnEndEvent(AssistantMessage(ContentList.ofText("[Run short-circuited by hook]"), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0), ArrayList<ToolResultMessage>()))
+                            finished = true
+                            break
                     }
 
                     let chatStream = this.provider.chatStreaming(chatReq)
@@ -210,42 +217,51 @@ public class AgentRuntime {
                             var idx: Int64 = 0
                             while (idx < toolCalls.size) {
                                 let tc = toolCalls[idx]
-                                    match (this.toolRegistry.get(tc.name)) {
-                                        case Some(t) =>
-                                            match (shouldAllow(t, ctx.workDir, this.trustManager)) {
-                                                case TrustDecision.Allowed =>
-                                                    match (runBeforeToolHooks(hookState, turnCount, tc)) {
-                                                        case BeforeToolDecision.Allow =>
-                                                            batch.add((tc.name, ctx, tc.args))
-                                                        case BeforeToolDecision.Deny(reason) =>
-                                                            skipResults[idx] = "Tool blocked by hook: " + reason
-                                                            log.warn("tool ${tc.name} blocked by hook: ${reason}", Array<Attr>())
-                                                        case BeforeToolDecision.Modify(args) =>
-                                                            batch.add((tc.name, ctx, args))
-                                                            log.info("tool ${tc.name} args modified by hook", Array<Attr>())
+                                match (this.toolRegistry.get(tc.name)) {
+                                    case Some(t) =>
+                                        match (shouldAllow(t, ctx.workDir, this.trustManager)) {
+                                            case TrustDecision.Allowed =>
+                                                let (args, skipMsg) = decideToolCall(hookState, turnCount, tc)
+                                                match (args) {
+                                                    case Some(a) => batch.add((tc.name, ctx, a))
+                                                    case None =>
+                                                        skipResults[idx] = skipMsg ?? "Tool blocked by hook"
+                                                        log.warn("tool ${tc.name} blocked by hook", Array<Attr>())
+                                                }
+                                            case TrustDecision.NeedsApproval =>
+                                                let answer = this.askUser(
+                                                    "Tool '" + tc.name + "' needs your approval.\n" +
+                                                    "  y  — allow this once (session only)\n" +
+                                                    "  a  — always allow this directory\n" +
+                                                    "  n  — deny")
+                                                if (answer == "a" || answer == "always" || answer == "yes") {
+                                                    this.trustManager.setTrust(ctx.workDir, TrustState.Trusted)
+                                                    log.info("tool ${tc.name} always approved for ${ctx.workDir}", Array<Attr>())
+                                                    let (args, skipMsg) = decideToolCall(hookState, turnCount, tc)
+                                                    match (args) {
+                                                        case Some(a) => batch.add((tc.name, ctx, a))
+                                                        case None =>
+                                                            skipResults[idx] = skipMsg ?? "Tool blocked by hook"
+                                                            log.warn("tool ${tc.name} blocked by hook", Array<Attr>())
                                                     }
-                                                case TrustDecision.NeedsApproval =>
-                                                    let answer = this.askUser(
-                                                        "Tool '" + tc.name + "' needs your approval.\n" +
-                                                        "  y  — allow this once (session only)\n" +
-                                                        "  a  — always allow this directory\n" +
-                                                        "  n  — deny")
-                                                    if (answer == "a" || answer == "always" || answer == "yes") {
-                                                        this.trustManager.setTrust(ctx.workDir, TrustState.Trusted)
-                                                        batch.add((tc.name, ctx, tc.args))
-                                                        log.info("tool ${tc.name} always approved for ${ctx.workDir}", Array<Attr>())
-                                                    } else if (answer == "y" || answer == "once") {
-                                                        this.trustManager.setSessionTrust(ctx.workDir, TrustState.Trusted)
-                                                        batch.add((tc.name, ctx, tc.args))
-                                                        log.info("tool ${tc.name} approved for session", Array<Attr>())
-                                                    } else {
-                                                        skipResults[idx] = "Tool not allowed: user denied approval"
-                                                        log.warn("tool ${tc.name} denied by user", Array<Attr>())
+                                                } else if (answer == "y" || answer == "once") {
+                                                    this.trustManager.setSessionTrust(ctx.workDir, TrustState.Trusted)
+                                                    log.info("tool ${tc.name} approved for session", Array<Attr>())
+                                                    let (args, skipMsg) = decideToolCall(hookState, turnCount, tc)
+                                                    match (args) {
+                                                        case Some(a) => batch.add((tc.name, ctx, a))
+                                                        case None =>
+                                                            skipResults[idx] = skipMsg ?? "Tool blocked by hook"
+                                                            log.warn("tool ${tc.name} blocked by hook", Array<Attr>())
                                                     }
-                                                case TrustDecision.Denied =>
-                                                    skipResults[idx] = "Tool not allowed: workDir is untrusted"
-                                                    log.warn("tool ${tc.name} blocked: workDir untrusted", Array<Attr>())
-                                            }
+                                                } else {
+                                                    skipResults[idx] = "Tool not allowed: user denied approval"
+                                                    log.warn("tool ${tc.name} denied by user", Array<Attr>())
+                                                }
+                                            case TrustDecision.Denied =>
+                                                skipResults[idx] = "Tool not allowed: workDir is untrusted"
+                                                log.warn("tool ${tc.name} blocked: workDir untrusted", Array<Attr>())
+                                        }
                                     case None =>
                                         skipResults[idx] = "Tool not found: " + tc.name
                                 }
@@ -267,21 +283,18 @@ public class AgentRuntime {
                                 continue
                             }
                             var resIdx: Int64 = 0
-                            let toolResults = ArrayList<ToolResultMessage>()
                             for (i in 0..toolCalls.size) {
                                 let tc = toolCalls[Int64(i)]
                                 match (skipResults.get(Int64(i))) {
                                     case Some(msg) =>
                                         let tr = ToolResultMessage(tc.id, tc.name, ContentList.ofText(msg), false, 0)
                                         currentMessages.add(tr)
-                                        toolResults.add(tr)
                                     case None =>
                                         if (resIdx < results.size) {
                                             let r = results[Int64(resIdx)]
                                             log.info("tool ${tc.name} done: err=${r.isError}", Array<Attr>())
                                             let tr = ToolResultMessage(tc.id, tc.name, ContentList.ofText(r.text), r.isError, 0)
                                             currentMessages.add(tr)
-                                            toolResults.add(tr)
                                             callAfterToolHooks(hookState, turnCount, tc, tr)
                                             resIdx++
                                         }
@@ -402,7 +415,7 @@ public class AgentRuntime {
     }
 
     private func runBeforeTurnHooks(state: HookState, turnCount: Int64,
-        request: ChatRequest): ChatRequest {
+        request: ChatRequest): Option<ChatRequest> {
         let ctx = HookContext(this.config, this.toolRegistry, turnCount, state)
         var current = request
         for (h in this.hooks) {
@@ -410,15 +423,16 @@ public class AgentRuntime {
                 match (h.beforeTurn(ctx, current)) {
                     case TurnDecision.Continue(r) => current = r
                     case TurnDecision.ShortCircuit(msg) =>
-                        return ChatRequest("", current.messages, current.temperature,
-                            current.maxTokens, current.reasoningEffort, current.tools)
+                        let log = getGlobalLogger([("name", "AgentRuntime")])
+                        log.warn("beforeTurn hook short-circuited run: ${msg}", Array<Attr>())
+                        return None
                 }
             } catch (e: Exception) {
                 let log = getGlobalLogger([("name", "AgentRuntime")])
                 log.warn("beforeTurn hook error: ${e.message}", Array<Attr>())
             }
         }
-        current
+        Some(current)
     }
 
     private func runBeforeToolHooks(state: HookState, turnCount: Int64,
@@ -440,6 +454,19 @@ public class AgentRuntime {
             }
         }
         decision
+    }
+
+    // 返回 Some(args) 表示应执行（可带 hook 改写后的参数）；None + Option(reason) 表示应跳过
+    private func decideToolCall(state: HookState, turnCount: Int64,
+        tc: ToolCallBlock): (Option<JsonValue>, Option<String>) {
+        match (runBeforeToolHooks(state, turnCount, tc)) {
+            case BeforeToolDecision.Allow =>
+                (Some(tc.args), None)
+            case BeforeToolDecision.Deny(reason) =>
+                (None, Some("Tool blocked by hook: " + reason))
+            case BeforeToolDecision.Modify(args) =>
+                (Some(args), None)
+        }
     }
 
     private func callAfterToolHooks(state: HookState, turnCount: Int64,

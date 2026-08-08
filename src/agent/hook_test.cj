@@ -141,6 +141,7 @@ func makeToolUseMsg(name: String, toolCallId: String): AssistantMessage {
 class FakeProvider <: Provider {
     public var responses: ArrayList<AssistantMessage>
     public var callCount: Int64 = 0
+    public var lastModel: String = ""
 
     public init(responses: ArrayList<AssistantMessage>) {
         this.responses = responses
@@ -149,14 +150,16 @@ class FakeProvider <: Provider {
     public func name(): String { "fake" }
 
     public func chat(req: ChatRequest): ChatResponse {
-        let msg = this.responses[this.callCount]
+        this.lastModel = req.model
+        let idx = this.callCount % this.responses.size
         this.callCount++
-        ChatResponse(msg)
+        ChatResponse(this.responses[idx])
     }
 
     public func chatStreaming(req: ChatRequest): EventStream<ChatDelta, AssistantMessage> {
+        this.lastModel = req.model
         let stream = EventStream<ChatDelta, AssistantMessage>()
-        let idx = this.callCount
+        let idx = this.callCount % this.responses.size
         this.callCount++
         let msg = this.responses[idx]
         let delta = ChatDelta("", "", Some(msg.stopReason))
@@ -359,5 +362,97 @@ func state_sharedAcrossPhases() {
     msgs.add(UserMessage(ContentList.ofText("hi"), 0))
     runtime.chat(msgs).result()
 
+    @Expect(h.finalCost, 1.0)
+}
+
+class ShortCircuitTurnHook <: Hook {
+    public override func beforeTurn(ctx: HookContext, request: ChatRequest): TurnDecision {
+        TurnDecision.ShortCircuit("stop requested")
+    }
+}
+
+@Test
+func beforeTurn_shortCircuit_endsRun() {
+    let responses = ArrayList<AssistantMessage>()
+    responses.add(makeAssistantMsg("never", StopReason.EndTurn))
+    let provider = FakeProvider(responses)
+    let config = AgentConfig.default()
+    let hooks = ArrayList<Hook>([ShortCircuitTurnHook()])
+    let runtime = makeRuntime(config, provider, hooks)
+
+    let msgs = ArrayList<Message>()
+    msgs.add(UserMessage(ContentList.ofText("hi"), 0))
+    let result = runtime.chat(msgs).result()
+
+    // provider 不应被调用
+    @Expect(provider.callCount, 0)
+    // run 应正常结束并带短路提示
+    @Expect(result.size > 0, true)
+}
+
+class RouteModelHook <: Hook {
+    public override func beforeTurn(ctx: HookContext, request: ChatRequest): TurnDecision {
+        TurnDecision.Continue(ChatRequest("routed-model", request.messages,
+            request.temperature, request.maxTokens, request.reasoningEffort, request.tools))
+    }
+}
+
+@Test
+func beforeTurn_modelRouting() {
+    let responses = ArrayList<AssistantMessage>()
+    responses.add(makeAssistantMsg("reply", StopReason.EndTurn))
+    let provider = FakeProvider(responses)
+    let config = AgentConfig.default()
+    let hooks = ArrayList<Hook>([RouteModelHook()])
+    let runtime = makeRuntime(config, provider, hooks)
+
+    let msgs = ArrayList<Message>()
+    msgs.add(UserMessage(ContentList.ofText("hi"), 0))
+    runtime.chat(msgs).result()
+
+    // FakeProvider 收到改写后的 model
+    @Expect(provider.lastModel, "routed-model")
+}
+
+class ShortCircuitAfterTurnHook <: Hook {
+    public override func afterTurn(ctx: HookContext): AfterTurnUpdate {
+        AfterTurnUpdate(None, true)
+    }
+}
+
+@Test
+func afterTurn_shortCircuit_endsRun() {
+    let responses = ArrayList<AssistantMessage>()
+    responses.add(makeAssistantMsg("reply", StopReason.EndTurn))
+    let provider = FakeProvider(responses)
+    let config = AgentConfig.default()
+    let hooks = ArrayList<Hook>([ShortCircuitAfterTurnHook()])
+    let runtime = makeRuntime(config, provider, hooks)
+
+    let msgs = ArrayList<Message>()
+    msgs.add(UserMessage(ContentList.ofText("hi"), 0))
+    let result = runtime.chat(msgs).result()
+
+    @Expect(result.size > 0, true)
+}
+
+@Test
+func state_isolatedPerRun() {
+    let responses = ArrayList<AssistantMessage>()
+    responses.add(makeAssistantMsg("reply", StopReason.EndTurn))
+    let provider = FakeProvider(responses)
+    let config = AgentConfig.default()
+    let h = CostHook()
+    let runtime = makeRuntime(config, provider, ArrayList<Hook>([h]))
+
+    let msgs = ArrayList<Message>()
+    msgs.add(UserMessage(ContentList.ofText("hi"), 0))
+
+    // 第一次 run：cost = 1.0
+    runtime.chat(msgs).result()
+    @Expect(h.finalCost, 1.0)
+
+    // 第二次 run（同一 runtime）：state 应重新创建，cost 仍是 1.0 而非跨 run 累计
+    runtime.chat(msgs).result()
     @Expect(h.finalCost, 1.0)
 }
