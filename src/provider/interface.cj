@@ -12,6 +12,18 @@ public struct ChatRequest {
     public let maxTokens: Int64
     public let reasoningEffort: Option<String>
     public let tools: ArrayList<OpenAITool>
+    public let extra: HashMap<String, JsonValue>
+
+    public init(model: String, messages: ArrayList<Message>,
+        temperature: Float64, maxTokens: Int64,
+        reasoningEffort: Option<String>,
+        tools: ArrayList<OpenAITool>,
+        extra: HashMap<String, JsonValue>) {
+        this.model = model; this.messages = messages
+        this.temperature = temperature; this.maxTokens = maxTokens
+        this.reasoningEffort = reasoningEffort
+        this.tools = tools; this.extra = extra
+    }
 
     public init(model: String, messages: ArrayList<Message>,
         temperature: Float64, maxTokens: Int64,
@@ -20,7 +32,7 @@ public struct ChatRequest {
         this.model = model; this.messages = messages
         this.temperature = temperature; this.maxTokens = maxTokens
         this.reasoningEffort = reasoningEffort
-        this.tools = tools
+        this.tools = tools; this.extra = HashMap<String, JsonValue>()
     }
 }
 
