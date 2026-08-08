@@ -1,5 +1,6 @@
 package atelier.tool
 
+import jsonvalue.*
 import std.collection.*
 
 func mcpCfg(name: String): McpServerConfig {
@@ -155,4 +156,61 @@ func mcpManager_toolCatalogCache() {
     @Expect(cached[0][0], "search_repos")
     @Expect(cached[0][1], "在 GitHub 上搜索仓库")
     @Expect(m.serverToolsOf("nope").size, 0)
+}
+
+func mcpManagerActiveWithTools(name: String): McpManager {
+    let m = McpManager()
+    m.registerServer(McpServerConfig(name, "stdio", "echo", ""))
+    m.updateServerInfo(name, "1.2.3", 2)
+    let tools = ArrayList<(String, String)>()
+    tools.add(("search_repos", "在 GitHub 上搜索仓库"))
+    tools.add(("list_issues", "列出仓库 issues"))
+    m.cacheServerTools(name, tools)
+    m.activate(name)
+    m
+}
+
+@Test
+func loadMcpToolset_unknownServerError() {
+    let m = McpManager()
+    let reg = ToolRegistry()
+    reg.register(LoadMcpToolsetTool(m, reg))
+    let t = match (reg.get("load_mcp_toolset")) {
+        case Some(x) => x
+        case None => throw Exception("tool not registered")
+    }
+    let args = HashMap<String, JsonValue>()
+    args["server_id"] = JsonValue.String("nope")
+    let r = t.execute(ToolContext("."), JsonValue.Map(args))
+    @Expect(r.isError, true)
+    @Expect(r.text.contains("未知"), true)
+}
+
+@Test
+func loadMcpToolset_alreadyActiveInfo() {
+    let m = mcpManagerActiveWithTools("github")
+    let reg = ToolRegistry()
+    reg.register(LoadMcpToolsetTool(m, reg))
+    let t = match (reg.get("load_mcp_toolset")) {
+        case Some(x) => x
+        case None => throw Exception("tool not registered")
+    }
+    let args = HashMap<String, JsonValue>()
+    args["server_id"] = JsonValue.String("github")
+    let r = t.execute(ToolContext("."), JsonValue.Map(args))
+    @Expect(r.isError, false)
+    @Expect(r.text.contains("已加载"), true)
+}
+
+@Test
+func loadMcpToolset_missingParamError() {
+    let m = McpManager()
+    let reg = ToolRegistry()
+    reg.register(LoadMcpToolsetTool(m, reg))
+    let t = match (reg.get("load_mcp_toolset")) {
+        case Some(x) => x
+        case None => throw Exception("tool not registered")
+    }
+    let r = t.execute(ToolContext("."), JsonValue.Map(HashMap()))
+    @Expect(r.isError, true)
 }

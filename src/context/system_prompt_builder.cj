@@ -2,6 +2,7 @@ package atelier.context
 
 import atelier.skill.*
 import atelier.session.*
+import atelier.tool.McpManager
 import std.collection.*
 import std.fs.*
 
@@ -47,6 +48,47 @@ public class SystemPromptBuilder {
             }
             sb.append("\n")
         }
+        sb.toString()
+    }
+
+    // 渐进披露第 1 层：MCP 服务目录段
+    // 全部服务（含未激活）显示 name (version, N 工具) + 工具名: 描述（启动 addServer 已缓存）；
+    // 激活服务标注 [已加载]（tools 段才有完整 schema 定义）
+    public func buildMcpCatalog(mcpManager: McpManager): String {
+        if (mcpManager.serverCount() == 0) { return "" }
+        let sb = StringBuilder()
+        sb.append("[可用 MCP 服务]\n")
+        sb.append("调用 load_mcp_toolset(server_id) 激活服务，激活后其完整工具定义进入可用工具列表。\n")
+        for (name in mcpManager.serverNames()) {
+            sb.append("- ")
+            sb.append(name)
+            match (mcpManager.serverVersion(name)) {
+                case Some(v) =>
+                    let count = match (mcpManager.serverToolCount(name)) {
+                        case Some(c) => c.toString()
+                        case None => "?"
+                    }
+                    sb.append(" (v")
+                    sb.append(v)
+                    sb.append(", ")
+                    sb.append(count)
+                    sb.append(" 个工具)")
+                case None => ()
+            }
+            if (mcpManager.isActive(name, 0)) {
+                sb.append(" [已加载]")
+            }
+            for (t in mcpManager.serverToolsOf(name)) {
+                sb.append("\n  - ")
+                sb.append(t[0])
+                if (t[1] != "") {
+                    sb.append(": ")
+                    sb.append(t[1])
+                }
+            }
+            sb.append("\n")
+        }
+        sb.append("\n")
         sb.toString()
     }
 }
