@@ -178,7 +178,7 @@ func makeRuntime(config: AgentConfig, provider: Provider, hooks: ArrayList<Hook>
     let providerReg = ProviderRegistry()
     providerReg.register("default", provider)
     AgentRuntime(config, provider, toolReg, sessionStore, trustMgr,
-        skillReg, agentReg, providerReg, hooks, { q => "" })
+        skillReg, agentReg, providerReg, hooks, { q => "" }, McpManager())
 }
 
 class CountingTool <: Tool {
@@ -223,7 +223,7 @@ func beforeTool_deny_blocksExecution() {
     providerReg.register("default", provider)
     let hooks = ArrayList<Hook>([BlockingHook()])
     let runtime = AgentRuntime(config, provider, toolReg, sessionStore, trustMgr,
-        skillReg, agentReg, providerReg, hooks, { q => "" })
+        skillReg, agentReg, providerReg, hooks, { q => "" }, McpManager())
 
     let msgs = ArrayList<Message>()
     msgs.add(UserMessage(ContentList.ofText("hi"), 0))
@@ -277,7 +277,7 @@ func beforeTool_modify_changesArgs() {
     providerReg.register("default", provider)
     let hooks = ArrayList<Hook>([ModifyHook()])
     let runtime = AgentRuntime(config, provider, toolReg, sessionStore, trustMgr,
-        skillReg, agentReg, providerReg, hooks, { q => "" })
+        skillReg, agentReg, providerReg, hooks, { q => "" }, McpManager())
 
     let msgs = ArrayList<Message>()
     msgs.add(UserMessage(ContentList.ofText("hi"), 0))

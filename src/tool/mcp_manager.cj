@@ -165,9 +165,11 @@ public class McpManager {
         }
     }
 
+    // 工具级活跃判定：非 mcp_ 前缀工具（serverFromToolName 为空）不受 MCP 冷却管辖，始终视为活跃；
+    // mcp_ 工具按所属服务（含冷却）判定
     public func isActiveTool(toolName: String, cooldownTurns: Int64): Bool {
         let s = this.serverFromToolName(toolName)
-        if (s == "") { return false }
+        if (s == "") { return true }
         this.isActive(s, cooldownTurns)
     }
 
@@ -201,6 +203,8 @@ public class McpManager {
         }
     }
 
+    // 工具目录缓存：同时写 serverToolCounts（与 updateServerInfo 的 toolCount 重叠，两者同值；
+    // addServer 成功路径两者先后写入，保持一致，供目录段展示工具数）
     public func cacheServerTools(name: String, tools: ArrayList<(String, String)>): Unit {
         this.lock.lock()
         try {

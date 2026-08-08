@@ -80,38 +80,6 @@ public class AgentRuntime {
             ArrayList<Hook>(), { q => "" }, mcpManager)
     }
 
-    // 旧构造：12 参（hooks + askUser + sessionEnv），委托 13 参传 McpManager()
-    public init(config: AgentConfig, provider: Provider,
-        toolRegistry: ToolRegistry, sessionStore: SessionStore,
-        trustManager: TrustManager, skillRegistry: SkillRegistry,
-        agentRegistry: AgentRegistry, providerRegistry: ProviderRegistry,
-        hooks: ArrayList<Hook>, askUser: AskUserFn,
-        sessionEnv: SessionEnvironment) {
-        this(config, provider, toolRegistry, sessionStore, trustManager,
-            skillRegistry, agentRegistry, providerRegistry, hooks, askUser,
-            sessionEnv, McpManager())
-    }
-
-    // 旧构造：10 参（hooks + askUser），委托 11 参传 McpManager()
-    public init(config: AgentConfig, provider: Provider,
-        toolRegistry: ToolRegistry, sessionStore: SessionStore,
-        trustManager: TrustManager, skillRegistry: SkillRegistry,
-        agentRegistry: AgentRegistry, providerRegistry: ProviderRegistry,
-        hooks: ArrayList<Hook>, askUser: AskUserFn) {
-        this(config, provider, toolRegistry, sessionStore, trustManager,
-            skillRegistry, agentRegistry, providerRegistry, hooks, askUser,
-            McpManager())
-    }
-
-    // 旧构造：8 参，委托 9 参传 McpManager()
-    public init(config: AgentConfig, provider: Provider,
-        toolRegistry: ToolRegistry, sessionStore: SessionStore,
-        trustManager: TrustManager, skillRegistry: SkillRegistry,
-        agentRegistry: AgentRegistry, providerRegistry: ProviderRegistry) {
-        this(config, provider, toolRegistry, sessionStore, trustManager,
-            skillRegistry, agentRegistry, providerRegistry, McpManager())
-    }
-
     public func chat(messages: ArrayList<Message>): EventStream<AgentEvent, ArrayList<Message>> {
         this.chatWithEnv(messages, this.sessionEnv)
     }
@@ -392,8 +360,7 @@ public class AgentRuntime {
                 let prefix = name[0..name.size - 2]
                 for (t in this.toolRegistry.list()) {
                     if (t.name().startsWith(prefix)) {
-                        if (t.name().startsWith("mcp_") &&
-                            !this.mcpManager.isActiveTool(t.name(), this.config.mcpCooldownTurns)) {
+                        if (!this.mcpManager.isActiveTool(t.name(), this.config.mcpCooldownTurns)) {
                             continue
                         }
                         result.add(OpenAITool(t.name(), t.description(), t.schema()))

@@ -77,20 +77,23 @@ public struct AgentConfigDTO <: JsonDeserializable<AgentConfigDTO> {
     public let skills: ArrayList<String>
     public let maxTurns: Int64
     public let temperature: Float64
+    public let mcpCooldownTurns: Int64
 
     public init(name: String, description: Option<String>, systemPrompt: String,
         model: String, provider: Option<String>, tools: ArrayList<String>,
-        skills: ArrayList<String>, maxTurns: Int64, temperature: Float64) {
+        skills: ArrayList<String>, maxTurns: Int64, temperature: Float64,
+        mcpCooldownTurns: Int64) {
         this.name = name; this.description = description; this.systemPrompt = systemPrompt
         this.model = model; this.provider = provider; this.tools = tools
         this.skills = skills; this.maxTurns = maxTurns; this.temperature = temperature
+        this.mcpCooldownTurns = mcpCooldownTurns
     }
 
     public static func fromJson(r: JsonReader): AgentConfigDTO {
         var name = ""; var desc: Option<String> = None; var sp = ""
         var model = ""; var prov: Option<String> = None
         var tools = ArrayList<String>(); var skills = ArrayList<String>()
-        var mt = Int64(20); var temp = Float64(0.7)
+        var mt = Int64(20); var temp = Float64(0.7); var cooldown = Int64(0)
         r.startObject()
         while (r.peek() != EndObject) {
             match (r.readName()) {
@@ -103,11 +106,12 @@ public struct AgentConfigDTO <: JsonDeserializable<AgentConfigDTO> {
                 case "skills" => skills = r.readValue<ArrayList<String>>()
                 case "maxTurns" => mt = r.readValue<Int64>()
                 case "temperature" => temp = r.readValue<Float64>()
+                case "mcpCooldownTurns" => cooldown = r.readValue<Int64>()
                 case _ => r.skip()
             }
         }
         r.endObject()
-        AgentConfigDTO(name, desc, sp, model, prov, tools, skills, mt, temp)
+        AgentConfigDTO(name, desc, sp, model, prov, tools, skills, mt, temp, cooldown)
     }
 }
 

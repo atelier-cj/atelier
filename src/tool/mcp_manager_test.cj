@@ -86,7 +86,7 @@ func mcpManager_isActiveToolResolvesServer() {
     m.activate("github")
     @Expect(m.isActiveTool("mcp_github_search_repos", 20), true)
     @Expect(m.isActiveTool("mcp_slack_send", 20), false)
-    @Expect(m.isActiveTool("read_file", 20), false)
+    @Expect(m.isActiveTool("read_file", 20), true)
 }
 
 @Test
