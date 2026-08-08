@@ -27,10 +27,10 @@ Atelier 的上下文管理采用 **“存储层（L1）+ 构建层（L2）”** 
 │                                      ▼                                     │
 │  ┌──────────────────────────────────────────────────────────────────────┐  │
 │  │                    L2: 上下文构建层                                  │  │
-│  │  agent/runtime.cj    buildSystemPromptWithEnv()   🚧→ SystemPromptBuilder│
-│  │                      resolveTools()                                 │  │
-│  │                      + 系统提示注入（首条 UserMessage）              │  │
-│  │  context/compaction.cj   compactMessages()                          │  │
+│  │  context/builder.cj         ContextBuilder（initMessages / buildChatRequest）│
+│  │  context/system_prompt_builder.cj  SystemPromptBuilder.build（4 段）          │
+│  │  agent/runtime.cj            resolveTools() + 委托 ContextBuilder            │
+│  │  context/compaction.cj       compactMessages()                          │  │
 │  │  │                                                                  │  │
 │  │  • 组装系统提示（静态指令 + Skills + AGENTS.md + 会话环境）          │  │
 │  │  • 组装工具定义（config.tools 精确名 / agent_ 前缀 / _* 通配符）     │  │
@@ -50,7 +50,7 @@ Atelier 的上下文管理采用 **“存储层（L1）+ 构建层（L2）”** 
 | `/tree` 分叉 | ❌ 压缩后难以回溯 | ✅ 完美支持 |
 | 审计合规 | ❌ 无完整日志 | ✅ 有不可篡改的审计链 |
 
-**现状**：L2 构建逻辑内联在 `AgentRuntime.chatWithEnv()`（runtime.cj:102），尚无独立 `ContextBuilder` 类。每次 `chat()` 传入的是已加载的消息列表（由调用方经 `sessionStore.load` / `loadEntries` + `pathToLeaf` 得到），运行时只负责系统提示与压缩。🚧 演进：抽独立 `ContextBuilder`（见第三章）。
+**现状**：L2 构建已抽离为 `ContextBuilder`（✅ context/builder.cj）+ `SystemPromptBuilder`（✅ context/system_prompt_builder.cj），`AgentRuntime.chatWithEnv()`（runtime.cj:102）委托调用。每次 `chat()` 传入的是已加载的消息列表（由调用方经 `sessionStore.load` / `loadEntries` + `pathToLeaf` 得到），运行时负责系统提示组装、工具解析与压缩。
 
 ---
 
@@ -122,15 +122,15 @@ public interface SessionStore {
 
 ## 三、上下文构建（L2）
 
-### 3.1 现状：runtime 内联构建（✅ agent/runtime.cj）
+### 3.1 现状：ContextBuilder + SystemPromptBuilder（✅ P0 已实现）
 
-`AgentRuntime.chatWithEnv()` 每次 run 按以下步骤构建上下文：
+`AgentRuntime.chatWithEnv()` 每次 run 委托 `ContextBuilder` 按以下步骤构建上下文：
 
 ```
-1. buildSystemPromptWithEnv(config, skillRegistry, sessionEnv)   // 系统提示
-2. 系统提示作为首条 UserMessage 加入 currentMessages            // （兼容 OpenAI 系 API 的 system 传法）
+1. ContextBuilder.initMessages() 内部经 SystemPromptBuilder.build 生成系统提示   // 4 段
+2. 系统提示作为首条 UserMessage 加入 currentMessages（非空才注入）              // （兼容 OpenAI 系 API 的 system 传法）
 3. 追加调用方传入的历史消息
-4. 每轮 resolveTools() 解析工具定义（config.tools → ToolRegistry）→ ChatRequest
+4. 每轮 resolveTools() 解析工具定义（config.tools → ToolRegistry）→ buildChatRequest() 组装 ChatRequest
 5. 每轮结束（end_turn）后：afterTurn hooks 改写 → compactMessages() 压缩
 ```
 
@@ -168,7 +168,7 @@ public class ContextBuilder {
 
 ### 3.3 独立 SystemPromptBuilder（✅ P0 已实现，context/system_prompt_builder.cj）
 
-现有 `buildSystemPromptWithEnv()` 是 runtime.cj 的顶层函数，已承担 4 段拼接（systemPrompt / Skills 指令 / AGENTS.md / Session Context），演进后还会增加 MCP 服务目录、Skills 目录等段。独立成类，让**分段顺序、段格式、前缀稳定性**收拢在一处、可单独测试：
+P0 前，系统提示拼接是 runtime.cj 的顶层函数 `buildSystemPromptWithEnv`，已承担 4 段拼接（systemPrompt / Skills 指令 / AGENTS.md / Session Context），演进后还会增加 MCP 服务目录、Skills 目录等段。独立成类（✅ P0 已实现），让**分段顺序、段格式、前缀稳定性**收拢在一处、可单独测试：
 
 ```
 ┌──────────────────────────────────────────────────────┐
@@ -400,7 +400,7 @@ public struct Skill {
 }
 ```
 
-**注入方式**（✅ runtime.cj `buildSystemPromptWithEnv`）：`config.skills` 声明哪些 Skill 启用，运行时把其 `instructions` **全量拼入系统提示**。
+**注入方式**（✅ SystemPromptBuilder.build 第 2 段）：`config.skills` 声明哪些 Skill 启用，运行时把其 `instructions` **全量拼入系统提示**。
 
 **当前局限**：
 
@@ -484,8 +484,8 @@ public class FindSkillsTool <: Tool {
     ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │ 2. AgentRuntime.chatWithEnv(messages, sessionEnv)                  │
-│    ├─ buildSystemPromptWithEnv()   ← systemPrompt + Skills + AGENTS.md + 会话环境│
-│    ├─ 系统提示作首条 UserMessage 注入                              │
+│    ├─ ContextBuilder.initMessages() ← SystemPromptBuilder.build（4 段）│
+│    ├─ 系统提示作首条 UserMessage 注入（非空才注入）                 │
 │    ├─ resolveTools()               ← config.tools → ToolRegistry    │
 │    └─ ChatRequest {model, messages, tools} → Provider.chatStreaming()│
 └─────────────────────────────────────────────────────────────────────┘
@@ -517,7 +517,7 @@ public class FindSkillsTool <: Tool {
 | `session/store.cj` | ✅ | L1 存储抽象，只增不改 | `save / appendBranch / loadEntries / fork` |
 | `session/file_store.cj` | ✅ | bstorm 持久化（默认后端） | `StormSessionStore` |
 | `session/memory_store.cj` | ✅ | 内存实现 | `MemoryStore` |
-| `agent/runtime.cj` | ✅ | L2 构建 + 推理循环（内联） | `chatWithEnv / buildSystemPromptWithEnv / resolveTools` |
+| `agent/runtime.cj` | ✅ | 推理循环 + 工具解析（L2 委托 ContextBuilder） | `chatWithEnv / resolveTools` |
 | `context/compaction.cj` | ✅ | 上下文压缩（🚧 + `CompactionConfig` 可配置模板） | `compactMessages` |
 | `context/tokens.cj` | ✅ | Token 本地估算 | `estimateTokens` |
 | `context/model_registry.cj` | ✅ | 模型上下文窗口查表 | `ModelContextRegistry.get` |
