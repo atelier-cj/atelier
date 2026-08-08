@@ -9,7 +9,7 @@ link-option = "-lstdx.crypto.digest"
 [dependencies]
 "mcp" = "2.3.0"
 "sonyflake" = "1.0.9"
-"jsonvalue" = "1.0.1"
+"jsonvalue" = "1.1.0"
 "ystyle::jsonrpc" = "0.4.1"
 "bstorm" = "1.4.0"
 "tomlcj" = "1.0.0"
@@ -60,3 +60,6 @@ compile-option = "--static -Woff unused"
 
 [profile.test]
 filter = "-ProviderIntegrationTest.*"
+
+[replace]
+jsonvalue = "1.1.0"
