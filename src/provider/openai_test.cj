@@ -5,8 +5,18 @@ import jsonvalue.*
 import std.collection.*
 import std.env.getVariable
 
+import std.env.getVariable
+
+func integrationEnabled(): Bool {
+    match (getVariable("ATELIER_INTEGRATION")) {
+        case Some(v) => v == "1"
+        case None => false
+    }
+}
+
 @Test
 func anthropic_syncChat() {
+    if (!integrationEnabled()) { return }
     let provider = AnthropicProvider("test-anthropic",
         "https://api.deepseek.com/anthropic",
         match (getVariable("DEEPSEEK_API_KEY")) { case Some(k) => k; case None => "" })
@@ -19,6 +29,7 @@ func anthropic_syncChat() {
 
 @Test
 func ollama_toolCall() {
+    if (!integrationEnabled()) { return }
     let provider = OllamaProvider("test-ollama", "http://192.168.3.6:11434")
     let msgs = ArrayList<Message>()
     msgs.add(UserMessage(ContentList.ofText("Run ls /tmp"), 0))
@@ -35,6 +46,7 @@ func ollama_toolCall() {
 
 @Test
 func ollama_syncChat() {
+    if (!integrationEnabled()) { return }
     let provider = OllamaProvider("test-ollama", "http://192.168.3.6:11434")
     let msgs = ArrayList<Message>()
     msgs.add(UserMessage(ContentList.ofText("Say hello in one word"), 0))
@@ -45,6 +57,7 @@ func ollama_syncChat() {
 
 @Test
 func ollama_streamingChat() {
+    if (!integrationEnabled()) { return }
     let provider = OllamaProvider("test-ollama", "http://192.168.3.6:11434")
     let msgs = ArrayList<Message>()
     msgs.add(UserMessage(ContentList.ofText("Count to 3 slowly"), 0))
@@ -69,6 +82,7 @@ func ollama_streamingChat() {
 
 @Test
 func openai_syncChat() {
+    if (!integrationEnabled()) { return }
     let provider = OpenAIProvider(
         "test-openai",
         "http://192.168.3.6:8089",
@@ -82,6 +96,7 @@ func openai_syncChat() {
 
 @Test
 func openai_streamingChat() {
+    if (!integrationEnabled()) { return }
     let provider = OpenAIProvider(
         "test-openai",
         "http://192.168.3.6:8089",
