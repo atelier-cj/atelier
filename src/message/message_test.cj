@@ -2,6 +2,9 @@ package atelier.message
 
 import std.collection.*
 import jsonvalue.*
+import stdx.encoding.json.stream.*
+import std.io.ByteBuffer
+import atelier.util.toJsonString
 
 func makeTextContent(text: String): ContentList {
     let blocks = ArrayList<ContentBlock>()
@@ -150,5 +153,35 @@ func stopReason_values_construct() {
     match (reason) {
         case StopReason.EndTurn => ()
         case _ => @Fail("expected EndTurn")
+    }
+}
+
+@Test
+func archiveMessage_roleAndFields() {
+    let m = ArchiveMessage(3, 8, "已归档的摘要", 0)
+    match (m.role()) {
+        case MessageRole.Archive => ()
+        case _ => @Fail("expected Archive role")
+    }
+    @Expect(m.startIndex, 3)
+    @Expect(m.endIndex, 8)
+    @Expect(m.summary, "已归档的摘要")
+    @Expect(m.timestamp, 0)
+}
+
+@Test
+func archiveMessage_serializeRoundTrip() {
+    let m = ArchiveMessage(3, 8, "已归档的摘要", 0)
+    let json = toJsonString(m)
+    let buf = ByteBuffer(json.toArray())
+    let r = JsonReader(buf)
+    let back = readMessageFromJson(r)
+    match (back) {
+        case am: ArchiveMessage =>
+            @Expect(am.startIndex, 3)
+            @Expect(am.endIndex, 8)
+            @Expect(am.summary, "已归档的摘要")
+            @Expect(am.timestamp, 0)
+        case _ => @Fail("expected ArchiveMessage")
     }
 }

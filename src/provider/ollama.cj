@@ -127,6 +127,9 @@ func messagesToOllama(msgs: ArrayList<Message>): ArrayList<JsonValue> {
             case cm: CompactionMessage =>
                 obj["role"] = JsonValue.String("user")
                 obj["content"] = JsonValue.String("[Summary: " + cm.summary + "]")
+            case am: ArchiveMessage =>
+                obj["role"] = JsonValue.String("user")
+                obj["content"] = JsonValue.String("[Archived " + am.startIndex.toString() + "-" + am.endIndex.toString() + ": " + am.summary + "]")
             case _ => ()
         }
         result.add(JsonValue.Map(obj))

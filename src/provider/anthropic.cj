@@ -151,6 +151,8 @@ func buildAnthropicRequest(req: ChatRequest, stream: Bool): String {
                 msgs.add(JsonValue.Map(msgObj))
             case cm: CompactionMessage =>
                 msgs.add(messageToAnthropic("user", "[Summary: " + cm.summary + "]"))
+            case am: ArchiveMessage =>
+                msgs.add(messageToAnthropic("user", "[Archived " + am.startIndex.toString() + "-" + am.endIndex.toString() + ": " + am.summary + "]"))
             case _ => ()
         }
     }

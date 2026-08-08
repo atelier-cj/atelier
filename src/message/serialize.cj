@@ -48,11 +48,24 @@ extend CompactionMessage <: JsonSerializable {
     }
 }
 
+extend ArchiveMessage <: JsonSerializable {
+    public func toJson(w: JsonWriter): Unit {
+        w.startObject()
+        w.writeName("role").writeValue("archive")
+        w.writeName("startIndex").writeValue(this.startIndex)
+        w.writeName("endIndex").writeValue(this.endIndex)
+        w.writeName("summary").writeValue(this.summary)
+        w.writeName("timestamp").writeValue(this.timestamp)
+        w.endObject()
+    }
+}
+
 public func readMessageFromJson(r: JsonReader): Message {
     var role = ""; var content = ""; var ts = Int64(0)
     var model = ""
     var toolCallId = ""; var toolName = ""; var isError = false
     var summary = ""; var tokensBefore = Int64(0)
+    var startIndex = Int64(0); var endIndex = Int64(0)
     try {
         r.startObject()
         while (r.peek() != EndObject) {
@@ -66,6 +79,8 @@ public func readMessageFromJson(r: JsonReader): Message {
                 case "isError" => isError = r.readValue<Bool>()
                 case "summary" => summary = r.readValue<String>()
                 case "tokensBefore" => tokensBefore = r.readValue<Int64>()
+                case "startIndex" => startIndex = r.readValue<Int64>()
+                case "endIndex" => endIndex = r.readValue<Int64>()
                 case _ => r.skip()
             }
         }
@@ -76,6 +91,7 @@ public func readMessageFromJson(r: JsonReader): Message {
         case "assistant" => AssistantMessage(ContentList.ofText(content), model, "", StopReason.EndTurn, TokenUsage(0, 0), ts)
         case "tool" => ToolResultMessage(toolCallId, toolName, ContentList.ofText(content), isError, ts)
         case "compaction" => CompactionMessage(summary, tokensBefore, ts)
+        case "archive" => ArchiveMessage(startIndex, endIndex, summary, ts)
         case _ => UserMessage(ContentList.ofText(content), ts)
     }
 }

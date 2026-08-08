@@ -199,6 +199,8 @@ func messagesToOpenAI(msgs: ArrayList<Message>): ArrayList<OpenAIMessage> {
                     tm.toolCallId, ArrayList<JsonValue>()))
             case cm: CompactionMessage =>
                 result.add(OpenAIMessage("user", "[Summary: " + cm.summary + "]", Option<String>.None, "", ArrayList<JsonValue>()))
+            case am: ArchiveMessage =>
+                result.add(OpenAIMessage("user", "[Archived " + am.startIndex.toString() + "-" + am.endIndex.toString() + ": " + am.summary + "]", Option<String>.None, "", ArrayList<JsonValue>()))
             case _ => ()
         }
     }

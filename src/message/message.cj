@@ -124,3 +124,21 @@ public class CompactionMessage <: Message {
         MessageRole.Compaction
     }
 }
+
+public class ArchiveMessage <: Message {
+    public let startIndex: Int64
+    public let endIndex: Int64
+    public let summary: String
+    public let timestamp: Int64
+
+    public init(startIndex: Int64, endIndex: Int64, summary: String, timestamp: Int64) {
+        this.startIndex = startIndex
+        this.endIndex = endIndex
+        this.summary = summary
+        this.timestamp = timestamp
+    }
+
+    public func role(): MessageRole {
+        MessageRole.Archive
+    }
+}
