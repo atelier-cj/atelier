@@ -252,6 +252,18 @@ func sysPrompt_mcpCatalogActiveMarked() {
 }
 
 @Test
+func sysPrompt_mcpCatalogMissingVersionFallback() {
+    let m = McpManager()
+    m.registerServer(McpServerConfig("github", "stdio", "echo", ""))
+    let tools = ArrayList<(String, String)>()
+    tools.add(("search_repos", "在 GitHub 上搜索仓库"))
+    m.cacheServerTools("github", tools)
+    let spb = SystemPromptBuilder()
+    let out = spb.buildMcpCatalog(m)
+    @Expect(out.contains("github (v?, 1 个工具)"), true)
+}
+
+@Test
 func sysPrompt_mcpCatalogEmptyWithoutServers() {
     let spb = SystemPromptBuilder()
     @Expect(spb.buildMcpCatalog(McpManager()), "")

@@ -62,19 +62,19 @@ public class SystemPromptBuilder {
         for (name in mcpManager.serverNames()) {
             sb.append("- ")
             sb.append(name)
-            match (mcpManager.serverVersion(name)) {
-                case Some(v) =>
-                    let count = match (mcpManager.serverToolCount(name)) {
-                        case Some(c) => c.toString()
-                        case None => "?"
-                    }
-                    sb.append(" (v")
-                    sb.append(v)
-                    sb.append(", ")
-                    sb.append(count)
-                    sb.append(" 个工具)")
-                case None => ()
+            let version = match (mcpManager.serverVersion(name)) {
+                case Some(v) => v
+                case None => "?"
             }
+            let count = match (mcpManager.serverToolCount(name)) {
+                case Some(c) => c.toString()
+                case None => "?"
+            }
+            sb.append(" (v")
+            sb.append(version)
+            sb.append(", ")
+            sb.append(count)
+            sb.append(" 个工具)")
             if (mcpManager.isActive(name, 0)) {
                 sb.append(" [已加载]")
             }
