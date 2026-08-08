@@ -29,7 +29,7 @@ main(): Int64 {
     let skillReg = SkillRegistry()
 
     let agentReg = AgentRegistry()
-    let providerReg = ProviderRegistry()
+    let providerReg = ProviderRegistry.default()
 
     let providerRegForCli = providerReg
 
@@ -61,11 +61,8 @@ main(): Int64 {
         try { agentReg.create(a.name, agentConfigFrom(a)) } catch (_) { () }
     }
     for (p in config.provider) {
-        let prov: Provider = match (p.providerType) {
-            case "ollama" => OllamaProvider(p.name, p.baseURL)
-            case "anthropic" => AnthropicProvider(p.name, p.baseURL, p.apiKey)
-            case _ => OpenAIProvider(p.name, p.baseURL, p.apiKey)
-        }
+        let cfg = toProviderConfig(p)
+        let prov = providerReg.create(cfg)
         providerReg.register(p.name, prov)
     }
     let mcpMgr = McpManager()
