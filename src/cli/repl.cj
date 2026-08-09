@@ -34,6 +34,7 @@ public class REPL {
     private var messages: ArrayList<Message>
     private var sessionCounter: Int64
     private var modelOverride: String
+    private var lastLeafId: String = ""
 
     public init(agentName: String, registry: SlashCommandRegistry,
         agentConfig: AgentConfig, provider: Provider,
@@ -65,6 +66,10 @@ public class REPL {
                     recent
                 } else { loaded }
             } catch (_) { ArrayList<Message>() }
+            this.lastLeafId = try {
+                let data = this.sessionStore.loadEntries(this.sessionId)
+                if (data.entries.size > 0) { data.entries[data.entries.size - 1].id } else { "" }
+            } catch (_) { "" }
         } else {
             this.sessionId = "sess_" + nextId()
             this.messages = ArrayList<Message>()
@@ -171,12 +176,27 @@ public class REPL {
             println("Error: " + e.message)
             return
         }
+        let oldSize = this.messages.size
         this.messages = allMsgs
-        // Persist after each turn
-        try {
-            let header = SessionHeader(1, this.sessionId, 0, 0, "", "", "", None)
-            this.sessionStore.save(this.sessionId, header, this.messages)
-        } catch (_) { () }
+        // Persist after each turn (L1 只增不改：增量追加，覆盖会丢失归档原始消息)
+        if (this.lastLeafId != "") {
+            let newMsgs = ArrayList<Message>()
+            for (i in oldSize..allMsgs.size) { newMsgs.add(allMsgs[Int64(i)]) }
+            if (newMsgs.size > 0) {
+                this.lastLeafId = try {
+                    this.sessionStore.appendBranch(this.sessionId, this.lastLeafId, newMsgs)
+                } catch (_) { this.lastLeafId }
+            }
+        } else {
+            try {
+                let header = SessionHeader(1, this.sessionId, 0, 0, "", "", "", None)
+                this.sessionStore.save(this.sessionId, header, this.messages)
+                this.lastLeafId = try {
+                    let data = this.sessionStore.loadEntries(this.sessionId)
+                    if (data.entries.size > 0) { data.entries[data.entries.size - 1].id } else { "" }
+                } catch (_) { "" }
+            } catch (_) { () }
+        }
 
         let lastText = lastAssistantText(allMsgs)
         if (lastText != "") {
@@ -200,6 +220,7 @@ public class REPL {
             }
             this.sessionCounter++
             this.sessionId = "sess_" + this.sessionCounter.toString()
+            this.lastLeafId = ""
             this.messages = ArrayList<Message>()
             println("New session: " + this.sessionId)
         } else if (cmd == "list") {
@@ -214,7 +235,8 @@ public class REPL {
             }
         } else if (cmd == "switch" && parts.size > 2) {
             let targetId = parts[2]
-            if (this.messages.size > 0) {
+            // 当前会话消息已在主循环逐轮落库；仅在从未落库成功时兜底创建（避免 save 覆盖破坏归档链）
+            if (this.messages.size > 0 && this.lastLeafId == "") {
                 try {
                     let header = SessionHeader(1, this.sessionId, 0, 0, "", "", "", None)
                     this.sessionStore.save(this.sessionId, header, this.messages)
@@ -226,6 +248,10 @@ public class REPL {
                 return
             }
             this.sessionId = targetId
+            this.lastLeafId = try {
+                let data = this.sessionStore.loadEntries(this.sessionId)
+                if (data.entries.size > 0) { data.entries[data.entries.size - 1].id } else { "" }
+            } catch (_) { "" }
             println("Switched to session: " + targetId + "  Messages: " + this.messages.size.toString())
             // Display conversation history
             for (m in this.messages) {

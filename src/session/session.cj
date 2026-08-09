@@ -121,6 +121,7 @@ public struct Entry <: JsonSerializable & JsonDeserializable<Entry> {
             case am: AssistantMessage => w.writeValue(am)
             case tm: ToolResultMessage => w.writeValue(tm)
             case cm: CompactionMessage => w.writeValue(cm)
+            case am: ArchiveMessage => w.writeValue(am)
             case _ => w.writeNullValue()
         }
         w.endObject()
