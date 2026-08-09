@@ -128,3 +128,64 @@ func compactionConfig_summaryKeepsRecent() {
     }
     @Expect(hasSummary, false)
 }
+
+func bigText(): String {
+    let sb = StringBuilder()
+    var i: Int64 = 0
+    while (i < 100) { sb.append("x"); i++ }
+    sb.toString()
+}
+
+// 回归：单条消息即超过 keepRecent 预算时，切点必须落在该消息之后（此前 i-- 过度导致 cutIndex=0 不压缩）
+@Test
+func compactWithSummary_singleBigMessageTriggersCut() {
+    let msgs = ArrayList<Message>()
+    msgs.add(UserMessage(ContentList.ofText(bigText()), 0))  // 30 tokens
+    msgs.add(UserMessage(ContentList.ofText("tail"), 0))     // 6 tokens
+    let out = compactWithSummary(msgs, 10, "摘要", 36)
+    @Expect(out.size, 2)
+    match (out[0]) {
+        case cm: CompactionMessage => @Expect(cm.summary, "摘要")
+        case _ => @Fail("expected CompactionMessage")
+    }
+    match (out[1]) {
+        case um: UserMessage => @Expect(um.content.blocks().size, 1)
+        case _ => @Fail("expected tail user message")
+    }
+}
+
+// 回归：compactMessages 同样修复（单条大消息达标时替换为摘要）
+@Test
+func compactMessages_singleBigMessageTriggersCut() {
+    let msgs = ArrayList<Message>()
+    msgs.add(UserMessage(ContentList.ofText(bigText()), 0))  // 30 tokens
+    msgs.add(UserMessage(ContentList.ofText("tail"), 0))     // 6 tokens
+    // total=36 > reserve=5，threshold=30-5=25 < 36 → 触发压缩
+    let out = compactMessages(msgs, 30, 5, 10)
+    @Expect(out.size, 2)
+    match (out[0]) {
+        case cm: CompactionMessage => @Expect(cm.tokensBefore, 30)
+        case _ => @Fail("expected CompactionMessage")
+    }
+}
+
+// 多消息：累加到从尾数第 2 条时达标，切点在该条之后（尾部保留）
+@Test
+func compactWithSummary_multiMessageReach() {
+    let msgs = ArrayList<Message>()
+    for (i in 0..6) { msgs.add(UserMessage(ContentList.ofText("m"), 0)) }  // 每条 5 tokens
+    let out = compactWithSummary(msgs, 8, "摘要", 30)
+    @Expect(out.size, 2)
+    match (out[0]) {
+        case cm: CompactionMessage => @Expect(cm.summary, "摘要")
+        case _ => @Fail("expected CompactionMessage")
+    }
+    match (out[1]) {
+        case um: UserMessage =>
+            match (um.content.blocks()[0]) {
+                case ContentBlock.TextBlock(t) => @Expect(t, "m")
+                case _ => @Fail("expected text block")
+            }
+        case _ => @Fail("expected tail user message")
+    }
+}

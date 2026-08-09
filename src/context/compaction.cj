@@ -25,11 +25,12 @@ public func compactMessages(messages: ArrayList<Message>, contextWindow: Int64, 
     var i = messages.size - 1
     while (i >= 0 && running < keepRecentTokens) {
         running += estimateMessageTokens(messages[i])
+        if (running >= keepRecentTokens) { break }
         i--
     }
     cutIndex = i + 1
 
-    if (cutIndex <= 0) {
+    if (i < 0) {
         return messages  // all messages fit
     }
 
@@ -208,7 +209,7 @@ public func validateSummary(config: CompactionConfig, schema: HashMap<String, Js
 }
 
 // 切点替换：保留最近 keepRecentTokens，之前替换为 CompactionMessage(summary, tokensBefore, 0)
-// keepRecentTokens <= 0 时全部替换
+// keepRecentTokens <= 0 时全部替换；单条消息即达标时仅保留其后消息
 public func compactWithSummary(messages: ArrayList<Message>, keepRecentTokens: Int64,
     summary: String, tokensBefore: Int64): ArrayList<Message> {
     if (keepRecentTokens <= 0) {
@@ -221,10 +222,11 @@ public func compactWithSummary(messages: ArrayList<Message>, keepRecentTokens: I
     var i = messages.size - 1
     while (i >= 0 && running < keepRecentTokens) {
         running += estimateMessageTokens(messages[i])
+        if (running >= keepRecentTokens) { break }
         i--
     }
     cutIndex = i + 1
-    if (cutIndex <= 0) { return messages }
+    if (i < 0) { return messages }
     let compacted = ArrayList<Message>()
     compacted.add(CompactionMessage(summary, tokensBefore, 0))
     for (j in cutIndex..Int64(messages.size)) {

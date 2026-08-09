@@ -3,8 +3,8 @@ package atelier.message
 import std.collection.*
 
 public struct TokenUsage {
-    let inputTokens: Int64
-    let outputTokens: Int64
+    public let inputTokens: Int64
+    public let outputTokens: Int64
 
     public init(inputTokens: Int64, outputTokens: Int64) {
         this.inputTokens = inputTokens
