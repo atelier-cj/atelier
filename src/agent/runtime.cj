@@ -9,6 +9,11 @@ import atelier.trust.*
 import atelier.context.compactMessages
 import atelier.context.ContextBuilder
 import atelier.context.ModelContextRegistry
+import atelier.context.renderCompactionPrompt
+import atelier.context.validateSummary
+import atelier.context.compactWithSummary
+import atelier.context.CompactionConfig
+import atelier.context.estimateTokens
 import atelier.event.EventStream
 import std.io.InputStream
 import jsonvalue.*
@@ -304,12 +309,55 @@ public class AgentRuntime {
                                 finished = true
                                 break
                             }
-                            if (this.config.compactionEnabled) {
+                            if (this.config.compactionEnabled || match (this.config.compaction) {
+                                case Some(c) => c.enabled
+                                case None => false }) {
                                 let contextWindow = this.modelRegistry.get(actualModel)
-                                currentMessages = compactMessages(currentMessages,
-                                    contextWindow,
-                                    Int64(this.config.compactionReserveTokens),
-                                    Int64(this.config.keepRecentTokens))
+                                let cc = match (this.config.compaction) {
+                                    case Some(c) => c
+                                    case None => CompactionConfig()
+                                }
+                                let reserve = match (this.config.compaction) {
+                                    case Some(c) => c.reserveTokens
+                                    case None => Int64(this.config.compactionReserveTokens)
+                                }
+                                let keepRecent = match (this.config.compaction) {
+                                    case Some(c) => c.keepRecentTokens
+                                    case None => Int64(this.config.keepRecentTokens)
+                                }
+                                // 用量优先：Provider 报告的实际用量 > 0 时优先，本地估算兜底
+                                let total = if (assistantMsg.usage.inputTokens > 0) { assistantMsg.usage.inputTokens }
+                                    else { estimateTokens(currentMessages) }
+                                if (total > reserve && contextWindow != 0 && total > contextWindow - reserve) {
+                                    // 独立子调用（请求体无 system/tools，缓存 Key 独立，不污染主对话）
+                                    let summary = try {
+                                        let conversation = summarizeText(currentMessages, reserve)
+                                        let prompt = renderCompactionPrompt(cc, conversation, None, reserve)
+                                        let summaryModel = match (cc.summaryModel) {
+                                            case Some(m) => m
+                                            case None => actualModel
+                                        }
+                                        let req = ChatRequest(summaryModel,
+                                            ArrayList<Message>([UserMessage(ContentList.ofText(prompt), 0)]),
+                                            Float64(0.2), reserve, None, ArrayList<OpenAITool>())
+                                        let resp = this.provider.chat(req)
+                                        let raw = plainTextOf(resp.message)
+                                        match (cc.outputSchema) {
+                                            case Some(JsonValue.Map(schema)) =>
+                                                if (!validateSummary(cc, schema, raw)) {
+                                                    throw Exception("summary failed schema validation")
+                                                }
+                                            case _ => ()
+                                        }
+                                        raw
+                                    } catch (e: Exception) {
+                                        log.warn("compaction summary failed: ${e.message}, fallback to placeholder", Array<Attr>())
+                                        "... ${total} previous tokens summarized ..."
+                                    }
+                                    currentMessages = compactWithSummary(currentMessages, keepRecent, summary, total)
+                                } else {
+                                    currentMessages = compactMessages(currentMessages, contextWindow, reserve, keepRecent)
+                                }
                             }
                             stream.emit(TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
                             finished = true
@@ -489,4 +537,54 @@ public class AgentRuntime {
         }
         update
     }
+}
+
+// 待压缩对话文本（截取到约 reserve*4 字节上限，避免子调用超长）
+func summarizeText(msgs: ArrayList<Message>, limit: Int64): String {
+    let sb = StringBuilder()
+    var used: Int64 = 0
+    for (m in msgs) {
+        let t = match (m) {
+            case um: UserMessage => plainTextOf(um)
+            case am: AssistantMessage => plainTextOf(am)
+            case tm: ToolResultMessage => "[tool " + tm.toolName + "]: " + plainTextOf(tm)
+            case cm: CompactionMessage => "[summary] " + cm.summary
+            case am2: ArchiveMessage => "[archived " + am2.startIndex.toString() + "-" + am2.endIndex.toString() + "]: " + am2.summary
+            case _ => ""
+        }
+        if (t == "") { continue }
+        if (used + Int64(t.size) > limit * 4) {
+            // 超限：截取该消息前缀到剩余额度，避免摘要子调用拿到空对话
+            let remaining = limit * 4 - used
+            if (remaining > 0) {
+                let cut = if (Int64(t.size) < remaining) { Int64(t.size) } else { remaining }
+                sb.append(t[0..cut])
+                sb.append("\n")
+            }
+            break
+        }
+        sb.append(t)
+        sb.append("\n")
+        used += Int64(t.size)
+    }
+    sb.toString()
+}
+
+// 提取消息文本（ContentList 的 TextBlock 拼接）
+func plainTextOf(m: Message): String {
+    let cl = match (m) {
+        case um: UserMessage => um.content
+        case am: AssistantMessage => am.content
+        case tm: ToolResultMessage => tm.content
+        case cm: CompactionMessage => ContentList.ofText(cm.summary)
+        case _ => ContentList.ofText("")
+    }
+    let sb = StringBuilder()
+    for (b in cl.blocks()) {
+        match (b) {
+            case ContentBlock.TextBlock(t) => sb.append(t)
+            case _ => ()
+        }
+    }
+    sb.toString()
 }

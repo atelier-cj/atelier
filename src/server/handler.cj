@@ -501,7 +501,7 @@ func configFromDTO(dto: AgentConfigDTO): AgentConfig {
     AgentConfig(dto.name, dto.description, dto.systemPrompt, None,
         dto.model, dto.provider, dto.tools, dto.skills, dto.mcpCooldownTurns,
         UInt32(dto.maxTurns), Float32(dto.temperature), UInt32(4096), None,
-        true, UInt32(16384), UInt32(20000), UInt32(50), UInt32(30), UInt32(0),
+        true, UInt32(16384), UInt32(20000), None, UInt32(50), UInt32(30), UInt32(0),
         ArrayList(), None, 0, 0)
 }
 

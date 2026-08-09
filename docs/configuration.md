@@ -65,6 +65,29 @@ command = "npx @playwright/mcp"
 - 系统提示中的 `[可用 MCP 服务]` 目录段展示全部服务（名称/版本/工具清单），激活服务标注 `[已加载]`
 - 服务名不能包含下划线（工具名 `mcp_<server>_<tool>` 前缀解析依赖）
 
+### 压缩增强（可选）
+
+不配置 `[agent.compaction]` 时使用平铺字段（`compactionEnabled`/`compactionReserveTokens`/`keepRecentTokens`），配置后嵌套优先：
+
+```toml
+[[agent]]
+name = "assistant"
+# ... 其他字段 ...
+compactionEnabled = true          # 平铺配置（可选，兼容旧配置）
+
+# [agent.compaction]              # 嵌套配置（可选，优先于平铺字段）
+# enabled = true
+# reserveTokens = 16384
+# keepRecentTokens = 20000
+# summaryModel = "deepseek-chat"   # 摘要模型，缺省复用主模型
+# promptTemplate = "压缩以下对话：\n{{conversation}}"
+# outputSchema = { required = ["goal"], types = { goal = "string" } }
+```
+
+- 压缩摘要通过**独立子调用**生成（无 system/tools，不影响主对话缓存命中）
+- `promptTemplate` 支持 mustache 变量：`{{conversation}}` / `{{previous_summary}}` / `{{max_tokens}}` / `{{#previous_summary}}` 条件块
+- `outputSchema` 极简校验（required 必填 + types 类型断言），校验失败自动降级为占位摘要
+
 ### 会话环境
 
 `~/.atelier.toml` 中可设置默认会话环境：

@@ -353,7 +353,7 @@ public func agentConfigFrom(a: TomlAgent): AgentConfig {
         if (a.provider == "") { None } else { Some(a.provider) },
         a.tools, a.skills, a.mcpCooldownTurns,
         UInt32(20), Float32(0.7), UInt32(4096), None,
-        true, UInt32(16384), UInt32(20000), UInt32(50), UInt32(30), UInt32(0),
+        true, UInt32(16384), UInt32(20000), None, UInt32(50), UInt32(30), UInt32(0),
         ArrayList<String>(), None, 0, 0)
 }
 

@@ -279,25 +279,24 @@ workDir = /home/ystyle/Projects/atelier
 | 规则引擎 | 代码 | ❌ 无法判断语义 | 低 |
 | AI 自主归档 | LLM | ✅ 理解上下文语义 | 低（只加一个工具） |
 
-### 4.3 🚧 演进：可配置压缩模板（独立子调用）
+### 4.3 ✅ P4 已实现：可配置压缩模板（独立子调用）
 
 **动机**：不同业务场景对摘要粒度需求不同（法律文书要 `cited_laws`，代码场景要 `files_modified`/报错栈）。压缩发生在**独立的 LLM 子调用**中——请求体与主对话完全不同（无 system/tools，仅一条 user 消息），缓存 Key 独立，**修改压缩模板不影响主对话的 DeepSeek 缓存命中率**。
 
-**配置结构**（🚧 新建 `context/compaction.cj` 的 `CompactionConfig`，伪代码示意）：
+**配置结构**（✅ `context/compaction.cj` 的 `CompactionConfig`，实现 JsonSerializable & JsonDeserializable）：
 
 ```cangjie
-// context/compaction.cj（演进方向）
 public struct CompactionConfig {
     public let enabled: Bool = true                 // 与现有 compactionEnabled 语义一致
-    public let reserveTokens: UInt32 = 16384        // 与现有 compactionReserveTokens 语义一致
-    public let keepRecentTokens: UInt32 = 20000     // 与现有 keepRecentTokens 语义一致
+    public let reserveTokens: Int64 = 16384         // 与现有 compactionReserveTokens 语义一致
+    public let keepRecentTokens: Int64 = 20000      // 与现有 keepRecentTokens 语义一致
     public let promptTemplate: String = DEFAULT_PROMPT_TEMPLATE  // 压缩提示词模板
     public let outputSchema: Option<JsonValue> = None            // 极简输出约束（见下）
     public let summaryModel: Option<String> = None               // 摘要模型，None = 复用主模型
 }
 ```
 
-**模板变量与条件块**（✅ 使用现成模板引擎 `mustache-cj`，不自研）：
+**模板变量与条件块**（✅ mustache-cj v1.2.1 中心仓版）：
 
 | 语法 | 说明 |
 |------|------|
@@ -306,35 +305,37 @@ public struct CompactionConfig {
 | `{{max_tokens}}` | 摘要输出上限（= reserveTokens） |
 | `{{#previous_summary}}...{{/previous_summary}}` | 条件块（section）：变量存在且非空才渲染，否则整块忽略 |
 
-- **引擎**：`mustache-cj`（中心仓 `mustache`，v1.0.3，cjc 适配版本实施时验证）。标准 mustache 语法，支持 Dotted Names / Sections（list、if、inverted）/ Comments
-- **条件语义**：`truth()` 判定 None / 空串 / 空列表 / false → 不渲染（mustache.cj:249），正是 `{{#previous_summary}}` 所需
-- **上下文注入**：自定义 `CompactionContext` 结构实现 `MustacheComponent` 接口（README 推荐方式），`mustache()` 返回 `DataModelStruct {conversation, previous_summary?, max_tokens}`，经 `Template.parse(template)` + `render(context)` 渲染
-- **容错**：变量缺失时引擎静默忽略（silentMiss），无需自研容错与替换顺序处理
+- **引擎**：mustache 1.2.1（cjpm.toml 依赖，仓颉 1.1.x 兼容已验证）。`truth()` 判定 None / 空串 / 空列表 → 不渲染
+- **上下文注入**：`CompactionContext <: MustacheComponent`，`mustache()` 返回 `DataModelStruct {conversation, previous_summary?, max_tokens}`（previous_summary 仅 Some 时加字段），`Template.parse` + `render` 渲染
+- **容错**：变量缺失时引擎静默忽略（silentMiss）
 
-**outputSchema：极简校验，不引完整 JSON Schema**（jsonvalue 无 schema 校验能力，自研完整标准是大工程，YAGNI）：
+**outputSchema：极简校验，不引完整 JSON Schema**（✅ `validateSummary`）：
 
 - 配置格式：`{required: ["goal", "key_findings"], types: {"goal": "string", "key_findings": "array"}}`
-- 校验逻辑：解析为 `JsonValue` → 必填键存在 + 类型断言（复用 `cast<T>()` 风格）
-- 校验失败：记录日志、**降级使用原始文本摘要**（不中断主循环）
+- 校验逻辑：解析为 `JsonValue` → 必填键存在 + 类型断言（string/array/number/bool/object 五类）
+- 校验失败/解析失败：记录日志、**降级为占位摘要文本**（不中断主循环）
+- ⚠️ stdx 1.1.0 的 `readValue<Option<JsonValue>>` 有 bug（对象后接成员报 "Commas are required"）——outputSchema 反序列化用手写 `peek()==JsonNull` + `JsonValue.fromJson` 绕过（cangjie-mem 433）
 
-**独立子调用**（复用现有 `Provider.chat(req)` 非流式接口，请求体无 system、无 tools）：
+**独立子调用**（✅ 复用 `Provider.chat(req)` 非流式接口，请求体无 system、无 tools）：
 
 ```
 调用链：
-runtime afterTurn 压缩触发（runtime.cj:322 现调用点）
-  → 判定：Provider 用量（usage.promptTokens）优先，本地估算兜底
-  → 渲染 promptTemplate（conversation = 待压缩消息文本）
+runtime afterTurn 压缩触发（runtime.cj 压缩调用点）
+  → 判定：Provider 实际用量（assistantMsg.usage.inputTokens > 0）优先，本地估算兜底
+  → 触发条件：total > reserve && contextWindow != 0 && total > contextWindow - reserve
+  → summarizeText（对话文本，截取到 reserve*4 字节；单条超限截取前缀）
+  → renderCompactionPrompt（模板渲染）
   → provider.chat(ChatRequest(summaryModel ?? 主模型, [UserMessage(prompt)],
       temperature: 0.2, maxTokens: reserveTokens, tools: []))
-  → 取 ChatResponse.message.content → 生成 CompactionMessage(summary, tokensBefore, 0)
-  → outputSchema 校验失败则降级原文
+  → plainTextOf 取摘要 → outputSchema 校验（失败降级占位）→ compactWithSummary 切点替换
+  → 子调用异常 → 占位摘要降级
 ```
 
-**与 AgentConfig 的兼容策略**（防序列化大改）：
+**与 AgentConfig 的兼容策略**（✅ 防序列化大改）：
 
 - `AgentConfig` 现有三个平铺字段（`compactionEnabled`/`compactionReserveTokens`/`keepRecentTokens`）**保留**，旧配置零影响
-- 🚧 新增可选字段 `compaction: Option<CompactionConfig> = None`；`fromJson` 兼容两种来源：读到 `compaction` 对象用嵌套配置，否则回退平铺字段
-- `None` 且未配置模板 = 现有行为（本地估算 + 占位文本），渐进式启用
+- ✅ 新增可选字段 `compaction: Option<CompactionConfig> = None`；`fromJson` 兼容两种来源：读到 `compaction` 对象用嵌套配置，否则回退平铺字段
+- `None` 且未配置模板 = 现有行为（本地估算 + 占位文本），渐进式启用——✅ 已实现（配置合并逻辑：嵌套优先、平铺兜底；不配置时与 P4 前行为等价）
 
 ---
 
@@ -502,7 +503,7 @@ public struct Skill {
 | `session/file_store.cj` | ✅ | bstorm 持久化（默认后端） | `StormSessionStore` |
 | `session/memory_store.cj` | ✅ | 内存实现 | `MemoryStore` |
 | `agent/runtime.cj` | ✅ | 推理循环 + 工具解析（L2 委托 ContextBuilder） | `chatWithEnv / resolveTools` |
-| `context/compaction.cj` | ✅ | 上下文压缩（🚧 + `CompactionConfig` 可配置模板） | `compactMessages` |
+| `context/compaction.cj` | ✅ | 上下文压缩 + 可配置模板（✅ P4） | `compactMessages / compactWithSummary / renderCompactionPrompt / validateSummary / CompactionConfig` |
 | `context/tokens.cj` | ✅ | Token 本地估算 | `estimateTokens` |
 | `context/model_registry.cj` | ✅ | 模型上下文窗口查表 | `ModelContextRegistry.get` |
 | `tool/mcp_manager.cj` | ✅ | MCP 启动连接 + 协议/工具目录缓存 + 激活状态机（Mutex） | `addServer / registerServer / loadToolset / isActiveTool / markUsedTool` |
@@ -611,19 +612,20 @@ P1 / P2 / P3 **互不依赖，可并行**；P4 依赖 P3，排在最后。每个
 
 **验收**：单元测试覆盖——序列化往返（新消息类型 + 旧文件兼容）、范围校验边界（负值/越界/倒序）、解析后消息替换正确、多条归档叠加、store 追加语义（原消息仍在 L1）。
 
-### 10.6 P4：压缩增强（依赖 P3）
+### 10.6 P4：压缩增强（依赖 P3）✅ 已完成（2026-08-09）
 
 **目标**：压缩判定更准、摘要更有用、摘要格式可配置。设计细节见 4.3。
 
-**任务**：
+**任务**（实施记录）：
 
-1. Provider 用量优先：`ChatResponse.message.usage.promptTokens`（openai.cj:67 已解析）优先于本地估算触发判定（`compactMessages` 增加入参或改造判定入口）
-2. `CompactionConfig` 结构 + `AgentConfig.compaction: Option<CompactionConfig>` 可选字段（平铺三字段保留，fromJson 双来源兼容）
-3. 模板渲染：接入 `mustache-cj`（cjpm.toml 加依赖）——`CompactionContext` 结构实现 `MustacheComponent` + `Template.parse/render`，`{{#previous_summary}}` 条件块语义由引擎 `truth()` 保证，补单元测试
-4. 独立子调用：压缩触发时 `provider.chat(ChatRequest(summaryModel ?? 主模型, [UserMessage(prompt)], 0.2, reserveTokens, []))`，结果生成 `CompactionMessage`；子调用失败/超时回退占位文本
-5. 极简 outputSchema 校验：`{required, types}` 解析 + `cast<T>()` 风格断言；失败降级原文摘要
+1. Provider 用量优先：`assistantMsg.usage.inputTokens > 0` 优先，本地估算兜底（✅）
+2. `CompactionConfig` 结构（✅ 实现 JsonSerializable & JsonDeserializable）+ `AgentConfig.compaction: Option<CompactionConfig>`（✅ 平铺保留，fromJson 双来源兼容；stdx readValue<Option<JsonValue>> bug 手写绕过）
+3. 模板渲染（✅ mustache 1.2.1）：`CompactionContext <: MustacheComponent` + `Template.parse/render`，`{{#previous_summary}}` 由 truth() 保证
+4. 独立子调用（✅）：`provider.chat(ChatRequest(summaryModel ?? 主模型, [UserMessage(prompt)], 0.2, reserveTokens, None, []))`；异常/schema 校验失败 → 占位降级
+5. 极简 outputSchema 校验（✅ `validateSummary`：{required, types} 五类型断言）
+6. 附带修复：`compactMessages`/`compactWithSummary` **切点 bug**（单条消息超预算时 i 越界到 -1、cutIndex=0 误判不压缩）——达标 break + i<0 判断；`TokenUsage` 字段补 public
 
-**验收**：单元测试覆盖——有 usage 时按实际值判定、无 usage 时回退本地估算；模板变量插值正确、条件块有无 previous_summary 两种渲染；schema 校验通过/必填缺失/类型不符三类降级；子调用失败回退占位文本（不中断运行）；旧配置（无 compaction 字段）加载后行为不变。
+**验收**（全部通过）：有 usage 按实际值判定、无 usage 回退本地估算；模板变量/条件块渲染；schema 通过/类型不符/缺必填/解析失败四类；子调用异常降级；旧配置（无 compaction 字段）加载后行为不变；5 个 runtime 集成测试（嵌套优先/两条降级路径/用量优先/不触发等价）+ 3 个切点回归；全量 226 PASSED + 6 SKIPPED。
 
 ### 10.7 执行约定
 
