@@ -272,7 +272,7 @@ workDir = /home/ystyle/Projects/atelier
 - ✅ `ContextBuilder.applyArchives(messages)`：扫描 `archive_history` 调用对（ToolCall + ToolResult），**范围钳制**（start ≥ 0；上限钳到调用对前一条，归档不能越过调用对自身）→ 替换为 ArchiveMessage → 调用对自身移除（天然幂等）；无调用对返回原列表；多调用对从后往前处理
 - ✅ runtime 每轮构建 ChatRequest 前应用（`TurnStartEvent` 后）
 - ✅ 三 Provider 消息转换：ArchiveMessage → `[Archived <start>-<end>: <summary>]`（user 消息）
-- **持久化策略**：归档在 run 内应用（内存替换），run 结束 REPL save 时 ArchiveMessage 随消息序列化入库（store 保留归档痕迹：范围 + 摘要）；**严格 L1 只增不改**（appendBranch 追加归档 Entry、原始消息不删）需 runtime 会话链路（sessionId/parentLeafId），当前 runtime 无会话对象——🚧 后续演进
+- **持久化策略**：✅ 严格 L1 只增不改——runtime 会话链路（`chatWithSessionId` 真实 sessionId，默认 ulid 生成）；REPL 持久化改**追加模型**（`persistCurrentSession`：每次从 store 末 entry 取 parentLeafId 后 appendBranch 增量落库，首轮 save 创建；`/session new`/`switch` 统一防覆盖）；归档消息作为 run 结果随增量落库（原始消息永久保留）；`extractNewMessages` 内容比较定位新消息（压缩轮安全）；加载时 `applyArchiveMarks` 跳过历史归档范围（在 applyArchives 之前执行）
 
 | 方案 | 判断主体 | 准确度 | 实现复杂度 |
 |------|----------|--------|------------|
@@ -608,7 +608,7 @@ P1 / P2 / P3 **互不依赖，可并行**；P4 依赖 P3，排在最后。每个
 2. 新建 `tool/archive_history.cj`：校验（start ≥ 0 / end ≥ start / summary 非空）→ 返回归档确认；**不碰 store**（run 内应用）
 3. `ContextBuilder.applyArchives`：调用对扫描 → 范围钳制（上限 = 调用对前一条）→ 替换为 ArchiveMessage → 调用对移除（幂等）；runtime 每轮应用
 4. 三 Provider 消息转换加 ArchiveMessage case（`[Archived <start>-<end>: <summary>]`）
-5. 🚧 后续演进：严格 L1 追加（appendBranch）需 runtime 会话链路（sessionId/parentLeafId）
+5. ✅ 严格 L1 追加：runtime 会话链路（chatWithSessionId + ulid）+ REPL 追加模型（persistCurrentSession）+ applyArchiveMarks 历史范围解析
 
 **验收**：单元测试覆盖——序列化往返（新消息类型 + 旧文件兼容）、范围校验边界（负值/越界/倒序）、解析后消息替换正确、多条归档叠加、store 追加语义（原消息仍在 L1）。
 
