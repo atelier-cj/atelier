@@ -272,7 +272,7 @@ workDir = /home/ystyle/Projects/atelier
 - ✅ `ContextBuilder.applyArchives(messages)`：扫描 `archive_history` 调用对（ToolCall + ToolResult），**范围钳制**（start ≥ 0；上限钳到调用对前一条，归档不能越过调用对自身）→ 替换为 ArchiveMessage → 调用对自身移除（天然幂等）；无调用对返回原列表；多调用对从后往前处理
 - ✅ runtime 每轮构建 ChatRequest 前应用（`TurnStartEvent` 后）
 - ✅ 三 Provider 消息转换：ArchiveMessage → `[Archived <start>-<end>: <summary>]`（user 消息）
-- **持久化策略**：✅ 严格 L1 只增不改——runtime 会话链路（`chatWithSessionId` 真实 sessionId，默认 ulid 生成）；REPL 持久化改**追加模型**（`persistCurrentSession`：每次从 store 末 entry 取 parentLeafId 后 appendBranch 增量落库，首轮 save 创建；`/session new`/`switch` 统一防覆盖）；归档消息作为 run 结果随增量落库（原始消息永久保留）；`extractNewMessages` 内容比较定位新消息（压缩轮安全）；加载时 `applyArchiveMarks` 跳过历史归档范围（在 applyArchives 之前执行）
+- **持久化策略**：✅ 严格 L1 只增不改——runtime 会话链路（`chatWithSessionId` 真实 sessionId，默认 ulid 生成）；REPL 持久化改**追加模型**（`persistCurrentSession`：每次从 store 末 entry 取 parentLeafId 后 appendBranch 增量落库，首轮 save 创建；`/session new`/`switch` 统一防覆盖）；归档消息作为 run 结果随增量落库（原始消息永久保留）；`extractNewMessages` 内容比较定位新消息（定位失败差集降级，防丢轮）；`initMessages` 幂等（history 首条已是系统提示不重复注入，防 REPL 每轮累积）；加载时 `applyArchiveMarks` 跳过历史归档范围（空结果回退防上下文清空；`truncateRecent` 截断保留归档标记）；HTTP 模式 `ChatRequestDTO`/`ChatCompletionRequest` 可选 sessionId 透传
 
 | 方案 | 判断主体 | 准确度 | 实现复杂度 |
 |------|----------|--------|------------|
