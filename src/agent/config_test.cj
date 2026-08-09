@@ -2,6 +2,8 @@ package atelier.agent
 
 import std.collection.*
 import jsonvalue.*
+import atelier.util.{toJsonString, fromJsonString}
+import atelier.context.CompactionConfig
 
 @Test
 func config_createWithAllFields() {
@@ -16,7 +18,7 @@ func config_createWithAllFields() {
         "gpt-4o", Some("openai"),
         tools, skills, Int64(0),
         UInt32(10), Float32(0.3), UInt32(8192), Some("low"),
-        true, UInt32(20000), UInt32(30000), UInt32(30), UInt32(30), UInt32(0),
+        true, UInt32(20000), UInt32(30000), None, UInt32(30), UInt32(30), UInt32(0),
         tags, Some("admin"), Int64(1000), Int64(2000))
 
     @Expect(cfg.name, "data-assistant")
@@ -44,7 +46,7 @@ func config_withOptionalsNone() {
         "claude-3-haiku", None,
         ArrayList(), ArrayList(), Int64(0),
         UInt32(5), Float32(1.0), UInt32(2048), None,
-        false, UInt32(8192), UInt32(10000), UInt32(50), UInt32(30), UInt32(0),
+        false, UInt32(8192), UInt32(10000), None, UInt32(50), UInt32(30), UInt32(0),
         ArrayList(), None, Int64(0), Int64(0))
 
     @Expect(cfg.name, "minimal"); @Expect(cfg.description, None)
@@ -93,7 +95,7 @@ func config_jsonRoundTrip_allFields() {
         "gpt-4o-mini", Some("openai"),
         tools, skills, Int64(7),
         UInt32(15), Float32(0.5), UInt32(2048), Some("medium"),
-        true, UInt32(16384), UInt32(25000), UInt32(50), UInt32(30), UInt32(0),
+        true, UInt32(16384), UInt32(25000), None, UInt32(50), UInt32(30), UInt32(0),
         tags, Some("tester"), Int64(100), Int64(200))
 
     let v = JsonValue.fromObject(original)
@@ -145,7 +147,7 @@ func config_jsonRoundTrip_withOptionals() {
         "deepseek-chat", None,
         ArrayList(), ArrayList(), Int64(0),
         UInt32(5), Float32(1.0), UInt32(1024), None,
-        false, UInt32(4096), UInt32(8000), UInt32(50), UInt32(30), UInt32(0),
+        false, UInt32(4096), UInt32(8000), None, UInt32(50), UInt32(30), UInt32(0),
         ArrayList(), None, Int64(0), Int64(0))
 
     let v = JsonValue.fromObject(original)
@@ -179,7 +181,7 @@ func config_mcpCooldownRoundTrip() {
     let cfg = AgentConfig("a", None, "", None, "", None,
         ArrayList(), ArrayList(), Int64(5),
         UInt32(20), Float32(0.7), UInt32(4096), None,
-        true, UInt32(16384), UInt32(20000), UInt32(50), UInt32(30), UInt32(0),
+        true, UInt32(16384), UInt32(20000), None, UInt32(50), UInt32(30), UInt32(0),
         ArrayList(), None, Int64(0), Int64(0))
     let v = JsonValue.fromObject(cfg)
     let back = JsonValue.toObject<AgentConfig>(v)
@@ -196,4 +198,49 @@ func config_mcpCooldownFromJsonMissingFieldDefaultsZero() {
     obj.remove("mcpCooldownTurns")
     let back = JsonValue.toObject<AgentConfig>(JsonValue.Map(obj))
     @Expect(back.mcpCooldownTurns, Int64(0))
+}
+
+@Test
+func config_compactionDefaultNone() {
+    let cfg = AgentConfig.default()
+    match (cfg.compaction) {
+        case None => ()
+        case Some(_) => @Fail("expected compaction to be None")
+    }
+}
+
+@Test
+func config_compactionRoundTrip() {
+    let opts = HashMap<String, JsonValue>()
+    let required = ArrayList<JsonValue>()
+    required.add(JsonValue.String("goal"))
+    opts["required"] = JsonValue.Array(required)
+    let cc = CompactionConfig(false, 8192, 5000, "自定义模板", Some(JsonValue.Map(opts)), Some("summary-model"))
+    let cfg = AgentConfig("comp-test", None, "", None, "m", None,
+        ArrayList(), ArrayList(), Int64(0),
+        UInt32(20), Float32(0.7), UInt32(4096), None,
+        true, UInt32(16384), UInt32(20000), Some(cc), UInt32(50), UInt32(30), UInt32(0),
+        ArrayList(), None, Int64(0), Int64(0))
+    let json = toJsonString(cfg)
+    let back = fromJsonString<AgentConfig>(json)
+    match (back.compaction) {
+        case Some(c) =>
+            @Expect(c.enabled, false)
+            @Expect(c.reserveTokens, 8192)
+            @Expect(c.keepRecentTokens, 5000)
+            @Expect(c.promptTemplate, "自定义模板")
+            @Expect(c.summaryModel, Some("summary-model"))
+        case None => @Fail("expected compaction config")
+    }
+}
+
+@Test
+func config_compactionMissingFieldDefaultsNone() {
+    let json = "{\"name\":\"x\",\"systemPrompt\":\"\",\"model\":\"m\",\"maxTurns\":20,\"temperature\":0.7,\"maxOutputTokens\":4096,\"compactionEnabled\":true,\"compactionReserveTokens\":16384,\"keepRecentTokens\":20000,\"maxToolCalls\":50,\"toolTimeout\":30,\"minToolInterval\":0,\"createdAt\":0,\"updatedAt\":0,\"tools\":[],\"skills\":[],\"tags\":[]}"
+    let back = fromJsonString<AgentConfig>(json)
+    match (back.compaction) {
+        case None => ()
+        case Some(_) => @Fail("expected compaction to be None")
+    }
+    @Expect(back.compactionEnabled, true)
 }

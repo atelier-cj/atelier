@@ -94,6 +94,7 @@ public class REPL {
             this.agentConfig.compactionEnabled,
             this.agentConfig.compactionReserveTokens,
             this.agentConfig.keepRecentTokens,
+            None,
             this.agentConfig.maxToolCalls,
             this.agentConfig.toolTimeout,
             this.agentConfig.minToolInterval,

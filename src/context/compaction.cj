@@ -4,6 +4,7 @@ import atelier.message.*
 import std.collection.*
 import mustache.{Template, MustacheComponent}
 import stdx.serialization.serialization.*
+import stdx.encoding.json.stream.*
 import jsonvalue.*
 
 public func compactMessages(messages: ArrayList<Message>, contextWindow: Int64, reserveTokens: Int64, keepRecentTokens: Int64): ArrayList<Message> {
@@ -67,7 +68,7 @@ public let DEFAULT_PROMPT_TEMPLATE = """
 3. 不要添加任何额外的解释或散文。
 4. 摘要的总长度请控制在 {{max_tokens}} tokens 以内。"""
 
-public struct CompactionConfig {
+public struct CompactionConfig <: JsonSerializable & JsonDeserializable<CompactionConfig> {
     public let enabled: Bool
     public let reserveTokens: Int64
     public let keepRecentTokens: Int64
@@ -92,6 +93,46 @@ public struct CompactionConfig {
         this.promptTemplate = promptTemplate
         this.outputSchema = outputSchema
         this.summaryModel = summaryModel
+    }
+
+    public func toJson(w: JsonWriter): Unit {
+        w.startObject()
+        w.writeName("enabled").writeValue(this.enabled)
+        w.writeName("reserveTokens").writeValue(this.reserveTokens)
+        w.writeName("keepRecentTokens").writeValue(this.keepRecentTokens)
+        w.writeName("promptTemplate").writeValue(this.promptTemplate)
+        w.writeName("outputSchema").writeValue(this.outputSchema)
+        w.writeName("summaryModel").writeValue(this.summaryModel)
+        w.endObject()
+    }
+
+    public static func fromJson(r: JsonReader): CompactionConfig {
+        var enabled = true
+        var reserve = Int64(16384)
+        var keepRecent = Int64(20000)
+        var template = DEFAULT_PROMPT_TEMPLATE
+        var schema: Option<JsonValue> = None
+        var summaryModel: Option<String> = None
+        r.startObject()
+        while (r.peek() != EndObject) {
+            match (r.readName()) {
+                case "enabled" => enabled = r.readValue<Bool>()
+                case "reserveTokens" => reserve = r.readValue<Int64>()
+                case "keepRecentTokens" => keepRecent = r.readValue<Int64>()
+                case "promptTemplate" => template = r.readValue<String>()
+                case "outputSchema" =>
+                    if (r.peek() == JsonNull) {
+                        r.skip()
+                        schema = None
+                    } else {
+                        schema = Some(JsonValue.fromJson(r))
+                    }
+                case "summaryModel" => summaryModel = r.readValue<Option<String>>()
+                case _ => r.skip()
+            }
+        }
+        r.endObject()
+        CompactionConfig(enabled, reserve, keepRecent, template, schema, summaryModel)
     }
 }
 

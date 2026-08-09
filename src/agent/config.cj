@@ -2,6 +2,7 @@ package atelier.agent
 
 import std.collection.*
 import stdx.encoding.json.stream.*
+import atelier.context.CompactionConfig
 
 public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> {
     public let name: String
@@ -20,6 +21,7 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
     public let compactionEnabled: Bool
     public let compactionReserveTokens: UInt32
     public let keepRecentTokens: UInt32
+    public let compaction: Option<CompactionConfig>
     public let maxToolCalls: UInt32
     public let toolTimeout: UInt32
     public let minToolInterval: UInt32
@@ -37,6 +39,7 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
         maxTurns: UInt32, temperature: Float32, maxOutputTokens: UInt32,
         thinkingLevel: Option<String>,
         compactionEnabled: Bool, compactionReserveTokens: UInt32, keepRecentTokens: UInt32,
+        compaction: Option<CompactionConfig>,
         maxToolCalls: UInt32, toolTimeout: UInt32, minToolInterval: UInt32,
         tags: ArrayList<String>,
         createdBy: Option<String>, createdAt: Int64, updatedAt: Int64
@@ -50,6 +53,7 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
         this.thinkingLevel = thinkingLevel
         this.compactionEnabled = compactionEnabled
         this.compactionReserveTokens = compactionReserveTokens; this.keepRecentTokens = keepRecentTokens
+        this.compaction = compaction
         this.maxToolCalls = maxToolCalls
         this.toolTimeout = toolTimeout
         this.minToolInterval = minToolInterval
@@ -62,7 +66,7 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
             "", None, "", None, "", None,
             ArrayList(), ArrayList(), Int64(0),
             UInt32(20), Float32(0.7), UInt32(4096), None,
-            true, UInt32(16384), UInt32(20000), UInt32(50), UInt32(30), UInt32(0),
+            true, UInt32(16384), UInt32(20000), None, UInt32(50), UInt32(30), UInt32(0),
             ArrayList(), None, Int64(0), Int64(0))
     }
 
@@ -77,6 +81,7 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
         w.writeName("compactionEnabled").writeValue(this.compactionEnabled)
         w.writeName("compactionReserveTokens").writeValue(Int64(this.compactionReserveTokens))
         w.writeName("keepRecentTokens").writeValue(Int64(this.keepRecentTokens))
+        w.writeName("compaction").writeValue(this.compaction)
         w.writeName("maxToolCalls").writeValue(Int64(this.maxToolCalls))
         w.writeName("toolTimeout").writeValue(Int64(this.toolTimeout))
         w.writeName("minToolInterval").writeValue(Int64(this.minToolInterval))
@@ -104,6 +109,7 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
         var thinkingLevel: Option<String> = None
         var compactionEnabled = true
         var compactionReserveTokens = UInt32(16384); var keepRecentTokens = UInt32(20000)
+        var compaction: Option<CompactionConfig> = None
         var maxToolCalls = UInt32(50)
         var toolTimeout = UInt32(30)
         var minToolInterval = UInt32(0)
@@ -129,6 +135,7 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
                 case "compactionEnabled" => compactionEnabled = r.readValue<Bool>()
                 case "compactionReserveTokens" => compactionReserveTokens = UInt32(r.readValue<Int64>())
                 case "keepRecentTokens" => keepRecentTokens = UInt32(r.readValue<Int64>())
+                case "compaction" => compaction = r.readValue<Option<CompactionConfig>>()
                 case "maxToolCalls" => maxToolCalls = UInt32(r.readValue<Int64>())
                 case "toolTimeout" => toolTimeout = UInt32(r.readValue<Int64>())
                 case "minToolInterval" => minToolInterval = UInt32(r.readValue<Int64>())
@@ -144,8 +151,8 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
         AgentConfig(name, description, systemPrompt, userPromptTemplate,
             model, provider, tools, skills, mcpCooldownTurns,
             maxTurns, temperature, maxOutputTokens, thinkingLevel,
-            compactionEnabled, compactionReserveTokens, keepRecentTokens, maxToolCalls,
-            toolTimeout, minToolInterval,
+            compactionEnabled, compactionReserveTokens, keepRecentTokens, compaction,
+            maxToolCalls, toolTimeout, minToolInterval,
             tags, createdBy, createdAt, updatedAt)
     }
 

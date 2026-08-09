@@ -48,7 +48,7 @@ func mcpRuntimeConfig(): AgentConfig {
     let skills = ArrayList<String>()
     AgentConfig("t", None, "", None, "m", None, tools, skills, 3,
         UInt32(20), Float32(0.7), UInt32(4096), None,
-        false, UInt32(16384), UInt32(20000), UInt32(50), UInt32(30), UInt32(0),
+        false, UInt32(16384), UInt32(20000), None, UInt32(50), UInt32(30), UInt32(0),
         ArrayList(), None, Int64(0), Int64(0))
 }
 
