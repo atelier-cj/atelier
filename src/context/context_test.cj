@@ -189,3 +189,18 @@ func compactWithSummary_multiMessageReach() {
         case _ => @Fail("expected tail user message")
     }
 }
+
+// 回归：previous_summary 提取最近一条历史摘要（CompactionMessage/ArchiveMessage），
+// 普通消息夹在中间不影响提取，无摘要时返回 None
+@Test
+func compactionConfig_findPreviousSummary() {
+    let msgs = ArrayList<Message>()
+    msgs.add(UserMessage(ContentList.ofText("a"), 0))
+    @Expect(findPreviousSummary(msgs), None)
+    msgs.add(CompactionMessage("旧摘要", 100, 0))
+    @Expect(findPreviousSummary(msgs), Some("旧摘要"))
+    msgs.add(UserMessage(ContentList.ofText("b"), 0))
+    @Expect(findPreviousSummary(msgs), Some("旧摘要"))
+    msgs.add(ArchiveMessage(0, 1, "归档摘要", 0))
+    @Expect(findPreviousSummary(msgs), Some("归档摘要"))
+}

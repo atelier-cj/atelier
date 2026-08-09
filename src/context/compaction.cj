@@ -171,6 +171,20 @@ public func renderCompactionPrompt(config: CompactionConfig, conversationText: S
     template.render(arr)
 }
 
+// 从消息中提取最近一条历史摘要（CompactionMessage 或 ArchiveMessage），供模板 {{#previous_summary}}
+public func findPreviousSummary(messages: ArrayList<Message>): Option<String> {
+    var i = messages.size - 1
+    while (i >= 0) {
+        match (messages[i]) {
+            case cm: CompactionMessage => return Some(cm.summary)
+            case am: ArchiveMessage => return Some(am.summary)
+            case _ => ()
+        }
+        i--
+    }
+    None
+}
+
 // 极简 schema 校验：{required: [...], types: {name: "string|array|number|bool|object"}}
 // 校验失败/解析失败返回 false（调用方降级原文）
 public func validateSummary(config: CompactionConfig, schema: HashMap<String, JsonValue>, text: String): Bool {

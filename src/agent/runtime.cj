@@ -10,6 +10,7 @@ import atelier.context.compactMessages
 import atelier.context.ContextBuilder
 import atelier.context.ModelContextRegistry
 import atelier.context.renderCompactionPrompt
+import atelier.context.findPreviousSummary
 import atelier.context.validateSummary
 import atelier.context.compactWithSummary
 import atelier.context.CompactionConfig
@@ -332,7 +333,8 @@ public class AgentRuntime {
                                     // 独立子调用（请求体无 system/tools，缓存 Key 独立，不污染主对话）
                                     let summary = try {
                                         let conversation = summarizeText(currentMessages, reserve)
-                                        let prompt = renderCompactionPrompt(cc, conversation, None, reserve)
+                                        let prev = findPreviousSummary(currentMessages)
+                                        let prompt = renderCompactionPrompt(cc, conversation, prev, reserve)
                                         let summaryModel = match (cc.summaryModel) {
                                             case Some(m) => m
                                             case None => actualModel
