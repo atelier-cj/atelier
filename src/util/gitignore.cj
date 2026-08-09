@@ -47,7 +47,8 @@ public class GitIgnoreMatcher {
 func matchPath(path: String, pattern: String): Bool {
     let fileName = lastSegment(path)
     if (pattern.startsWith("/")) {
-        return matchSimple(subStr2(path, 1, path.size), subStr2(pattern, 1, pattern.size))
+        let p = if (path.startsWith("/")) { subStr2(path, 1, path.size) } else { path }
+        return matchSimple(p, subStr2(pattern, 1, pattern.size))
     }
     if (pattern.endsWith("/")) {
         if (!path.endsWith("/")) { return false }
