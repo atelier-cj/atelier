@@ -42,7 +42,22 @@ public class ContextBuilder {
         let skillCatalog = this.promptBuilder.buildSkillCatalog(this.skills)
         if (skillCatalog != "") { text = text + skillCatalog }
         if (text != "") {
-            result.add(UserMessage(ContentList.ofText(text), 0))
+            // 幂等：history 首条已是相同系统提示则不重复注入（REPL 每轮复用 messages）
+            var alreadyInjected = false
+            if (history.size > 0) {
+                match (history[0]) {
+                    case um: UserMessage =>
+                        var firstText = ""
+                        for (b in um.content.blocks()) {
+                            match (b) { case ContentBlock.TextBlock(t) => firstText = firstText + t; case _ => () }
+                        }
+                        if (firstText == text) { alreadyInjected = true }
+                    case _ => ()
+                }
+            }
+            if (!alreadyInjected) {
+                result.add(UserMessage(ContentList.ofText(text), 0))
+            }
         }
         for (m in history) { result.add(m) }
         result
@@ -146,6 +161,8 @@ public class ContextBuilder {
             if (!skipped) { result.add(messages[i]) }
             i++
         }
+        // 防空上下文：全部被跳过（序号错位）时回退原列表
+        if (result.size == 0) { return messages }
         result
     }
 }

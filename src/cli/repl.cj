@@ -58,12 +58,7 @@ public class REPL {
             this.sessionId = resumeSessionId
             this.messages = try {
                 let loaded = this.sessionStore.load(resumeSessionId)
-                if (loaded.size > MaxLoadMessages) {
-                    let recent = ArrayList<Message>()
-                    let start = loaded.size - MaxLoadMessages
-                    for (i in start..loaded.size) { recent.add(loaded[Int64(i)]) }
-                    recent
-                } else { loaded }
+                truncateRecent(loaded, MaxLoadMessages)
             } catch (_) { ArrayList<Message>() }
         } else {
             this.sessionId = "sess_" + nextId()
@@ -73,12 +68,7 @@ public class REPL {
 
     private func loadSessionMessages(id: String): ArrayList<Message> {
         let msgs = try { this.sessionStore.load(id) } catch (_) { return ArrayList<Message>() }
-        if (msgs.size > MaxLoadMessages) {
-            let recent = ArrayList<Message>()
-            let start = msgs.size - MaxLoadMessages
-            for (i in start..msgs.size) { recent.add(msgs[Int64(i)]) }
-            recent
-        } else { msgs }
+        truncateRecent(msgs, MaxLoadMessages)
     }
 
     private func makeRuntime(): AgentRuntime {
@@ -336,6 +326,7 @@ func textFromContent(cl: ContentList): String {
 }
 
 // 提取 newMsgs 中 oldMsgs 最后一条消息之后的消息（内容比较定位，兼容压缩/归档轮）
+// 定位失败（旧尾部被归档替换）时降级：差集法（newMsgs 中与 oldMsgs 全部不同的消息 = 新消息）
 func extractNewMessages(oldMsgs: ArrayList<Message>, newMsgs: ArrayList<Message>): ArrayList<Message> {
     if (oldMsgs.size == 0) { return newMsgs }
     let lastOld = oldMsgs[oldMsgs.size - 1]
@@ -348,8 +339,33 @@ func extractNewMessages(oldMsgs: ArrayList<Message>, newMsgs: ArrayList<Message>
     let result = ArrayList<Message>()
     if (startIdx >= 0) {
         for (j in startIdx..newMsgs.size) { result.add(newMsgs[Int64(j)]) }
+    } else {
+        // 降级：差集（newMsgs 中与 oldMsgs 全部不同 = 新消息）
+        for (m in newMsgs) {
+            var inOld = false
+            for (o in oldMsgs) {
+                if (sameMessage(m, o)) { inOld = true; break }
+            }
+            if (!inOld) { result.add(m) }
+        }
     }
     result
+}
+
+// 截断保留最近 max 条；窗口外的 ArchiveMessage（历史归档标记）保留在最前，
+// 防绝对序号错位导致 applyArchiveMarks 误跳（resume/switch 场景）
+func truncateRecent(messages: ArrayList<Message>, max: Int64): ArrayList<Message> {
+    if (messages.size <= max) { return messages }
+    let recent = ArrayList<Message>()
+    let start = messages.size - max
+    for (i in 0..start) {
+        match (messages[Int64(i)]) {
+            case am: ArchiveMessage => recent.add(messages[Int64(i)])
+            case _ => ()
+        }
+    }
+    for (i in start..messages.size) { recent.add(messages[Int64(i)]) }
+    recent
 }
 
 // 消息内容等价（role + 文本比较；ArchiveMessage 按范围与摘要）

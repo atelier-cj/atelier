@@ -134,6 +134,24 @@ func ctxBuilder_initMessages_injectsSystemMessage() {
     }
 }
 
+// 幂等：history 首条已是相同系统提示则不重复注入（REPL 每轮复用 messages 防累积）
+@Test
+func ctxBuilder_initMessages_idempotent() {
+    let b = ContextBuilder(SkillRegistry(), SessionEnvironment())
+    let first = b.initMessages("sys", ArrayList(), ArrayList())
+    @Expect(first.size, 1)
+    let second = b.initMessages("sys", ArrayList(), first)
+    @Expect(second.size, 1)
+    match (second[0]) {
+        case um: UserMessage =>
+            match (um.content.blocks()[0]) {
+                case ContentBlock.TextBlock(t) => @Expect(t, "sys\n\n")
+                case _ => @Expect(false, true)
+            }
+        case _ => @Expect(false, true)
+    }
+}
+
 @Test
 func ctxBuilder_initMessages_emptySystemNoInjection() {
     let b = ContextBuilder(SkillRegistry(), SessionEnvironment())
@@ -440,6 +458,18 @@ func applyArchiveMarks_noMarkUnchanged() {
     msgs.add(plainMsg("m0"))
     msgs.add(plainMsg("m1"))
     @Expect(b.applyArchiveMarks(msgs).size, 2)
+}
+
+// 历史标记范围覆盖全部消息 → 结果为空 → 回退原列表（防空上下文）
+@Test
+func applyArchiveMarks_emptyResultFallsBack() {
+    let b = ContextBuilder(SkillRegistry(), SessionEnvironment())
+    let msgs = ArrayList<Message>()
+    msgs.add(ArchiveMessage(0, 2, "摘要", 0))  // 范围 [0,2] 覆盖全部
+    msgs.add(plainMsg("m0"))
+    msgs.add(plainMsg("m1"))
+    let out = b.applyArchiveMarks(msgs)
+    @Expect(out.size, 3)
 }
 
 @Test

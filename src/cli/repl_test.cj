@@ -128,3 +128,52 @@ func sameMessage_toolResultById() {
     @Expect(sameMessage(a, b), true)
     @Expect(sameMessage(a, c), false)
 }
+
+// 归档覆盖旧尾部（start=0 极端场景）：定位失败降级为差集法
+// （newMsgs 中与 oldMsgs 全部不同的消息 = 新消息，防静默丢一轮落库）
+@Test
+func extractNewMessages_fallbackDiffWhenTailArchived() {
+    let oldMsgs = ArrayList<Message>()
+    oldMsgs.add(plain("a"))
+    oldMsgs.add(plain("b"))          // 尾消息将被归档替换
+    let newMsgs = ArrayList<Message>()
+    newMsgs.add(plain("a"))          // 保留的旧消息
+    newMsgs.add(ArchiveMessage(0, 1, "摘要", 0))  // 归档替换 b
+    newMsgs.add(plain("c"))          // 新消息
+    let out = extractNewMessages(oldMsgs, newMsgs)
+    @Expect(out.size, 2)             // ArchiveMessage + c
+    match (out[0]) {
+        case am: ArchiveMessage => @Expect(am.summary, "摘要")
+        case _ => @Fail("expected ArchiveMessage")
+    }
+    match (out[1]) {
+        case um: UserMessage => @Expect(textOfMsg(um), "c")
+        case _ => @Fail("expected c")
+    }
+}
+
+// 截断保留窗口外的归档标记（放最前），防绝对序号错位导致 applyArchiveMarks 误跳
+@Test
+func truncateRecent_keepsArchiveMarksBeforeWindow() {
+    let msgs = ArrayList<Message>()
+    msgs.add(ArchiveMessage(0, 2, "旧摘要", 0))
+    for (i in 0..20) { msgs.add(plain("m" + i.toString())) }  // 共 21 条
+    let out = truncateRecent(msgs, 15)
+    @Expect(out.size, 16)
+    match (out[0]) {
+        case am: ArchiveMessage => @Expect(am.summary, "旧摘要")
+        case _ => @Fail("expected archive marker at front")
+    }
+    match (out[1]) {
+        case um: UserMessage => @Expect(textOfMsg(um), "m5")  // 窗口起点 = 21-15 = 6 → 原 index6 = m5
+        case _ => @Fail("expected m5")
+    }
+}
+
+@Test
+func truncateRecent_shortListUnchanged() {
+    let msgs = ArrayList<Message>()
+    for (i in 0..10) { msgs.add(plain("m" + i.toString())) }
+    let out = truncateRecent(msgs, 15)
+    @Expect(out.size, 10)
+}

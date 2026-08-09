@@ -113,7 +113,11 @@ public class AtelierHttpHandler {
         }
         let provider = resolveProvider(agentCfg.model)
         let runtime = AgentRuntime(agentCfg, provider, this.toolRegistry, this.sessionStore, this.trustManager, this.skillRegistry, this.agentRegistry, this.providerRegistry, ArrayList<Hook>(), { q => "[User input not available in HTTP mode. Question was: " + q + "]" }, this.mcpManager)
-        let eventStream = runtime.chat(msgs)
+        // sessionId 透传：请求带 sessionId 时事件与请求一致（否则随机 ulid）
+        let eventStream = match (dto.sessionId) {
+            case Some(sid) => runtime.chatWithSessionId(sid, msgs, SessionEnvironment())
+            case None => runtime.chat(msgs)
+        }
         let msgsResult = eventStream.result()
         let lastText = lastAssistantText(msgsResult)
         jsonResponse(ctx, 200, toJsonString(ContentResponse(lastText)))
@@ -153,7 +157,11 @@ public class AtelierHttpHandler {
             log.info("askUser: got answer", Array<Attr>())
             answer
         }, this.mcpManager)
-        let eventStream = runtime.chat(msgs)
+        // sessionId 透传：请求带 sessionId 时事件与请求一致（否则随机 ulid）
+        let eventStream = match (dto.sessionId) {
+            case Some(sid) => runtime.chatWithSessionId(sid, msgs, SessionEnvironment())
+            case None => runtime.chat(msgs)
+        }
         try {
             doSSEStream(ctx, eventStream, writer)
         } catch (e: Exception) {
@@ -329,15 +337,19 @@ public class AtelierHttpHandler {
             { q => "[User input not available]" }, this.mcpManager)
 
         if (dto.stream) {
-            doV1ChatStream(ctx, runtime, msgs, dto.model)
+            doV1ChatStream(ctx, runtime, msgs, dto.model, dto.sessionId)
         } else {
-            doV1ChatSync(ctx, runtime, msgs, dto.model)
+            doV1ChatSync(ctx, runtime, msgs, dto.model, dto.sessionId)
         }
     }
 
     private func doV1ChatSync(ctx: HttpContext, runtime: AgentRuntime,
-        msgs: ArrayList<Message>, model: String): Unit {
-        let eventStream = runtime.chat(msgs)
+        msgs: ArrayList<Message>, model: String, sessionId: Option<String>): Unit {
+        // sessionId 透传：请求带 sessionId 时事件与请求一致（否则随机 ulid）
+        let eventStream = match (sessionId) {
+            case Some(sid) => runtime.chatWithSessionId(sid, msgs, SessionEnvironment())
+            case None => runtime.chat(msgs)
+        }
         let result = eventStream.result()
         let lastText = lastAssistantText(result)
         let resp = ChatCompletionResponse(
@@ -353,7 +365,7 @@ public class AtelierHttpHandler {
     }
 
     private func doV1ChatStream(ctx: HttpContext, runtime: AgentRuntime,
-        msgs: ArrayList<Message>, model: String): Unit {
+        msgs: ArrayList<Message>, model: String, sessionId: Option<String>): Unit {
         let b = ctx.responseBuilder
         b.status(UInt16(200))
         b.header("content-type", "text/event-stream")
@@ -362,7 +374,11 @@ public class AtelierHttpHandler {
         b.header("transfer-encoding", "chunked")
 
         let writer = HttpResponseWriter(ctx)
-        let eventStream = runtime.chat(msgs)
+        // sessionId 透传：请求带 sessionId 时事件与请求一致（否则随机 ulid）
+        let eventStream = match (sessionId) {
+            case Some(sid) => runtime.chatWithSessionId(sid, msgs, SessionEnvironment())
+            case None => runtime.chat(msgs)
+        }
         let id = "chatcmpl-" + Int64(0).toString()
         var done = false
         try {

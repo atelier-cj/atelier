@@ -8,9 +8,11 @@ public struct ChatRequestDTO <: JsonSerializable & JsonDeserializable<ChatReques
     public let agent: String
     public let messages: ArrayList<MessageDTO>
     public let stream: Bool
+    public let sessionId: Option<String>
 
-    public init(agent: String, messages: ArrayList<MessageDTO>, stream: Bool) {
+    public init(agent: String, messages: ArrayList<MessageDTO>, stream: Bool, sessionId: Option<String>) {
         this.agent = agent; this.messages = messages; this.stream = stream
+        this.sessionId = sessionId
     }
 
     public func toJson(w: JsonWriter): Unit {
@@ -18,22 +20,25 @@ public struct ChatRequestDTO <: JsonSerializable & JsonDeserializable<ChatReques
         w.writeName("agent").writeValue(this.agent)
         w.writeName("messages").writeValue(this.messages)
         w.writeName("stream").writeValue(this.stream)
+        w.writeName("sessionId").writeValue(this.sessionId)
         w.endObject()
     }
 
     public static func fromJson(r: JsonReader): ChatRequestDTO {
         var agent = ""; var msgs = ArrayList<MessageDTO>(); var stream = false
+        var sessionId: Option<String> = None
         r.startObject()
         while (r.peek() != EndObject) {
             match (r.readName()) {
                 case "agent" => agent = r.readValue<String>()
                 case "messages" => msgs = r.readValue<ArrayList<MessageDTO>>()
                 case "stream" => stream = r.readValue<Bool>()
+                case "sessionId" => sessionId = r.readValue<Option<String>>()
                 case _ => r.skip()
             }
         }
         r.endObject()
-        ChatRequestDTO(agent, msgs, stream)
+        ChatRequestDTO(agent, msgs, stream, sessionId)
     }
 }
 
@@ -421,16 +426,19 @@ public struct ChatCompletionRequest <: JsonDeserializable<ChatCompletionRequest>
     public let stream: Bool
     public let temperature: Float64
     public let maxTokens: Int64
+    public let sessionId: Option<String>
 
     public init(model: String, messages: ArrayList<ChatCompletionMessage>,
-        stream: Bool, temperature: Float64, maxTokens: Int64) {
+        stream: Bool, temperature: Float64, maxTokens: Int64, sessionId: Option<String>) {
         this.model = model; this.messages = messages; this.stream = stream
         this.temperature = temperature; this.maxTokens = maxTokens
+        this.sessionId = sessionId
     }
 
     public static func fromJson(r: JsonReader): ChatCompletionRequest {
         var model = ""; var messages = ArrayList<ChatCompletionMessage>()
         var stream = false; var temperature = Float64(0.7); var maxTokens = Int64(4096)
+        var sessionId: Option<String> = None
         r.startObject()
         while (r.peek() != EndObject) {
             match (r.readName()) {
@@ -439,11 +447,12 @@ public struct ChatCompletionRequest <: JsonDeserializable<ChatCompletionRequest>
                 case "stream" => stream = r.readValue<Bool>()
                 case "temperature" => temperature = r.readValue<Float64>()
                 case "max_tokens" => maxTokens = r.readValue<Int64>()
+                case "sessionId" => sessionId = r.readValue<Option<String>>()
                 case _ => r.skip()
             }
         }
         r.endObject()
-        ChatCompletionRequest(model, messages, stream, temperature, maxTokens)
+        ChatCompletionRequest(model, messages, stream, temperature, maxTokens, sessionId)
     }
 }
 
