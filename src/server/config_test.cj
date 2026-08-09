@@ -3,7 +3,10 @@ package atelier.server
 import jsonvalue.*
 import std.collection.*
 import stdx.serialization.serialization.*
+import std.fs.*
+import tomlcj.*
 import atelier.provider.*
+import atelier.context.CompactionConfig
 
 func makeTomlProvider(extra: DataModel): TomlProvider {
     let tp = TomlProvider()
@@ -91,5 +94,202 @@ func tomlProvider_serializeDeserializeRoundTrip() {
                 case _ => @Fail("reasoning_effort lost")
             }
         case _ => @Fail("extra not preserved as DataModelStruct")
+    }
+}
+
+var tempFileSeq: Int64 = 0
+
+func writeTomlTemp(content: String): String {
+    tempFileSeq++
+    let path = "/tmp/atelier_config_test_${tempFileSeq}.toml"
+    if (exists(Path(path))) { remove(Path(path)) }
+    let f = File(Path(path), Write)
+    f.write(content.toArray())
+    f.close()
+    path
+}
+
+@Test
+func tomlAgent_compactionParse() {
+    // TOML 文本：[[agent]] + [agent.compaction] 嵌套表（文档示例格式，单行 \n 转义模板）
+    let content = "[[agent]]\nname = \"test\"\nmodel = \"gpt-4o\"\n\n[agent.compaction]\nenabled = false\nreserveTokens = 4096\nkeepRecentTokens = 8000\npromptTemplate = \"压缩以下对话：\\n{{conversation}}\"\nsummaryModel = \"deepseek-chat\"\n\n[agent.compaction.outputSchema]\nrequired = [\"goal\"]\ntypes = { goal = \"string\" }\n"
+    let path = writeTomlTemp(content)
+    let cfg = unmarshal<TomlConfig>(path)
+    remove(Path(path))
+
+    @Expect(cfg.agent.size, 1)
+    match (cfg.agent[0].compaction) {
+        case Some(tc) =>
+            match (tc.enabled) {
+                case Some(b) => @Expect(b, false)
+                case None => @Fail("enabled missing")
+            }
+            match (tc.reserveTokens) {
+                case Some(v) => @Expect(v, 4096)
+                case None => @Fail("reserveTokens missing")
+            }
+            match (tc.keepRecentTokens) {
+                case Some(v) => @Expect(v, 8000)
+                case None => @Fail("keepRecentTokens missing")
+            }
+            match (tc.promptTemplate) {
+                case Some(s) =>
+                    @Expect(s.contains("压缩以下对话"), true)
+                    @Expect(s.contains("{{conversation}}"), true)
+                case None => @Fail("promptTemplate missing")
+            }
+            match (tc.summaryModel) {
+                case Some(s) => @Expect(s, "deepseek-chat")
+                case None => @Fail("summaryModel missing")
+            }
+            match (tc.outputSchema) {
+                case dms: DataModelStruct =>
+                    match (dms.get("required")) {
+                        case seq: DataModelSeq =>
+                            @Expect(seq.getItems().size, 1)
+                            match (seq.getItems()[0]) {
+                                case s: DataModelString => @Expect(s.getValue(), "goal")
+                                case _ => @Fail("required element not string")
+                            }
+                        case _ => @Fail("required missing")
+                    }
+                    match (dms.get("types")) {
+                        case types: DataModelStruct =>
+                            match (types.get("goal")) {
+                                case s: DataModelString => @Expect(s.getValue(), "string")
+                                case _ => @Fail("types.goal missing")
+                            }
+                        case _ => @Fail("types missing")
+                    }
+                case _ => @Fail("outputSchema not parsed as struct")
+            }
+        case None => @Fail("compaction not parsed")
+    }
+}
+
+@Test
+func tomlAgent_compactionParseMultiline() {
+    // 多行字符串模板（ASCII 行尾；tomlcj 1.0.0 对中文行尾的多行字符串有 utf8 缺陷，见记忆）
+    let content = "[[agent]]\nname = \"multi\"\n\n[agent.compaction]\npromptTemplate = \"\"\"\nSummarize:\n{{conversation}}\n\"\"\"\n"
+    let path = writeTomlTemp(content)
+    let cfg = unmarshal<TomlConfig>(path)
+    remove(Path(path))
+
+    match (cfg.agent[0].compaction) {
+        case Some(tc) =>
+            match (tc.promptTemplate) {
+                case Some(s) =>
+                    @Expect(s.contains("Summarize:"), true)
+                    @Expect(s.contains("{{conversation}}"), true)
+                case None => @Fail("promptTemplate missing")
+            }
+        case None => @Fail("compaction not parsed")
+    }
+}
+
+@Test
+func tomlAgent_compactionSerializeRoundTrip() {
+    // serialize → deserialize 往返不丢失 compaction 字段
+    let ta = TomlAgent()
+    ta.name = "rt"
+    let tc = TomlCompaction()
+    tc.enabled = Some(true)
+    tc.reserveTokens = Some(Int64(2048))
+    ta.compaction = Some(tc)
+    let dm = ta.serialize()
+    let back = TomlAgent.deserialize(dm)
+    match (back.compaction) {
+        case Some(c) =>
+            match (c.enabled) {
+                case Some(b) => @Expect(b, true)
+                case None => @Fail("enabled lost")
+            }
+            match (c.reserveTokens) {
+                case Some(v) => @Expect(v, 2048)
+                case None => @Fail("reserveTokens lost")
+            }
+        case None => @Fail("compaction lost in round-trip")
+    }
+}
+
+@Test
+func agentConfigFrom_compactionMapping() {
+    // TomlCompaction 全部字段 → AgentConfig.compaction 映射（含 outputSchema DataModel→JsonValue）
+    let ta = TomlAgent()
+    ta.name = "t1"
+    ta.model = "gpt-4o"
+    let tc = TomlCompaction()
+    tc.enabled = Some(false)
+    tc.reserveTokens = Some(Int64(4096))
+    tc.keepRecentTokens = Some(Int64(8000))
+    tc.promptTemplate = Some("自定义压缩模板")
+    tc.summaryModel = Some("deepseek-chat")
+    let schema = DataModelStruct()
+        .add(field<String>("type", "object"))
+        .add(field<Bool>("additionalProperties", false))
+    tc.outputSchema = schema
+    ta.compaction = Some(tc)
+
+    let cfg = agentConfigFrom(ta)
+    match (cfg.compaction) {
+        case Some(c) =>
+            @Expect(c.enabled, false)
+            @Expect(c.reserveTokens, 4096)
+            @Expect(c.keepRecentTokens, 8000)
+            @Expect(c.promptTemplate, "自定义压缩模板")
+            match (c.summaryModel) {
+                case Some(s) => @Expect(s, "deepseek-chat")
+                case None => @Fail("summaryModel missing")
+            }
+            match (c.outputSchema) {
+                case Some(JsonValue.Map(m)) =>
+                    match (m.get("type")) {
+                        case Some(JsonValue.String(s)) => @Expect(s, "object")
+                        case _ => @Fail("schema type missing")
+                    }
+                    match (m.get("additionalProperties")) {
+                        case Some(JsonValue.Boolean(b)) => @Expect(b, false)
+                        case _ => @Fail("schema bool missing")
+                    }
+                case _ => @Fail("outputSchema not converted to JsonValue")
+            }
+        case None => @Fail("compaction not mapped")
+    }
+}
+
+@Test
+func agentConfigFrom_compactionPartialDefaults() {
+    // 只配 enabled，其余字段回落 CompactionConfig 默认值
+    let ta = TomlAgent()
+    ta.name = "t2"
+    let tc = TomlCompaction()
+    tc.enabled = Some(true)
+    ta.compaction = Some(tc)
+
+    let cfg = agentConfigFrom(ta)
+    let def = CompactionConfig()
+    match (cfg.compaction) {
+        case Some(c) =>
+            @Expect(c.enabled, true)
+            @Expect(c.reserveTokens, def.reserveTokens)
+            @Expect(c.keepRecentTokens, def.keepRecentTokens)
+            @Expect(c.promptTemplate, def.promptTemplate)
+            match (c.outputSchema) {
+                case None => ()
+                case Some(_) => @Fail("expected outputSchema to be None")
+            }
+            @Expect(c.summaryModel, None)
+        case None => @Fail("compaction not mapped")
+    }
+}
+
+@Test
+func agentConfigFrom_noCompactionNone() {
+    let ta = TomlAgent()
+    ta.name = "t3"
+    let cfg = agentConfigFrom(ta)
+    match (cfg.compaction) {
+        case None => ()
+        case Some(_) => @Fail("expected compaction to be None")
     }
 }

@@ -163,7 +163,7 @@ public class REPL {
 
         let runtime = this.makeRuntime()
         this.messages.add(UserMessage(ContentList.ofText(line), 0))
-        let stream = runtime.chat(this.messages)
+        let stream = runtime.chatWithSessionId(this.sessionId, this.messages, SessionEnvironment())
 
         let allMsgs = try {
             stream.result()
@@ -171,16 +171,34 @@ public class REPL {
             println("Error: " + e.message)
             return
         }
+        let oldMsgs = this.messages
         this.messages = allMsgs
-        // Persist after each turn
-        try {
-            let header = SessionHeader(1, this.sessionId, 0, 0, "", "", "", None)
-            this.sessionStore.save(this.sessionId, header, this.messages)
-        } catch (_) { () }
+        // 单落库职责：REPL 统一持久化（runtime 不落库），本轮新消息追加到 store
+        this.persistCurrentSession(oldMsgs)
 
         let lastText = lastAssistantText(allMsgs)
         if (lastText != "") {
             println(lastText)
+        }
+    }
+
+    // 单落库职责：每轮 run 后把本轮新消息追加到 store（首轮无会话用 save 创建）。
+    // 每次落库前从 store 取末 entry 作 parentLeafId，链自然线性，无双写分叉。
+    private func persistCurrentSession(oldMsgs: ArrayList<Message>): Unit {
+        let newMsgs = extractNewMessages(oldMsgs, this.messages)
+        if (newMsgs.size == 0) { return }
+        let lastLeaf: Option<String> = try {
+            let data = this.sessionStore.loadEntries(this.sessionId)
+            if (data.entries.size > 0) { Some(data.entries[data.entries.size - 1].id) } else { None }
+        } catch (_) { None }
+        match (lastLeaf) {
+            case Some(leaf) =>
+                try { this.sessionStore.appendBranch(this.sessionId, leaf, newMsgs) } catch (_) { () }
+            case None =>
+                try {
+                    let header = SessionHeader(1, this.sessionId, 0, 0, "", "", "", None)
+                    this.sessionStore.save(this.sessionId, header, this.messages)
+                } catch (_) { () }
         }
     }
 
@@ -192,12 +210,9 @@ public class REPL {
         }
         let cmd = parts[1]
         if (cmd == "new") {
-            if (this.messages.size > 0) {
-                try {
-                    let header = SessionHeader(1, this.sessionId, 0, 0, "", "", "", None)
-                    this.sessionStore.save(this.sessionId, header, this.messages)
-                } catch (_) { () }
-            }
+            // 当前会话消息已由主循环逐轮落库；此处不重复落库（extractNewMessages 为空），
+            // 避免 save 覆盖破坏归档链
+            this.persistCurrentSession(this.messages)
             this.sessionCounter++
             this.sessionId = "sess_" + this.sessionCounter.toString()
             this.messages = ArrayList<Message>()
@@ -214,12 +229,9 @@ public class REPL {
             }
         } else if (cmd == "switch" && parts.size > 2) {
             let targetId = parts[2]
-            if (this.messages.size > 0) {
-                try {
-                    let header = SessionHeader(1, this.sessionId, 0, 0, "", "", "", None)
-                    this.sessionStore.save(this.sessionId, header, this.messages)
-                } catch (_) { () }
-            }
+            // 当前会话消息已在主循环逐轮落库；此处不重复落库（extractNewMessages 为空），
+            // 避免 save 覆盖破坏归档链
+            this.persistCurrentSession(this.messages)
             this.messages = this.loadSessionMessages(targetId)
             if (this.messages.size == 0) {
                 println("Session not found: " + targetId)
@@ -321,6 +333,69 @@ func textFromContent(cl: ContentList): String {
         match (b) { case ContentBlock.TextBlock(t) => r = r + t; case _ => () }
     }
     r
+}
+
+// 提取 newMsgs 中 oldMsgs 最后一条消息之后的消息（内容比较定位，兼容压缩/归档轮）
+func extractNewMessages(oldMsgs: ArrayList<Message>, newMsgs: ArrayList<Message>): ArrayList<Message> {
+    if (oldMsgs.size == 0) { return newMsgs }
+    let lastOld = oldMsgs[oldMsgs.size - 1]
+    var startIdx: Int64 = -1
+    var i: Int64 = 0
+    while (i < newMsgs.size) {
+        if (sameMessage(newMsgs[Int64(i)], lastOld)) { startIdx = i + 1 }
+        i++
+    }
+    let result = ArrayList<Message>()
+    if (startIdx >= 0) {
+        for (j in startIdx..newMsgs.size) { result.add(newMsgs[Int64(j)]) }
+    }
+    result
+}
+
+// 消息内容等价（role + 文本比较；ArchiveMessage 按范围与摘要）
+func sameMessage(a: Message, b: Message): Bool {
+    match (a) {
+        case ua: UserMessage =>
+            match (b) {
+                case ub: UserMessage => textOfMsg(ua) == textOfMsg(ub)
+                case _ => false
+            }
+        case aa: AssistantMessage =>
+            match (b) {
+                case ab: AssistantMessage =>
+                    aa.content.blocks().size == ab.content.blocks().size && textOfMsg(aa) == textOfMsg(ab)
+                case _ => false
+            }
+        case ta: ToolResultMessage =>
+            match (b) {
+                case tb: ToolResultMessage => ta.toolCallId == tb.toolCallId && ta.toolName == tb.toolName
+                case _ => false
+            }
+        case ca: CompactionMessage =>
+            match (b) {
+                case cb: CompactionMessage => ca.summary == cb.summary
+                case _ => false
+            }
+        case aa2: ArchiveMessage =>
+            match (b) {
+                case ab2: ArchiveMessage =>
+                    aa2.startIndex == ab2.startIndex && aa2.endIndex == ab2.endIndex && aa2.summary == ab2.summary
+                case _ => false
+            }
+        case _ => false
+    }
+}
+
+// 提取消息文本（ContentList 的 TextBlock 拼接）
+func textOfMsg(m: Message): String {
+    let cl = match (m) {
+        case um: UserMessage => um.content
+        case am: AssistantMessage => am.content
+        case tm: ToolResultMessage => tm.content
+        case cm: CompactionMessage => ContentList.ofText(cm.summary)
+        case _ => ContentList.ofText("")
+    }
+    textFromContent(cl)
 }
 
 func readLine(): String {

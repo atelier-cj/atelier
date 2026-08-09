@@ -10,6 +10,7 @@ import atelier.context.compactMessages
 import atelier.context.ContextBuilder
 import atelier.context.ModelContextRegistry
 import atelier.context.renderCompactionPrompt
+import atelier.context.findPreviousSummary
 import atelier.context.validateSummary
 import atelier.context.compactWithSummary
 import atelier.context.CompactionConfig
@@ -23,6 +24,7 @@ import std.core.sleep
 import std.env.getVariable
 import std.time.MonoTime
 import stdx.log.*
+import opencj::ulid.nextId
 
 public class AgentRuntime {
     private let config: AgentConfig
@@ -86,15 +88,25 @@ public class AgentRuntime {
     }
 
     public func chat(messages: ArrayList<Message>): EventStream<AgentEvent, ArrayList<Message>> {
-        this.chatWithEnv(messages, this.sessionEnv)
+        this.chatWithSessionId("sess_" + nextId(), messages, this.sessionEnv)
     }
 
+    // 库用户兼容签名：内部生成 ulid 会话 id
     public func chatWithEnv(messages: ArrayList<Message>, sessionEnv: SessionEnvironment): EventStream<AgentEvent, ArrayList<Message>> {
+        this.chatWithSessionId("sess_" + nextId(), messages, sessionEnv)
+    }
+
+    // 显式会话 id（如 REPL 的持久化 sessionId），runtime 不落库，由调用方统一持久化
+    public func chatWithSessionId(sessionId: String, messages: ArrayList<Message>,
+        sessionEnv: SessionEnvironment): EventStream<AgentEvent, ArrayList<Message>> {
+        this.chatWithEnv(sessionId, messages, sessionEnv)
+    }
+
+    private func chatWithEnv(sessionId: String, messages: ArrayList<Message>, sessionEnv: SessionEnvironment): EventStream<AgentEvent, ArrayList<Message>> {
         let stream = EventStream<AgentEvent, ArrayList<Message>>()
         let se = sessionEnv
         let workDir = if (se.directory != "") { se.directory } else { "." }
         let ctx = ToolContext(workDir, this.askUser, se.context)
-        let sessionId = "sess_0"
         let ctxBuilder = ContextBuilder(this.skillRegistry, se)
 
         spawn {
@@ -118,6 +130,9 @@ public class AgentRuntime {
                     turnCount++
                     this.mcpManager.advanceTurn()
                     log.info("turn ${turnCount} start", Array<Attr>())
+                    // 顺序：历史归档标记在前（处理 store 加载的历史 ArchiveMessage），
+                    // 本轮调用对在后（产生的 ArchiveMessage 位于 index==startIndex，不能被标记跳过）
+                    currentMessages = ctxBuilder.applyArchiveMarks(currentMessages)
                     currentMessages = ctxBuilder.applyArchives(currentMessages)
 
                     stream.emit(MessageStartEvent(currentMessages[0]))
@@ -332,7 +347,8 @@ public class AgentRuntime {
                                     // 独立子调用（请求体无 system/tools，缓存 Key 独立，不污染主对话）
                                     let summary = try {
                                         let conversation = summarizeText(currentMessages, reserve)
-                                        let prompt = renderCompactionPrompt(cc, conversation, None, reserve)
+                                        let prev = findPreviousSummary(currentMessages)
+                                        let prompt = renderCompactionPrompt(cc, conversation, prev, reserve)
                                         let summaryModel = match (cc.summaryModel) {
                                             case Some(m) => m
                                             case None => actualModel

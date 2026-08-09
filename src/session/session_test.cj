@@ -113,6 +113,31 @@ func storm_appendBranch() {
 }
 
 @Test
+func appendBranch_archiveEntryKeepsOriginal() {
+    let store = stormStore()
+    let msgs = ArrayList<Message>()
+    msgs.add(makeMsg("m0"))
+    msgs.add(makeMsg("m1"))
+    store.save("aa1", makeHeader("aa1"), msgs)
+    let data = store.loadEntries("aa1")
+    let leafId = data.entries[1].id
+    let arch = ArrayList<Message>()
+    arch.add(ArchiveMessage(0, 1, "摘要", 0))
+    store.appendBranch("aa1", leafId, arch)
+    let entries = store.loadEntries("aa1")
+    @Expect(entries.entries.size, 3)
+    @Expect(store.load("aa1").size, 3)
+    match (entries.entries[2].message) {
+        case am: ArchiveMessage =>
+            @Expect(am.startIndex, 0)
+            @Expect(am.endIndex, 1)
+            @Expect(am.summary, "摘要")
+        case _ => @Fail("expected ArchiveMessage as appended entry")
+    }
+    closeAndClean(store)
+}
+
+@Test
 func storm_fork() {
     let store = stormStore()
     let msgs = ArrayList<Message>()

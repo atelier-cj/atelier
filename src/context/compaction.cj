@@ -29,8 +29,8 @@ public func compactMessages(messages: ArrayList<Message>, contextWindow: Int64, 
         i--
     }
     cutIndex = i + 1
-
-    if (i < 0) {
+    cutIndex = protectCutPoint(messages, cutIndex)
+    if (cutIndex <= 0) {
         return messages  // all messages fit
     }
 
@@ -171,6 +171,20 @@ public func renderCompactionPrompt(config: CompactionConfig, conversationText: S
     template.render(arr)
 }
 
+// 从消息中提取最近一条历史摘要（CompactionMessage 或 ArchiveMessage），供模板 {{#previous_summary}}
+public func findPreviousSummary(messages: ArrayList<Message>): Option<String> {
+    var i = messages.size - 1
+    while (i >= 0) {
+        match (messages[i]) {
+            case cm: CompactionMessage => return Some(cm.summary)
+            case am: ArchiveMessage => return Some(am.summary)
+            case _ => ()
+        }
+        i--
+    }
+    None
+}
+
 // 极简 schema 校验：{required: [...], types: {name: "string|array|number|bool|object"}}
 // 校验失败/解析失败返回 false（调用方降级原文）
 public func validateSummary(config: CompactionConfig, schema: HashMap<String, JsonValue>, text: String): Bool {
@@ -226,11 +240,65 @@ public func compactWithSummary(messages: ArrayList<Message>, keepRecentTokens: I
         i--
     }
     cutIndex = i + 1
-    if (i < 0) { return messages }
+    cutIndex = protectCutPoint(messages, cutIndex)
+    if (cutIndex <= 0) { return messages }
     let compacted = ArrayList<Message>()
     compacted.add(CompactionMessage(summary, tokensBefore, 0))
     for (j in cutIndex..Int64(messages.size)) {
         compacted.add(messages[Int64(j)])
     }
     compacted
+}
+
+// 切点配对保护：cutIndex 不拆散 ToolCall ↔ ToolResult 对。
+// 每个对视为不可切分区间 [l, r]（l=调用消息索引，r=结果消息索引），
+// 合法切点 c 必须对所有区间满足 c <= l 或 c > r：
+// a. 切点落在区间右端点（保留区第一条是 ToolResult）→ 前移保留其 ToolCall
+// b. 切点落在区间内部其余位置 → 后移整体移除该对
+// 区间法一次性收敛，交叉配对（如 [A(t1), A(t2), TR(t1), TR(t2)]）不会像
+// 逐条前移/后移的迭代式实现那样在两个切点间无限振荡
+public func protectCutPoint(messages: ArrayList<Message>, cutIndex: Int64): Int64 {
+    let cut = cutIndex
+    if (cut <= 0 || cut >= messages.size) { return cut }
+    let pairs = ArrayList<(Int64, Int64)>()
+    for (i in 0..Int64(messages.size)) {
+        match (messages[Int64(i)]) {
+            case tr: ToolResultMessage =>
+                var j = Int64(i) - 1
+                var found = false
+                while (j >= 0 && !found) {
+                    match (messages[Int64(j)]) {
+                        case am: AssistantMessage =>
+                            for (tc in am.toolCalls()) {
+                                if (tc.id == tr.toolCallId) { found = true }
+                            }
+                        case _ => ()
+                    }
+                    if (!found) { j-- }
+                }
+                if (found) { pairs.add((Int64(j), Int64(i))) }
+            case _ => ()
+        }
+    }
+    if (pairs.size == 0) { return cut }
+    if (!pairCoversCut(pairs, cut)) { return cut }
+    match (messages[Int64(cut)]) {
+        case _: ToolResultMessage =>
+            // a. 保留区第一条是 ToolResult → 前移到最近合法切点，保留其 ToolCall
+            var c = cut - 1
+            while (c > 0 && pairCoversCut(pairs, c)) { c-- }
+            c
+        case _ =>
+            // b. 切点在区间内部 → 后移到最近合法切点，整体移除该对
+            var c = cut + 1
+            while (c < Int64(messages.size) && pairCoversCut(pairs, c)) { c++ }
+            c
+    }
+}
+
+func pairCoversCut(pairs: ArrayList<(Int64, Int64)>, c: Int64): Bool {
+    for ((l, r) in pairs) {
+        if (l < c && c <= r) { return true }
+    }
+    false
 }

@@ -189,3 +189,82 @@ func compactWithSummary_multiMessageReach() {
         case _ => @Fail("expected tail user message")
     }
 }
+
+// 回归：previous_summary 提取最近一条历史摘要（CompactionMessage/ArchiveMessage），
+// 普通消息夹在中间不影响提取，无摘要时返回 None
+@Test
+func compactionConfig_findPreviousSummary() {
+    let msgs = ArrayList<Message>()
+    msgs.add(UserMessage(ContentList.ofText("a"), 0))
+    @Expect(findPreviousSummary(msgs), None)
+    msgs.add(CompactionMessage("旧摘要", 100, 0))
+    @Expect(findPreviousSummary(msgs), Some("旧摘要"))
+    msgs.add(UserMessage(ContentList.ofText("b"), 0))
+    @Expect(findPreviousSummary(msgs), Some("旧摘要"))
+    msgs.add(ArchiveMessage(0, 1, "归档摘要", 0))
+    @Expect(findPreviousSummary(msgs), Some("归档摘要"))
+}
+
+func toolPairMsg(tcId: String, toolName: String): ArrayList<Message> {
+    let r = ArrayList<Message>()
+    let tc = ToolCallBlock(tcId, toolName, JsonValue.Map(HashMap()))
+    let blocks = ArrayList<ContentBlock>()
+    blocks.add(ContentBlock.ToolCall(tc))
+    r.add(AssistantMessage(ContentList(blocks), "", "", StopReason.ToolUse, TokenUsage(0, 0), 0))
+    r.add(ToolResultMessage(tcId, toolName, ContentList.ofText("结果"), false, 0))
+    r
+}
+
+@Test
+func compactionConfig_cutPreservesToolPair() {
+    // 场景 a：cutIndex 切在 ToolResult 处（ToolCall 在移除区）→ 前移保留 ToolCall
+    let msgs = ArrayList<Message>()
+    msgs.add(UserMessage(ContentList.ofText("m0"), 0))
+    let pair = toolPairMsg("c1", "read_file")
+    msgs.add(pair[0])
+    msgs.add(pair[1])
+    msgs.add(UserMessage(ContentList.ofText("m1"), 0))
+    // 构造 keepRecent 极小 → cutIndex 会落在 ToolResult 附近；用 protectCutPoint 直接测
+    let cut = protectCutPoint(msgs, 2)
+    @Expect(cut, 1)  // 前移到 ToolCall 位置，配对完整保留
+}
+
+@Test
+func compactionConfig_cutMovesPastOrphanResult() {
+    // 场景 b：移除区最后一条含 ToolCall 且其 ToolResult 在保留区 → 后移整体移除
+    // 构造：ToolResult 与 ToolCall 间隔一条 UserMessage，保留区第一条非 ToolResult，
+    // 规则 a 不会抢先触发，恰好命中规则 b 的后移路径
+    let msgs = ArrayList<Message>()
+    msgs.add(UserMessage(ContentList.ofText("m0"), 0))
+    let pair = toolPairMsg("c2", "bash")
+    msgs.add(pair[0])
+    msgs.add(UserMessage(ContentList.ofText("m1"), 0))
+    msgs.add(pair[1])
+    msgs.add(UserMessage(ContentList.ofText("m2"), 0))
+    let cut = protectCutPoint(msgs, 2)
+    @Expect(cut, 4)  // 后移到 ToolResult 之后，整个对移除
+}
+
+@Test
+func compactionConfig_cutNoPairUnchanged() {
+    let msgs = ArrayList<Message>()
+    msgs.add(UserMessage(ContentList.ofText("m0"), 0))
+    msgs.add(UserMessage(ContentList.ofText("m1"), 0))
+    @Expect(protectCutPoint(msgs, 1), 1)
+}
+
+@Test
+func compactionConfig_cutCrossPairsConverges() {
+    // 交叉配对 [A(t1), A(t2), TR(t1), TR(t2)]：规则 a（前移）与规则 b（后移）互相拉扯，
+    // 迭代式实现会 1 ↔ 3 无限振荡；必须收敛到配对完整的全局合法切点
+    let msgs = ArrayList<Message>()
+    let p1 = toolPairMsg("t1", "read_file")
+    let p2 = toolPairMsg("t2", "bash")
+    msgs.add(p1[0])
+    msgs.add(p2[0])
+    msgs.add(p1[1])
+    msgs.add(p2[1])
+    msgs.add(UserMessage(ContentList.ofText("m1"), 0))
+    let cut = protectCutPoint(msgs, 3)
+    @Expect(cut, 0)  // 前移保留全部对，配对完整
+}

@@ -1,6 +1,7 @@
 package atelier.server
 
 import atelier.agent.*
+import atelier.context.CompactionConfig
 import atelier.provider.*
 import atelier.tool.McpServerConfig
 import tomlcj.*
@@ -157,6 +158,76 @@ public class TomlServer <: Serializable<TomlServer> {
     }
 }
 
+public class TomlCompaction <: Serializable<TomlCompaction> {
+    public var enabled: Option<Bool> = None
+    public var reserveTokens: Option<Int64> = None
+    public var keepRecentTokens: Option<Int64> = None
+    public var promptTemplate: Option<String> = None
+    public var outputSchema: DataModel = DataModelNull()
+    public var summaryModel: Option<String> = None
+    public init() {}
+
+    public func serialize(): DataModel {
+        let sb = DataModelStruct()
+        match (this.enabled) {
+            case Some(v) => sb.add(field<Bool>("enabled", v))
+            case None => ()
+        }
+        match (this.reserveTokens) {
+            case Some(v) => sb.add(field<Int64>("reserveTokens", v))
+            case None => ()
+        }
+        match (this.keepRecentTokens) {
+            case Some(v) => sb.add(field<Int64>("keepRecentTokens", v))
+            case None => ()
+        }
+        match (this.promptTemplate) {
+            case Some(v) => sb.add(field<String>("promptTemplate", v))
+            case None => ()
+        }
+        match (this.outputSchema) {
+            case _: DataModelNull => ()
+            case dm => sb.add(Field("outputSchema", dm))
+        }
+        match (this.summaryModel) {
+            case Some(v) => sb.add(field<String>("summaryModel", v))
+            case None => ()
+        }
+        sb
+    }
+
+    public static func deserialize(dm: DataModel): TomlCompaction {
+        let dms = match (dm) { case s: DataModelStruct => s; case _ => return TomlCompaction() }
+        let r = TomlCompaction()
+        match (dms.get("enabled")) {
+            case b: DataModelBool => r.enabled = Some(b.getValue())
+            case _ => ()
+        }
+        match (dms.get("reserveTokens")) {
+            case i: DataModelInt => r.reserveTokens = Some(i.getValue())
+            case _ => ()
+        }
+        match (dms.get("keepRecentTokens")) {
+            case i: DataModelInt => r.keepRecentTokens = Some(i.getValue())
+            case _ => ()
+        }
+        match (dms.get("promptTemplate")) {
+            case s: DataModelString => r.promptTemplate = Some(s.getValue())
+            case _ => ()
+        }
+        match (dms.get("outputSchema")) {
+            case dm: DataModelStruct => r.outputSchema = dm
+            case dm: DataModelSeq => r.outputSchema = dm
+            case _ => ()
+        }
+        match (dms.get("summaryModel")) {
+            case s: DataModelString => r.summaryModel = Some(s.getValue())
+            case _ => ()
+        }
+        r
+    }
+}
+
 public class TomlAgent <: Serializable<TomlAgent> {
     public var name: String = ""
     public var model: String = ""
@@ -166,17 +237,23 @@ public class TomlAgent <: Serializable<TomlAgent> {
     public var tools: ArrayList<String> = ArrayList()
     public var skills: ArrayList<String> = ArrayList()
     public var mcpCooldownTurns: Int64 = 0
+    public var compaction: Option<TomlCompaction> = None
     public init() {}
 
     public func serialize(): DataModel {
-        DataModelStruct()
-            .add(field<String>("name", name))
-            .add(field<String>("model", model))
-            .add(field<String>("systemPrompt", systemPrompt))
-            .add(field<String>("provider", provider))
-            .add(field<ArrayList<String>>("tools", tools))
-            .add(field<ArrayList<String>>("skills", skills))
-            .add(field<Int64>("mcpCooldownTurns", mcpCooldownTurns))
+        let sb = DataModelStruct()
+        sb.add(field<String>("name", name))
+        sb.add(field<String>("model", model))
+        sb.add(field<String>("systemPrompt", systemPrompt))
+        sb.add(field<String>("provider", provider))
+        sb.add(field<ArrayList<String>>("tools", tools))
+        sb.add(field<ArrayList<String>>("skills", skills))
+        sb.add(field<Int64>("mcpCooldownTurns", mcpCooldownTurns))
+        match (this.compaction) {
+            case Some(c) => sb.add(Field("compaction", c.serialize()))
+            case None => ()
+        }
+        sb
     }
 
     public static func deserialize(dm: DataModel): TomlAgent {
@@ -202,6 +279,10 @@ public class TomlAgent <: Serializable<TomlAgent> {
             case _ => ()
         }
         r.mcpCooldownTurns = match (dms.get("mcpCooldownTurns")) { case i: DataModelInt => i.getValue(); case _ => Int64(0) }
+        match (dms.get("compaction")) {
+            case s: DataModelStruct => r.compaction = Some(TomlCompaction.deserialize(s))
+            case _ => ()
+        }
         r
     }
 }
@@ -345,6 +426,28 @@ func getEnv(key: String, def: String): String {
 }
 
 public func agentConfigFrom(a: TomlAgent): AgentConfig {
+    let compactionCfg: Option<CompactionConfig> = match (a.compaction) {
+        case Some(tc) =>
+            let cc = CompactionConfig()
+            var enabled = cc.enabled
+            var reserve = cc.reserveTokens
+            var keepRecent = cc.keepRecentTokens
+            var template = cc.promptTemplate
+            var schema = cc.outputSchema
+            var summaryModel = cc.summaryModel
+            match (tc.enabled) { case Some(v) => enabled = v; case None => () }
+            match (tc.reserveTokens) { case Some(v) => reserve = v; case None => () }
+            match (tc.keepRecentTokens) { case Some(v) => keepRecent = v; case None => () }
+            match (tc.promptTemplate) { case Some(v) => template = v; case None => () }
+            match (tc.summaryModel) { case Some(v) => summaryModel = Some(v); case None => () }
+            match (tc.outputSchema) {
+                case dm: DataModelStruct => schema = Some(JsonValue.fromDataModel(dm))
+                case dm: DataModelSeq => schema = Some(JsonValue.fromDataModel(dm))
+                case _ => ()
+            }
+            Some(CompactionConfig(enabled, reserve, keepRecent, template, schema, summaryModel))
+        case None => None
+    }
     AgentConfig(
         a.name,
         if (a.description == "") { None } else { Some(a.description) },
@@ -353,7 +456,7 @@ public func agentConfigFrom(a: TomlAgent): AgentConfig {
         if (a.provider == "") { None } else { Some(a.provider) },
         a.tools, a.skills, a.mcpCooldownTurns,
         UInt32(20), Float32(0.7), UInt32(4096), None,
-        true, UInt32(16384), UInt32(20000), None, UInt32(50), UInt32(30), UInt32(0),
+        true, UInt32(16384), UInt32(20000), compactionCfg, UInt32(50), UInt32(30), UInt32(0),
         ArrayList<String>(), None, 0, 0)
 }
 

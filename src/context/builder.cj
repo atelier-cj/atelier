@@ -124,6 +124,30 @@ public class ContextBuilder {
         }
         result
     }
+
+    // 历史 ArchiveMessage 范围跳过：归档声明范围内的消息不进入 LLM 上下文
+    // （ArchiveMessage 自身保留作为摘要，幂等：重复调用结果一致）
+    public func applyArchiveMarks(messages: ArrayList<Message>): ArrayList<Message> {
+        let ranges = ArrayList<(Int64, Int64)>()
+        for (m in messages) {
+            match (m) {
+                case am: ArchiveMessage => ranges.add((am.startIndex, am.endIndex))
+                case _ => ()
+            }
+        }
+        if (ranges.size == 0) { return messages }
+        let result = ArrayList<Message>()
+        var i: Int64 = 0
+        while (i < messages.size) {
+            var skipped = false
+            for ((s, e) in ranges) {
+                if (i >= s && i <= e) { skipped = true; break }
+            }
+            if (!skipped) { result.add(messages[i]) }
+            i++
+        }
+        result
+    }
 }
 
 func extractIndex(args: JsonValue, key: String): Option<Int64> {

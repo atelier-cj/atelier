@@ -2,6 +2,7 @@ package atelier.agent
 
 import jsonvalue.*
 import std.collection.*
+import std.core.Duration
 import atelier.message.*
 import atelier.provider.*
 import atelier.tool.*
@@ -329,4 +330,40 @@ func runtime_compactionNoTrigger() {
         case _: CompactionMessage => @Fail("no compaction expected")
         case _ => ()
     }
+}
+
+// 捕获流中第一个 AgentStartEvent 的 sessionId
+func firstStartSessionId(stream: EventStream<AgentEvent, ArrayList<Message>>): String {
+    let ev = stream.receive(5 * Duration.second)
+    match (ev) {
+        case Some(e: AgentStartEvent) => e.sessionId
+        case _ => ""
+    }
+}
+
+// chatWithSessionId 显式 sessionId → AgentStartEvent 必须携带该 id（不再硬编码 sess_0）
+@Test
+func runtime_chatWithSessionId_usesProvidedId() {
+    let runtime = makeCompactionRuntime(
+        compactionRuntimeConfig(false, UInt32(16384), UInt32(20000), None), StubProvider())
+    let msgs = ArrayList<Message>()
+    msgs.add(UserMessage(ContentList.ofText("hi"), 0))
+    let stream = runtime.chatWithSessionId("sess_custom_1", msgs, SessionEnvironment())
+    @Expect(firstStartSessionId(stream), "sess_custom_1")
+    stream.result()
+}
+
+// chat() 默认生成 ulid 会话 id（sess_ + ulid），不再使用硬编码 sess_0
+@Test
+func runtime_chat_defaultSessionIdUlid() {
+    let runtime = makeCompactionRuntime(
+        compactionRuntimeConfig(false, UInt32(16384), UInt32(20000), None), StubProvider())
+    let msgs = ArrayList<Message>()
+    msgs.add(UserMessage(ContentList.ofText("hi"), 0))
+    let stream = runtime.chat(msgs)
+    let id = firstStartSessionId(stream)
+    @Expect(id.startsWith("sess_"), true)
+    @Expect(id != "sess_0", true)
+    @Expect(id.size > "sess_".size, true)
+    stream.result()
 }

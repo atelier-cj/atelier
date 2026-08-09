@@ -205,3 +205,41 @@ func useSkills_missingParamError() {
     let r = tool.execute(ToolContext("."), JsonValue.Map(HashMap()))
     @Expect(r.isError, true)
 }
+
+@Test
+func useSkills_listsResources() {
+    let dir = createTempDir()
+    Directory.create(dir + "/references", recursive: true)
+    Directory.create(dir + "/scripts", recursive: true)
+    File.writeTo(Path(dir + "/references/REFERENCE.md"), "参考内容".toArray())
+    File.writeTo(Path(dir + "/scripts/run.sh"), "echo hi".toArray())
+    File.writeTo(Path(dir + "/SKILL.md"), "---\nname: demo\n---\n指令".toArray())
+    try {
+        let reg = SkillRegistry()
+        reg.register(Skill("demo", "desc", None, None, HashMap(), ArrayList(),
+            "指令", dir))
+        let tool = UseSkillsTool(reg)
+        let args = HashMap<String, JsonValue>()
+        args.add("name", JsonValue.String("demo"))
+        let r = tool.execute(ToolContext("."), JsonValue.Map(args))
+        @Expect(r.isError, false)
+        @Expect(r.text.contains("REFERENCE.md"), true)
+        @Expect(r.text.contains("run.sh"), true)
+        @Expect(r.text.contains("SKILL.md"), false)
+    } finally {
+        removeDir(dir)
+    }
+}
+
+@Test
+func useSkills_noResourcesNoSection() {
+    let reg = SkillRegistry()
+    reg.register(Skill("plain", "desc", None, None, HashMap(), ArrayList(),
+        "指令", ""))
+    let tool = UseSkillsTool(reg)
+    let args = HashMap<String, JsonValue>()
+    args.add("name", JsonValue.String("plain"))
+    let r = tool.execute(ToolContext("."), JsonValue.Map(args))
+    @Expect(r.isError, false)
+    @Expect(r.text.contains("资源文件"), false)
+}
