@@ -4,6 +4,7 @@ import atelier.skill.*
 import atelier.tool.*
 import jsonvalue.*
 import std.collection.*
+import std.fs.*
 
 public class UseSkillsTool <: Tool {
     private let skillRegistry: SkillRegistry
@@ -32,7 +33,14 @@ public class UseSkillsTool <: Tool {
         }
         match (this.skillRegistry.get(name)) {
             case Some(skill) =>
-                let text = "# Skill: " + skill.name + "\n\n" + skill.instructions
+                let resources = listSkillResources(skill.dirPath)
+                var text = "# Skill: " + skill.name + "\n\n" + skill.instructions
+                if (resources.size > 0) {
+                    text = text + "\n\n## 资源文件\n（可用 read_file 按需读取）\n"
+                    for (r in resources) {
+                        text = text + "- " + r + "\n"
+                    }
+                }
                 ToolResult(text, None, false, false)
             case None =>
                 ToolResult("未知 Skill: " + name, None, true, false)
@@ -42,4 +50,25 @@ public class UseSkillsTool <: Tool {
     public func executionMode(): ToolExecutionMode {
         ToolExecutionMode.Parallel
     }
+}
+
+// 列出 skill 目录下第一层子目录（references/scripts/assets 等）中的资源文件相对路径
+func listSkillResources(skillDir: String): ArrayList<String> {
+    let result = ArrayList<String>()
+    if (skillDir == "") { return result }
+    let root = Path(skillDir)
+    if (!exists(root)) { return result }
+    let entries = try { Directory.readFrom(root) } catch (_) { return result }
+    for (info in entries) {
+        if (info.isDirectory()) {
+            let sub = Path(skillDir + "/" + info.name)
+            let files = try { Directory.readFrom(sub) } catch (_) { continue }
+            for (f in files) {
+                if (!f.isDirectory()) {
+                    result.add(info.name + "/" + f.name)
+                }
+            }
+        }
+    }
+    result
 }
