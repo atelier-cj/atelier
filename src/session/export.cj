@@ -9,11 +9,11 @@ public func exportToJsonl(msgs: ArrayList<Message>): String {
     for (m in msgs) {
         match (m) {
             case um: UserMessage =>
-                sb.append("{\"role\":\"user\",\"content\":\"" + escapeHtml(textFrom(um.content)) + "\"}\n")
+                sb.append("{\"role\":\"user\",\"content\":\"" + escapeJson(textFrom(um.content)) + "\"}\n")
             case am: AssistantMessage =>
-                sb.append("{\"role\":\"assistant\",\"content\":\"" + escapeHtml(textFrom(am.content)) + "\"}\n")
+                sb.append("{\"role\":\"assistant\",\"content\":\"" + escapeJson(textFrom(am.content)) + "\"}\n")
             case tm: ToolResultMessage =>
-                sb.append("{\"role\":\"tool\",\"content\":\"" + escapeHtml(textFrom(tm.content)) + "\"}\n")
+                sb.append("{\"role\":\"tool\",\"content\":\"" + escapeJson(textFrom(tm.content)) + "\"}\n")
             case _ => ()
         }
     }
@@ -53,5 +53,14 @@ func escapeHtml(s: String): String {
     r = r.replace("<", "&lt;")
     r = r.replace(">", "&gt;")
     r = r.replace("\"", "&quot;")
+    r
+}
+
+func escapeJson(s: String): String {
+    var r = s.replace("\\", "\\\\")
+    r = r.replace("\"", "\\\"")
+    r = r.replace("\n", "\\n")
+    r = r.replace("\r", "\\r")
+    r = r.replace("\t", "\\t")
     r
 }
