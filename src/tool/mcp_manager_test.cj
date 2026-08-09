@@ -56,18 +56,6 @@ func mcpManager_activationAndCooldown() {
 }
 
 @Test
-func mcpManager_markUsedKeepsActive() {
-    let m = McpManager()
-    m.registerServer(mcpCfg("github"))
-    m.activate("github")
-    var i: Int64 = 0
-    while (i < 19) { m.advanceTurn(); i++ }
-    m.markUsed("github")
-    m.advanceTurn()
-    @Expect(m.isActive("github", 20), true)
-}
-
-@Test
 func mcpManager_markUsedToolRefreshes() {
     let m = McpManager()
     m.registerServer(mcpCfg("github"))

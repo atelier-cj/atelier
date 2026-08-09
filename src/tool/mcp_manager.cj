@@ -86,15 +86,6 @@ public class McpManager {
         }
     }
 
-    public func getServer(name: String): Option<McpServerConfig> {
-        this.lock.lock()
-        try {
-            this.servers.get(name)
-        } finally {
-            this.lock.unlock()
-        }
-    }
-
     // ---- 激活/冷却状态机（进程级，不持久化） ----
 
     public func advanceTurn(): Unit {
@@ -119,15 +110,6 @@ public class McpManager {
     func doActivate(name: String): Unit {
         this.activeServers.add(name)
         this.lastUsed[name] = this.turnCounter
-    }
-
-    public func markUsed(name: String): Unit {
-        this.lock.lock()
-        try {
-            this.lastUsed[name] = this.turnCounter
-        } finally {
-            this.lock.unlock()
-        }
     }
 
     // 工具名 mcp_<server>_<tool> → 服务名（mcp_ 前缀后第一个 _ 之前；非 mcp_ 前缀返回空）

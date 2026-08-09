@@ -22,16 +22,16 @@ public class HookContext {
 }
 
 public interface Hook {
-    public func beforeRun(ctx: HookContext): Unit {}
-    public func afterRun(ctx: HookContext): Unit {}
-    public func beforeTurn(ctx: HookContext, request: ChatRequest): TurnDecision {
+    func beforeRun(ctx: HookContext): Unit {}
+    func afterRun(ctx: HookContext): Unit {}
+    func beforeTurn(ctx: HookContext, request: ChatRequest): TurnDecision {
         TurnDecision.Continue(request)
     }
-    public func afterTurn(ctx: HookContext): AfterTurnUpdate {
+    func afterTurn(ctx: HookContext): AfterTurnUpdate {
         AfterTurnUpdate.none()
     }
-    public func beforeTool(ctx: HookContext, call: ToolCallBlock): BeforeToolDecision {
+    func beforeTool(ctx: HookContext, call: ToolCallBlock): BeforeToolDecision {
         BeforeToolDecision.Allow
     }
-    public func afterTool(ctx: HookContext, call: ToolCallBlock, result: ToolResultMessage): Unit {}
+    func afterTool(ctx: HookContext, call: ToolCallBlock, result: ToolResultMessage): Unit {}
 }
