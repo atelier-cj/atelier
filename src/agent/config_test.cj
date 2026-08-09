@@ -230,6 +230,14 @@ func config_compactionRoundTrip() {
             @Expect(c.keepRecentTokens, 5000)
             @Expect(c.promptTemplate, "自定义模板")
             @Expect(c.summaryModel, Some("summary-model"))
+            match (c.outputSchema) {
+                case Some(JsonValue.Map(m)) =>
+                    match (m.get("required")) {
+                        case Some(JsonValue.Array(items)) => @Expect(items.size, 1)
+                        case _ => @Fail("expected required array")
+                    }
+                case _ => @Fail("expected outputSchema preserved")
+            }
         case None => @Fail("expected compaction config")
     }
 }
