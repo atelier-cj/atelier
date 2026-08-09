@@ -553,7 +553,16 @@ func summarizeText(msgs: ArrayList<Message>, limit: Int64): String {
             case _ => ""
         }
         if (t == "") { continue }
-        if (used + Int64(t.size) > limit * 4) { break }
+        if (used + Int64(t.size) > limit * 4) {
+            // 超限：截取该消息前缀到剩余额度，避免摘要子调用拿到空对话
+            let remaining = limit * 4 - used
+            if (remaining > 0) {
+                let cut = if (Int64(t.size) < remaining) { Int64(t.size) } else { remaining }
+                sb.append(t[0..cut])
+                sb.append("\n")
+            }
+            break
+        }
         sb.append(t)
         sb.append("\n")
         used += Int64(t.size)
