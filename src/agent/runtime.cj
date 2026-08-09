@@ -24,6 +24,7 @@ import std.core.sleep
 import std.env.getVariable
 import std.time.MonoTime
 import stdx.log.*
+import opencj::ulid.nextId
 
 public class AgentRuntime {
     private let config: AgentConfig
@@ -87,15 +88,25 @@ public class AgentRuntime {
     }
 
     public func chat(messages: ArrayList<Message>): EventStream<AgentEvent, ArrayList<Message>> {
-        this.chatWithEnv(messages, this.sessionEnv)
+        this.chatWithSessionId("sess_" + nextId(), messages, this.sessionEnv)
     }
 
+    // 库用户兼容签名：内部生成 ulid 会话 id
     public func chatWithEnv(messages: ArrayList<Message>, sessionEnv: SessionEnvironment): EventStream<AgentEvent, ArrayList<Message>> {
+        this.chatWithSessionId("sess_" + nextId(), messages, sessionEnv)
+    }
+
+    // 显式会话 id（如 REPL 的持久化 sessionId），供归档落库链路对齐
+    public func chatWithSessionId(sessionId: String, messages: ArrayList<Message>,
+        sessionEnv: SessionEnvironment): EventStream<AgentEvent, ArrayList<Message>> {
+        this.chatWithEnv(sessionId, messages, sessionEnv)
+    }
+
+    private func chatWithEnv(sessionId: String, messages: ArrayList<Message>, sessionEnv: SessionEnvironment): EventStream<AgentEvent, ArrayList<Message>> {
         let stream = EventStream<AgentEvent, ArrayList<Message>>()
         let se = sessionEnv
         let workDir = if (se.directory != "") { se.directory } else { "." }
         let ctx = ToolContext(workDir, this.askUser, se.context)
-        let sessionId = "sess_0"
         let ctxBuilder = ContextBuilder(this.skillRegistry, se)
 
         spawn {
@@ -105,6 +116,14 @@ public class AgentRuntime {
                 log.info("agent start: ${this.config.name}", Array<Attr>())
                 let hookState = HookState()
                 callHooks("beforeRun", 0, hookState)
+
+                // 记录会话 leaf（供归档落库 appendBranch 使用）
+                var leafId: Option<String> = try {
+                    let data = this.sessionStore.loadEntries(sessionId)
+                    if (data.entries.size > 0) {
+                        Some(data.entries[data.entries.size - 1].id)
+                    } else { None }
+                } catch (_) { None }
 
                 // Build system prompt + assemble initial messages (L2)
                 var currentMessages = ctxBuilder.initMessages(
@@ -119,7 +138,37 @@ public class AgentRuntime {
                     turnCount++
                     this.mcpManager.advanceTurn()
                     log.info("turn ${turnCount} start", Array<Attr>())
+                    let beforeArch = currentMessages
                     currentMessages = ctxBuilder.applyArchives(currentMessages)
+                    currentMessages = ctxBuilder.applyArchiveMarks(currentMessages)
+                    // 归档产生新 ArchiveMessage → 追加落库（L1 只增不改）
+                    if (currentMessages.size != beforeArch.size) {
+                        let archived = ArrayList<Message>()
+                        for (m in currentMessages) {
+                            match (m) {
+                                case am: ArchiveMessage =>
+                                    var existed = false
+                                    for (b in beforeArch) {
+                                        match (b) {
+                                            case bm: ArchiveMessage where (bm.startIndex == am.startIndex && bm.endIndex == am.endIndex && bm.summary == am.summary) =>
+                                                existed = true
+                                            case _ => ()
+                                        }
+                                    }
+                                    if (!existed) { archived.add(m) }
+                                case _ => ()
+                            }
+                        }
+                        if (archived.size > 0) {
+                            match (leafId) {
+                                case Some(leaf) =>
+                                    try {
+                                        leafId = Some(this.sessionStore.appendBranch(sessionId, leaf, archived))
+                                    } catch (_) { () }
+                                case None => ()
+                            }
+                        }
+                    }
 
                     stream.emit(MessageStartEvent(currentMessages[0]))
                     let actualModel = this.pickModel(this.config.model)

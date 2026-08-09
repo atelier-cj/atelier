@@ -418,6 +418,31 @@ func applyArchives_idempotent() {
 }
 
 @Test
+func applyArchiveMarks_skipsRange() {
+    let b = ContextBuilder(SkillRegistry(), SessionEnvironment())
+    let msgs = ArrayList<Message>()
+    msgs.add(plainMsg("m0"))
+    msgs.add(plainMsg("m1"))
+    msgs.add(plainMsg("m2"))
+    msgs.add(ArchiveMessage(1, 2, "摘要", 0))
+    let out = b.applyArchiveMarks(msgs)
+    @Expect(out.size, 2)
+    match (out[1]) {
+        case am: ArchiveMessage => @Expect(am.summary, "摘要")
+        case _ => @Fail("expected ArchiveMessage")
+    }
+}
+
+@Test
+func applyArchiveMarks_noMarkUnchanged() {
+    let b = ContextBuilder(SkillRegistry(), SessionEnvironment())
+    let msgs = ArrayList<Message>()
+    msgs.add(plainMsg("m0"))
+    msgs.add(plainMsg("m1"))
+    @Expect(b.applyArchiveMarks(msgs).size, 2)
+}
+
+@Test
 func applyArchives_nonArchiveToolPairIgnored() {
     let b = ContextBuilder(SkillRegistry(), SessionEnvironment())
     let msgs = ArrayList<Message>()
