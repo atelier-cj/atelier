@@ -219,12 +219,12 @@ public class SystemPromptBuilder {
 [Session Context]                                ✅ [动态] SessionEnvironment.context
 workDir = /home/ystyle/Projects/atelier
 
-[可用 MCP 服务]                                  🚧 [动态] 服务目录（第五章）
+[可用 MCP 服务]                                  ✅ [动态] 服务目录（第五章）
 调用 load_mcp_toolset(server_id) 按需加载完整工具集。
 - github: GitHub 仓库管理（12 个工具）
 - slack: 消息发送与查询（8 个工具）
 
-[可用 Skills]                                    🚧 [动态] Skill 目录（第七章）
+[可用 Skills]                                    ✅ [动态] Skill 目录（第七章）
 调用 use_skills(name) 激活对应的技能包。
 - code-review: 代码审查技能，帮助审查 Cangjie 代码质量
 - data-cleaning: 清洗和标准化 CSV 数据
@@ -516,7 +516,7 @@ public struct Skill {
 | `context/system_prompt_builder.cj` | ✅ | 系统提示分段构建（4 段：systemPrompt/Skills/AGENTS.md/SessionContext） | `build` |
 | `tool/archive_history.cj` | ✅ | AI 自主归档（校验 + 确认；run 内应用） | `execute(start, end, summary)` |
 | `tool/load_mcp_toolset.cj` | ✅ | MCP 按服务激活（纯状态翻转，无网络） | `execute(server_id)` |
-| `tool/builtin/use_skills.cj` | 🚧 | Skill 按需激活（渐进披露第 2 层） | `execute(name)` |
+| `tool/builtin/use_skills.cj` | ✅ | Skill 按需加载（指令 + 资源清单） | `execute(name)` |
 | `tool/builtin/use_skills.cj` | ✅ | Skill 按需加载（工具结果即指令） | `execute(name)` |
 
 ### 9.2 演进路线（按依赖排序）
