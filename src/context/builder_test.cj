@@ -457,3 +457,66 @@ func applyArchives_nonArchiveToolPairIgnored() {
     let out = b.applyArchives(msgs)
     @Expect(out.size, 3)
 }
+
+// 历史归档标记语义：标记在末尾、范围指向前面的消息 → 范围内消息被跳过，标记自身保留
+@Test
+func applyArchiveMarks_beforeArchives_order() {
+    let b = ContextBuilder(SkillRegistry(), SessionEnvironment())
+    let msgs = ArrayList<Message>()
+    msgs.add(plainMsg("m0"))
+    msgs.add(plainMsg("m1"))
+    msgs.add(ArchiveMessage(0, 0, "旧摘要", 0))  // 历史标记在末尾，范围 [0,0]
+    let out = b.applyArchiveMarks(msgs)
+    @Expect(out.size, 2)
+    match (out[0]) {
+        case um: UserMessage =>
+            match (um.content.blocks()[0]) {
+                case ContentBlock.TextBlock(t) => @Expect(t, "m1")
+                case _ => @Expect(false, true)
+            }
+        case _ => @Fail("expected m1 at index 0")
+    }
+}
+
+// 完整链路顺序（Issue 2）：先 applyArchiveMarks 处理历史标记，再 applyArchives 处理本轮调用对
+// 反向顺序会吞掉历史 Arch 标记，且新 Arch 的范围会跳过自身（摘要丢失）
+@Test
+func applyArchives_afterMarks_fullChain() {
+    let b = ContextBuilder(SkillRegistry(), SessionEnvironment())
+    let msgs = ArrayList<Message>()
+    msgs.add(plainMsg("m0"))
+    msgs.add(plainMsg("m1"))
+    msgs.add(ArchiveMessage(0, 0, "旧摘要", 0))  // 历史标记在末尾，范围 [0,0]
+    archivedPair(msgs, 1, 1, "本轮摘要")         // 本轮归档调用对 [m1]
+    // 正向顺序：标记阶段跳过 m0（历史范围），归档阶段把调用对替换为 ArchiveMessage
+    let marked = b.applyArchiveMarks(msgs)
+    @Expect(marked.size, 4)
+    let out = b.applyArchives(marked)
+    @Expect(out.size, 2)
+    match (out[0]) {
+        case um: UserMessage =>
+            match (um.content.blocks()[0]) {
+                case ContentBlock.TextBlock(t) => @Expect(t, "m1")
+                case _ => @Expect(false, true)
+            }
+        case _ => @Fail("expected m1 at index 0")
+    }
+    match (out[1]) {
+        case am: ArchiveMessage =>
+            @Expect(am.startIndex, 1)
+            @Expect(am.endIndex, 1)
+            @Expect(am.summary, "本轮摘要")
+        case _ => @Fail("expected ArchiveMessage at index 1")
+    }
+    // 反向顺序对照：先归档会吞掉历史 Arch(0,0) 与新 Arch 标记自身，只剩 m0
+    let reversed = b.applyArchiveMarks(b.applyArchives(msgs))
+    @Expect(reversed.size, 1)
+    match (reversed[0]) {
+        case um: UserMessage =>
+            match (um.content.blocks()[0]) {
+                case ContentBlock.TextBlock(t) => @Expect(t, "m0")
+                case _ => @Expect(false, true)
+            }
+        case _ => @Fail("expected m0 at index 0")
+    }
+}

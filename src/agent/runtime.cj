@@ -96,7 +96,7 @@ public class AgentRuntime {
         this.chatWithSessionId("sess_" + nextId(), messages, sessionEnv)
     }
 
-    // 显式会话 id（如 REPL 的持久化 sessionId），供归档落库链路对齐
+    // 显式会话 id（如 REPL 的持久化 sessionId），runtime 不落库，由调用方统一持久化
     public func chatWithSessionId(sessionId: String, messages: ArrayList<Message>,
         sessionEnv: SessionEnvironment): EventStream<AgentEvent, ArrayList<Message>> {
         this.chatWithEnv(sessionId, messages, sessionEnv)
@@ -117,14 +117,6 @@ public class AgentRuntime {
                 let hookState = HookState()
                 callHooks("beforeRun", 0, hookState)
 
-                // 记录会话 leaf（供归档落库 appendBranch 使用）
-                var leafId: Option<String> = try {
-                    let data = this.sessionStore.loadEntries(sessionId)
-                    if (data.entries.size > 0) {
-                        Some(data.entries[data.entries.size - 1].id)
-                    } else { None }
-                } catch (_) { None }
-
                 // Build system prompt + assemble initial messages (L2)
                 var currentMessages = ctxBuilder.initMessages(
                     this.config.systemPrompt, this.config.skills, messages)
@@ -138,37 +130,10 @@ public class AgentRuntime {
                     turnCount++
                     this.mcpManager.advanceTurn()
                     log.info("turn ${turnCount} start", Array<Attr>())
-                    let beforeArch = currentMessages
-                    currentMessages = ctxBuilder.applyArchives(currentMessages)
+                    // 顺序：历史归档标记在前（处理 store 加载的历史 ArchiveMessage），
+                    // 本轮调用对在后（产生的 ArchiveMessage 位于 index==startIndex，不能被标记跳过）
                     currentMessages = ctxBuilder.applyArchiveMarks(currentMessages)
-                    // 归档产生新 ArchiveMessage → 追加落库（L1 只增不改）
-                    if (currentMessages.size != beforeArch.size) {
-                        let archived = ArrayList<Message>()
-                        for (m in currentMessages) {
-                            match (m) {
-                                case am: ArchiveMessage =>
-                                    var existed = false
-                                    for (b in beforeArch) {
-                                        match (b) {
-                                            case bm: ArchiveMessage where (bm.startIndex == am.startIndex && bm.endIndex == am.endIndex && bm.summary == am.summary) =>
-                                                existed = true
-                                            case _ => ()
-                                        }
-                                    }
-                                    if (!existed) { archived.add(m) }
-                                case _ => ()
-                            }
-                        }
-                        if (archived.size > 0) {
-                            match (leafId) {
-                                case Some(leaf) =>
-                                    try {
-                                        leafId = Some(this.sessionStore.appendBranch(sessionId, leaf, archived))
-                                    } catch (_) { () }
-                                case None => ()
-                            }
-                        }
-                    }
+                    currentMessages = ctxBuilder.applyArchives(currentMessages)
 
                     stream.emit(MessageStartEvent(currentMessages[0]))
                     let actualModel = this.pickModel(this.config.model)
