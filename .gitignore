@@ -3,3 +3,6 @@ target
 .cache
 *.jsonl
 .arts/
+
+# Codewhale 工具工作目录
+.codewhale/
