@@ -5,16 +5,19 @@ cjc-version = "1.1.0"
 output-type = "static"
 compile-option = "-Woff unused"
 link-option = "-lstdx.crypto.digest"
+license = ["MIT"]
+authors = ["ystyle"]
+repository = "https://atomgit.com/ystyle/atelier"
 
 [dependencies]
-"mcp" = "2.3.0"
+"mcp" = "2.3.4"
 "sonyflake" = "1.0.9"
 "jsonvalue" = "1.1.0"
 "mustache" = "1.2.1"
-"ystyle::jsonrpc" = "0.4.1"
-"bstorm" = "1.4.0"
+"ystyle::jsonrpc" = "0.7.1"
+"bstorm" = "1.4.4"
 "tomlcj" = "1.0.0"
-"opencj::ulid" = "0.1.1"
+"opencj::ulid" = "0.1.2"
 
 [target.x86_64-unknown-linux-gnu]
 link-option = "-luring"
@@ -61,6 +64,3 @@ compile-option = "--static -Woff unused"
 
 [profile.test]
 filter = "-ProviderIntegrationTest.*"
-
-[replace]
-jsonvalue = "1.1.0"
