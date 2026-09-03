@@ -15,7 +15,7 @@ repository = "https://atomgit.com/ystyle/atelier"
 "jsonvalue" = "1.1.0"
 "mustache" = "1.2.1"
 "ystyle::jsonrpc" = "0.7.1"
-"bstorm" = "1.4.4"
+"bstorm" = "1.4.7"
 "tomlcj" = "1.0.0"
 "opencj::ulid" = "0.1.2"
 "llm_api" = { path = "../llm_api" }
