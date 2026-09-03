@@ -2,14 +2,14 @@ version = 0
 
 [requires]
   "ystyle::crc" = {version = "1.0.0"}
-  mcp = {version = "2.3.4"}
-  sonyflake = {version = "1.0.9"}
-  jsonvalue = {version = "1.1.0"}
-  mustache = {version = "1.2.1"}
+  "ystyle::jsonrpc" = {version = "0.7.4"}
   bstorm = {version = "1.4.7"}
-  "ystyle::jsonrpc" = {version = "0.7.1"}
+  tomlcj = {version = "1.0.0"}
   "opencj::ulid" = {version = "0.1.2"}
   gjson = {version = "1.2.1"}
+  mcp = {version = "2.3.6"}
   badgercj = {version = "1.6.16"}
+  sonyflake = {version = "1.0.9"}
+  jsonvalue = {version = "1.1.0"}
   snappy = {version = "1.0.1"}
-  tomlcj = {version = "1.0.0"}
+  mustache = {version = "1.2.1"}
