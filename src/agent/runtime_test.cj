@@ -3,6 +3,8 @@ package atelier.agent
 import jsonvalue.*
 import std.collection.*
 import std.core.Duration
+import std.core.sleep
+import std.time.MonoTime
 import atelier.message.*
 import atelier.provider.*
 import atelier.tool.*
@@ -366,4 +368,178 @@ func runtime_chat_defaultSessionIdUlid() {
     @Expect(id != "sess_0", true)
     @Expect(id.size > "sess_".size, true)
     stream.result()
+}
+
+// ========== 会话级取消（阶段 1：供 ACP session/cancel 使用） ==========
+
+// 慢流式 Provider：后台每 100ms 发一个文本 delta，共 40 个（全程约 4s），
+// 用于验证取消后 runtime 立即收敛、不等 provider 自然结束
+class SlowStreamingProvider <: Provider {
+    public var chatStreamCalls: Int64 = 0
+    public func name(): String { "stub-slow-stream" }
+
+    public func chat(req: ChatRequest): ChatResponse {
+        ChatResponse(AssistantMessage(ContentList.ofText("ok"), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0))
+    }
+
+    public func chatStreaming(req: ChatRequest): EventStream<ChatDelta, AssistantMessage> {
+        this.chatStreamCalls++
+        let stream = EventStream<ChatDelta, AssistantMessage>()
+        spawn {
+            var i: Int64 = 0
+            while (i < 40) {
+                sleep(Duration.millisecond * 100)
+                if (!stream.emit(ChatDelta("x", "", None))) { break }
+                i++
+            }
+            let msg = AssistantMessage(ContentList.ofText("done"), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0)
+            stream.setResult(msg)
+        }
+        stream
+    }
+}
+
+// 首回合返回 ToolUse（调 slow_tool），后续回合返回 EndTurn；记录流式调用次数
+class ToolTurnProvider <: Provider {
+    public var chatStreamCalls: Int64 = 0
+    public func name(): String { "stub-tool-turn" }
+
+    public func chat(req: ChatRequest): ChatResponse {
+        ChatResponse(AssistantMessage(ContentList.ofText("ok"), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0))
+    }
+
+    public func chatStreaming(req: ChatRequest): EventStream<ChatDelta, AssistantMessage> {
+        this.chatStreamCalls++
+        let stream = EventStream<ChatDelta, AssistantMessage>()
+        spawn {
+            sleep(Duration.millisecond * 20)
+            if (this.chatStreamCalls == Int64(1)) {
+                // 首回合：请求工具调用
+                let args = JsonValue.Map(HashMap<String, JsonValue>())
+                let blocks = ArrayList<ContentBlock>()
+                blocks.add(ContentBlock.ToolCall(ToolCallBlock("call_1", "slow_tool", args)))
+                let msg = AssistantMessage(ContentList(blocks), "", "", StopReason.ToolUse, TokenUsage(0, 0), 0)
+                stream.setResult(msg)
+            } else {
+                let msg = AssistantMessage(ContentList.ofText("final"), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0)
+                stream.setResult(msg)
+            }
+        }
+        stream
+    }
+}
+
+// 慢执行工具：Parallel 模式直接放行（不过信任闸门），delayMs 模拟耗时给取消留窗口
+class SlowTool <: Tool {
+    private let delayMs: Int64
+    public init(delayMs: Int64) { this.delayMs = delayMs }
+    public func name(): String { "slow_tool" }
+    public func description(): String { "slow tool for cancel tests" }
+    public func schema(): JsonValue { JsonValue.Map(HashMap<String, JsonValue>()) }
+    public func execute(ctx: ToolContext, args: JsonValue): ToolResult {
+        sleep(Duration.millisecond * this.delayMs)
+        ToolResult("slow done", None, false, false)
+    }
+    public func executionMode(): ToolExecutionMode { ToolExecutionMode.Parallel }
+}
+
+func makeCancelRuntime(provider: Provider, slowMs: Int64): AgentRuntime {
+    let toolReg = ToolRegistry()
+    toolReg.register(SlowTool(slowMs))
+    let trustMgr = TrustManager()
+    let skillReg = SkillRegistry()
+    let agentReg = AgentRegistry()
+    let providerReg = ProviderRegistry()
+    providerReg.register("default", provider)
+    let store = MemorySessionStore()
+    AgentRuntime(compactionRuntimeConfig(false, UInt32(16384), UInt32(20000), None), provider,
+        toolReg, store, trustMgr, skillReg, agentReg, providerReg, McpManager())
+}
+
+// 轮询等待 AgentEndEvent（最多 attempts 次 × pollMs），返回是否在限时内结束
+func waitAgentEnd(stream: EventStream<AgentEvent, ArrayList<Message>>, attempts: Int64, pollMs: Int64): Bool {
+    var i: Int64 = 0
+    while (i < attempts) {
+        i++
+        match (stream.receive(Duration.millisecond * pollMs)) {
+            case Some(_: AgentEndEvent) => return true
+            case Some(_) => ()
+            case None => ()
+        }
+    }
+    false
+}
+
+// 流式阶段取消：慢 provider 全程约 4s，取消后 runtime 应在 2s 内收敛（不等待 provider 自然结束）
+@Test
+func runtime_cancelSession_stopsStreamingPromptly() {
+    let provider = SlowStreamingProvider()
+    let runtime = makeCancelRuntime(provider, 0)
+    let msgs = ArrayList<Message>()
+    msgs.add(UserMessage(ContentList.ofText("hi"), 0))
+    let stream = runtime.chat(msgs)
+    var sid = ""
+    match (stream.receive(Duration.millisecond * 1000)) {
+        case Some(e: AgentStartEvent) => sid = e.sessionId
+        case Some(_) => @Fail("expected AgentStartEvent first")
+        case None => @Fail("timeout waiting AgentStartEvent")
+    }
+    var gotDelta = false
+    var i: Int64 = 0
+    while (i < 50 && !gotDelta) {
+        i++
+        match (stream.receive(Duration.millisecond * 100)) {
+            case Some(_: MessageUpdateEvent) => gotDelta = true
+            case Some(_) => ()
+            case None => ()
+        }
+    }
+    @Expect(gotDelta, true)
+    let t0 = MonoTime.now()
+    runtime.cancelSession(sid)
+    let ended = waitAgentEnd(stream, 50, 100)
+    let elapsed = MonoTime.now() - t0
+    @Expect(ended, true)
+    @Expect(elapsed < Duration.millisecond * 2000, true)
+    @Expect(provider.chatStreamCalls, Int64(1))
+}
+
+// 工具批执行期间取消：工具完成后不得再发起第二轮 provider 请求
+@Test
+func runtime_cancelSession_stopsBeforeSecondProviderCall() {
+    let provider = ToolTurnProvider()
+    let runtime = makeCancelRuntime(provider, 500)
+    let msgs = ArrayList<Message>()
+    msgs.add(UserMessage(ContentList.ofText("use tool"), 0))
+    let stream = runtime.chat(msgs)
+    var sid = ""
+    var gotMessageEnd = false
+    var i: Int64 = 0
+    while (i < 60 && (!gotMessageEnd || sid == "")) {
+        i++
+        match (stream.receive(Duration.millisecond * 100)) {
+            case Some(e: AgentStartEvent) => sid = e.sessionId
+            case Some(_: MessageEndEvent) => gotMessageEnd = true
+            case Some(_) => ()
+            case None => ()
+        }
+    }
+    @Expect(gotMessageEnd, true)
+    @Expect(sid != "", true)
+    runtime.cancelSession(sid)
+    let ended = waitAgentEnd(stream, 50, 100)
+    @Expect(ended, true)
+    @Expect(provider.chatStreamCalls, Int64(1))
+}
+
+// 未知会话 / 已结束会话的 cancel 是 no-op，不影响其它运行
+@Test
+func runtime_cancelSession_unknownOrFinishedNoop() {
+    let runtime = makeCancelRuntime(StubProvider(), 0)
+    runtime.cancelSession("sess_unknown")
+    let msgs = ArrayList<Message>()
+    msgs.add(UserMessage(ContentList.ofText("hi"), 0))
+    let result = runtime.chat(msgs).result()
+    @Expect(result.size, 2)
+    runtime.cancelSession("sess_unknown")
 }

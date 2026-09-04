@@ -22,6 +22,7 @@ import std.collection.*
 import std.core.Duration
 import std.core.sleep
 import std.env.getVariable
+import std.sync.*
 import std.time.MonoTime
 import stdx.log.*
 import opencj::ulid.nextId
@@ -41,6 +42,10 @@ public class AgentRuntime {
     private let modelRegistry: ModelContextRegistry
     private let sessionEnv: SessionEnvironment
     private let mcpManager: McpManager
+
+    // 会话级取消：sessionId → 取消标志（chat 开始注册，收尾统一清理）
+    private let cancels = HashMap<String, AtomicBool>()
+    private let cancelLock = Mutex()
 
     // 13 参：最全签名（hooks + askUser + sessionEnv + mcpManager），其余构造统一委托至此
     public init(config: AgentConfig, provider: Provider,
@@ -87,6 +92,18 @@ public class AgentRuntime {
             ArrayList<Hook>(), { q => "" }, mcpManager)
     }
 
+    // 取消进行中的会话回合（幂等：未知/已结束会话为 no-op）。
+    // 取消后 runtime 在当前检查点尽快收敛并按正常路径收尾（AgentEndEvent + result），
+    // 不再发起新的 provider 请求与工具批次；正在执行的工具不强制中断。
+    public func cancelSession(sessionId: String): Unit {
+        synchronized(this.cancelLock) {
+            match (this.cancels.get(sessionId)) {
+                case Some(flag) => flag.store(true)
+                case None => ()
+            }
+        }
+    }
+
     public func chat(messages: ArrayList<Message>): EventStream<AgentEvent, ArrayList<Message>> {
         this.chatWithSessionId("sess_" + nextId(), messages, this.sessionEnv)
     }
@@ -111,6 +128,9 @@ public class AgentRuntime {
 
         spawn {
             let log = getGlobalLogger([("name", "AgentRuntime")])
+            // 会话级取消标志：chat 期间注册，收尾统一清理
+            let cancelFlag = AtomicBool(false)
+            synchronized(this.cancelLock) { this.cancels[sessionId] = cancelFlag }
             try {
                 stream.emit(AgentStartEvent(sessionId))
                 log.info("agent start: ${this.config.name}", Array<Attr>())
@@ -125,7 +145,7 @@ public class AgentRuntime {
                 var lastToolTime: MonoTime = MonoTime.now()
                 var finished = false
 
-                while (!finished && turnCount < Int64(this.config.maxTurns)) {
+                while (!finished && !cancelFlag.load() && turnCount < Int64(this.config.maxTurns)) {
                     stream.emit(TurnStartEvent())
                     turnCount++
                     this.mcpManager.advanceTurn()
@@ -158,9 +178,16 @@ public class AgentRuntime {
 
                     let chatStream = this.provider.chatStreaming(chatReq)
                     var contentBuilder = StringBuilder()
-                    var assistantMsg: AssistantMessage
+                    var assistantMsg = AssistantMessage(ContentList.ofText(""), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0)
                     try {
-                        while (true) {
+                        var aborted = false
+                        while (!aborted) {
+                            if (cancelFlag.load()) {
+                                // 取消：用已累积内容构造部分消息，跳过 result() 等待
+                                assistantMsg = AssistantMessage(ContentList.ofText(contentBuilder.toString()), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0)
+                                aborted = true
+                                break
+                            }
                             match (chatStream.receive(5 * Duration.second)) {
                                 case Some(delta) =>
                                     if (delta.delta != "") {
@@ -176,7 +203,7 @@ public class AgentRuntime {
                                 case None => break
                             }
                         }
-                        assistantMsg = chatStream.result()
+                        if (!aborted) { assistantMsg = chatStream.result() }
                     } catch (e: Exception) {
                         log.error("provider error: ${e.message}", Array<Attr>())
                         stream.emit(TurnEndEvent(AssistantMessage(ContentList.ofText(e.message), "", "", StopReason.Error, TokenUsage(0, 0), 0), ArrayList<ToolResultMessage>()))
@@ -189,6 +216,13 @@ public class AgentRuntime {
 
                     match (assistantMsg.stopReason) {
                         case StopReason.ToolUse =>
+                            if (cancelFlag.load()) {
+                                // 取消：不再发起工具批次，直接收尾
+                                log.info("run cancelled at tool boundary", Array<Attr>())
+                                stream.emit(TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
+                                finished = true
+                                break
+                            }
                             let toolCalls = assistantMsg.toolCalls()
                             log.info("tool calls: ${toolCalls.size}", Array<Attr>())
                             let maxCalls = Int64(this.config.maxToolCalls)
@@ -310,6 +344,13 @@ public class AgentRuntime {
                             stream.emit(TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
 
                         case _ =>
+                            if (cancelFlag.load()) {
+                                // 取消：跳过 afterTurn 改写与压缩等后续处理，直接收尾
+                                log.info("run cancelled at turn end", Array<Attr>())
+                                stream.emit(TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
+                                finished = true
+                                break
+                            }
                             log.info("turn finished", Array<Attr>())
                             let turnUpdate = runAfterTurnHooks(hookState, turnCount)
                             match (turnUpdate.messages) {
@@ -388,6 +429,8 @@ public class AgentRuntime {
                 log.error("unhandled error: ${e.message}", Array<Attr>())
                 stream.setError(e)
             }
+            // 会话结束（正常/取消/异常统一路径）后清理取消标志
+            synchronized(this.cancelLock) { this.cancels.remove(sessionId) }
         }
 
         stream
