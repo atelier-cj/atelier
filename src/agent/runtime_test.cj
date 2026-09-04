@@ -419,9 +419,11 @@ class ToolTurnProvider <: Provider {
                 let blocks = ArrayList<ContentBlock>()
                 blocks.add(ContentBlock.ToolCall(ToolCallBlock("call_1", "slow_tool", args)))
                 let msg = AssistantMessage(ContentList(blocks), "", "", StopReason.ToolUse, TokenUsage(0, 0), 0)
+                stream.emit(ChatDelta("", "", Some(msg.stopReason)))
                 stream.setResult(msg)
             } else {
                 let msg = AssistantMessage(ContentList.ofText("final"), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0)
+                stream.emit(ChatDelta("", "", Some(msg.stopReason)))
                 stream.setResult(msg)
             }
         }
@@ -542,4 +544,37 @@ func runtime_cancelSession_unknownOrFinishedNoop() {
     let result = runtime.chat(msgs).result()
     @Expect(result.size, 2)
     runtime.cancelSession("sess_unknown")
+}
+
+// 工具执行开始/结束事件：批执行前发 ToolExecutionStartEvent、完成后发 ToolExecutionEndEvent
+@Test
+func runtime_toolExecutionEvents_emittedAroundExecution() {
+    let provider = ToolTurnProvider()
+    let runtime = makeCancelRuntime(provider, 0)
+    let msgs = ArrayList<Message>()
+    msgs.add(UserMessage(ContentList.ofText("use tool"), 0))
+    let stream = runtime.chat(msgs)
+    var sawStart = false
+    var sawEnd = false
+    var i: Int64 = 0
+    while (i < 100) {
+        i++
+        match (stream.receive(Duration.millisecond * 100)) {
+            case Some(e: ToolExecutionStartEvent) =>
+                if (sawEnd) { @Fail("tool start after end") }
+                sawStart = true
+                @Expect(e.toolCallId, "call_1")
+                @Expect(e.toolName, "slow_tool")
+            case Some(e: ToolExecutionEndEvent) =>
+                if (!sawStart) { @Fail("tool end before start") }
+                sawEnd = true
+                @Expect(e.toolCallId, "call_1")
+                @Expect(e.isError, false)
+            case Some(_: AgentEndEvent) => break
+            case Some(_) => ()
+            case None => ()
+        }
+    }
+    @Expect(sawStart, true)
+    @Expect(sawEnd, true)
 }

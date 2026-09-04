@@ -252,6 +252,9 @@ public class AgentRuntime {
                             }
                             let batch = ArrayList<(String, ToolContext, JsonValue)>()
                             let skipResults = HashMap<Int64, String>()
+                            // 实际进入执行批的工具（与 batch 同序），用于发工具执行事件
+                            let runCallIds = ArrayList<String>()
+                            let runNames = ArrayList<String>()
                             var idx: Int64 = 0
                             while (idx < toolCalls.size) {
                                 let tc = toolCalls[idx]
@@ -261,7 +264,10 @@ public class AgentRuntime {
                                             case TrustDecision.Allowed =>
                                                 let (args, skipMsg) = decideToolCall(hookState, turnCount, tc)
                                                 match (args) {
-                                                    case Some(a) => batch.add((tc.name, ctx, a))
+                                                    case Some(a) =>
+                                                        batch.add((tc.name, ctx, a))
+                                                        runCallIds.add(tc.id)
+                                                        runNames.add(tc.name)
                                                     case None =>
                                                         skipResults[idx] = skipMsg ?? "Tool blocked by hook"
                                                         log.warn("tool ${tc.name} blocked by hook", Array<Attr>())
@@ -277,7 +283,10 @@ public class AgentRuntime {
                                                     log.info("tool ${tc.name} always approved for ${ctx.workDir}", Array<Attr>())
                                                     let (args, skipMsg) = decideToolCall(hookState, turnCount, tc)
                                                     match (args) {
-                                                        case Some(a) => batch.add((tc.name, ctx, a))
+                                                        case Some(a) =>
+                                                            batch.add((tc.name, ctx, a))
+                                                            runCallIds.add(tc.id)
+                                                            runNames.add(tc.name)
                                                         case None =>
                                                             skipResults[idx] = skipMsg ?? "Tool blocked by hook"
                                                             log.warn("tool ${tc.name} blocked by hook", Array<Attr>())
@@ -287,7 +296,10 @@ public class AgentRuntime {
                                                     log.info("tool ${tc.name} approved for session", Array<Attr>())
                                                     let (args, skipMsg) = decideToolCall(hookState, turnCount, tc)
                                                     match (args) {
-                                                        case Some(a) => batch.add((tc.name, ctx, a))
+                                                        case Some(a) =>
+                                                            batch.add((tc.name, ctx, a))
+                                                            runCallIds.add(tc.id)
+                                                            runNames.add(tc.name)
                                                         case None =>
                                                             skipResults[idx] = skipMsg ?? "Tool blocked by hook"
                                                             log.warn("tool ${tc.name} blocked by hook", Array<Attr>())
@@ -312,6 +324,10 @@ public class AgentRuntime {
                                     sleep(Duration.millisecond * (minIntervalMs - elapsed))
                                 }
                             }
+                            // 工具执行开始事件（供流式消费方展示工具进度；被跳过/拦截的工具不发）
+                            for (k in 0..runCallIds.size) {
+                                stream.emit(ToolExecutionStartEvent(runCallIds[Int64(k)], runNames[Int64(k)]))
+                            }
                             let results = try {
                                 this.toolExecutor.executeBatch(batch)
                             } catch (e: Exception) {
@@ -332,6 +348,8 @@ public class AgentRuntime {
                                             let r = results[Int64(resIdx)]
                                             log.info("tool ${tc.name} done: err=${r.isError}", Array<Attr>())
                                             this.mcpManager.markUsedTool(tc.name)
+                                            // 工具执行结束事件（与开始事件一一对应）
+                                            stream.emit(ToolExecutionEndEvent(tc.id, r.text, r.isError))
                                             let tr = ToolResultMessage(tc.id, tc.name, ContentList.ofText(r.text), r.isError, 0)
                                             currentMessages.add(tr)
                                             callAfterToolHooks(hookState, turnCount, tc, tr)
