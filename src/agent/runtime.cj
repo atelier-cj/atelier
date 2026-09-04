@@ -47,6 +47,10 @@ public class AgentRuntime {
     private let cancels = HashMap<String, AtomicBool>()
     private let cancelLock = Mutex()
 
+    // 可选工具级授权回调（ACP 等无终端宿主注入）：返回 y/a/""（once/always/deny）。
+    // None 时维持文本 askUser 问答（默认行为）。NeedsApproval 判定优先走本回调。
+    public var toolApprovalFn: ?(ToolCallBlock, String) -> String = None
+
     // 13 参：最全签名（hooks + askUser + sessionEnv + mcpManager），其余构造统一委托至此
     public init(config: AgentConfig, provider: Provider,
         toolRegistry: ToolRegistry, sessionStore: SessionStore,
@@ -273,11 +277,15 @@ public class AgentRuntime {
                                                         log.warn("tool ${tc.name} blocked by hook", Array<Attr>())
                                                 }
                                             case TrustDecision.NeedsApproval =>
-                                                let answer = this.askUser(
-                                                    "Tool '" + tc.name + "' needs your approval.\n" +
-                                                    "  y  — allow this once (session only)\n" +
-                                                    "  a  — always allow this directory\n" +
-                                                    "  n  — deny")
+                                                let answer = match (this.toolApprovalFn) {
+                                                    case Some(f) => f(tc, ctx.workDir)
+                                                    case None =>
+                                                        this.askUser(
+                                                            "Tool '" + tc.name + "' needs your approval.\n" +
+                                                            "  y  — allow this once (session only)\n" +
+                                                            "  a  — always allow this directory\n" +
+                                                            "  n  — deny")
+                                                }
                                                 if (answer == "a" || answer == "always" || answer == "yes") {
                                                     this.trustManager.setTrust(ctx.workDir, TrustState.Trusted)
                                                     log.info("tool ${tc.name} always approved for ${ctx.workDir}", Array<Attr>())

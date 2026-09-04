@@ -578,3 +578,178 @@ func runtime_toolExecutionEvents_emittedAroundExecution() {
     @Expect(sawStart, true)
     @Expect(sawEnd, true)
 }
+
+// ---------- 工具级授权回调（toolApprovalFn，ACP 权限桥的挂载点） ----------
+
+// Sequential 慢工具：信任 Undecided → NeedsApproval 走授权回调
+class SequentialSlowTool <: Tool {
+    public func name(): String { "seq_slow_tool" }
+    public func description(): String { "sequential slow tool for approval test" }
+    public func schema(): JsonValue { JsonValue.Map(HashMap<String, JsonValue>()) }
+    public func execute(ctx: ToolContext, args: JsonValue): ToolResult {
+        ToolResult("approved run done", None, false, false)
+    }
+    public func executionMode(): ToolExecutionMode { ToolExecutionMode.Sequential }
+}
+
+// 首回合 ToolUse 调 seq_slow_tool，后续回合 EndTurn（防无限工具循环）
+class SeqToolTurnProvider <: Provider {
+    public var streamCalls: Int64 = 0
+    public func name(): String { "stub-seq-tool" }
+    public func chat(req: ChatRequest): ChatResponse {
+        ChatResponse(AssistantMessage(ContentList.ofText("ok"), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0))
+    }
+    public func chatStreaming(req: ChatRequest): EventStream<ChatDelta, AssistantMessage> {
+        this.streamCalls++
+        let stream = EventStream<ChatDelta, AssistantMessage>()
+        spawn {
+            if (this.streamCalls == Int64(1)) {
+                let blocks = ArrayList<ContentBlock>()
+                blocks.add(ContentBlock.ToolCall(ToolCallBlock("call_a", "seq_slow_tool", JsonValue.Map(HashMap<String, JsonValue>()))))
+                let msg = AssistantMessage(ContentList(blocks), "", "", StopReason.ToolUse, TokenUsage(0, 0), 0)
+                stream.emit(ChatDelta("", "", Some(msg.stopReason)))
+                stream.setResult(msg)
+            } else {
+                let msg = AssistantMessage(ContentList.ofText("final"), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0)
+                stream.emit(ChatDelta("", "", Some(msg.stopReason)))
+                stream.setResult(msg)
+            }
+        }
+        stream
+    }
+}
+
+func makeApprovalRuntime(provider: Provider, approval: ?(ToolCallBlock, String) -> String): AgentRuntime {
+    let toolReg = ToolRegistry()
+    toolReg.register(SequentialSlowTool())
+    let trustMgr = TrustManager()
+    let skillReg = SkillRegistry()
+    let agentReg = AgentRegistry()
+    let providerReg = ProviderRegistry()
+    providerReg.register("default", provider)
+    let store = MemorySessionStore()
+    let r = AgentRuntime(compactionRuntimeConfig(false, UInt32(16384), UInt32(20000), None), provider,
+        toolReg, store, trustMgr, skillReg, agentReg, providerReg, McpManager())
+    r.toolApprovalFn = approval
+    r
+}
+
+func lastAssistantTextOf(result: ArrayList<Message>): String {
+    var text = ""
+    for (m in result) {
+        match (m) {
+            case am: AssistantMessage =>
+                for (b in am.content.blocks()) {
+                    match (b) {
+                        case ContentBlock.TextBlock(t) => text = t
+                        case _ => ()
+                    }
+                }
+            case _ => ()
+        }
+    }
+    text
+}
+
+// toolApprovalFn 返回 "y"（once）→ 工具执行，回合正常收尾
+@Test
+func runtime_toolApprovalFn_allowsOnce() {
+    let calls = ArrayList<String>()
+    let provider = SeqToolTurnProvider()
+    let approval: ?(ToolCallBlock, String) -> String = { tc, wd =>
+        calls.add(tc.id)
+        "y"
+    }
+    let runtime = makeApprovalRuntime(provider, approval)
+    let msgs = ArrayList<Message>()
+    msgs.add(UserMessage(ContentList.ofText("go"), 0))
+    let result = runtime.chat(msgs).result()
+    @Expect(calls.size, 1)
+    @Expect(calls[0], "call_a")
+    // 工具结果进入会话消息（第二轮 EndTurn 正常收尾）
+    var foundToolResult = false
+    for (m in result) {
+        match (m) {
+            case tr: ToolResultMessage =>
+                for (b in tr.content.blocks()) {
+                    match (b) {
+                        case ContentBlock.TextBlock(t) =>
+                            if (t == "approved run done") { foundToolResult = true }
+                        case _ => ()
+                    }
+                }
+            case _ => ()
+        }
+    }
+    @Expect(foundToolResult, true)
+}
+
+// toolApprovalFn 返回 ""（deny）→ 工具不执行，结果消息带拒绝说明
+@Test
+func runtime_toolApprovalFn_denies() {
+    let provider = SeqToolTurnProvider()
+    let approval: ?(ToolCallBlock, String) -> String = { tc, wd => "" }
+    let runtime = makeApprovalRuntime(provider, approval)
+    let msgs = ArrayList<Message>()
+    msgs.add(UserMessage(ContentList.ofText("go"), 0))
+    let result = runtime.chat(msgs).result()
+    var foundDenied = false
+    for (m in result) {
+        match (m) {
+            case tr: ToolResultMessage =>
+                for (b in tr.content.blocks()) {
+                    match (b) {
+                        case ContentBlock.TextBlock(t) =>
+                            if (t.contains("denied approval")) { foundDenied = true }
+                        case _ => ()
+                    }
+                }
+            case _ => ()
+        }
+    }
+    @Expect(foundDenied, true)
+}
+
+// toolApprovalFn 为 None（默认）→ 走文本 askUser（deny：空返回）
+// 用 Box 承载可变状态（仓颉限制：lambda 不可捕获可变局部变量）
+class AskBox {
+    public var asked: Bool = false
+    public init() {}
+}
+
+@Test
+func runtime_toolApprovalFn_defaultFallsBackToAskUser() {
+    let box = AskBox()
+    let provider = SeqToolTurnProvider()
+    let toolReg = ToolRegistry()
+    toolReg.register(SequentialSlowTool())
+    let trustMgr = TrustManager()
+    let skillReg = SkillRegistry()
+    let agentReg = AgentRegistry()
+    let providerReg = ProviderRegistry()
+    providerReg.register("default", provider)
+    let store = MemorySessionStore()
+    let rt = AgentRuntime(compactionRuntimeConfig(false, UInt32(16384), UInt32(20000), None), provider,
+        toolReg, store, trustMgr, skillReg, agentReg, providerReg,
+        ArrayList<Hook>(), { q => box.asked = true; "" }, McpManager())
+    let msgs = ArrayList<Message>()
+    msgs.add(UserMessage(ContentList.ofText("go"), 0))
+    let result = rt.chat(msgs).result()
+    @Expect(box.asked, true)
+    // askUser deny → 工具被跳过（结果含拒绝消息）
+    var foundDenied = false
+    for (m in result) {
+        match (m) {
+            case tr: ToolResultMessage =>
+                for (b in tr.content.blocks()) {
+                    match (b) {
+                        case ContentBlock.TextBlock(t) =>
+                            if (t.contains("denied approval")) { foundDenied = true }
+                        case _ => ()
+                    }
+                }
+            case _ => ()
+        }
+    }
+    @Expect(foundDenied, true)
+}
