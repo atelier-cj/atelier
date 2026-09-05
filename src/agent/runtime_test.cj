@@ -840,3 +840,40 @@ public func sessionLoop_forwardsMiddlewares() {
     @Expect(mw.wraps, Int64(1))
     @Expect(mw.streamCalls >= Int64(1), true)
 }
+
+// ========== 可扩展性：入口级定制（AgentRuntime open 化；SessionLoop.run 因可选参限制不可 open，定制走构造/参数注入） ==========
+
+class TrackingRuntime <: AgentRuntime {
+    public var chatCalls: Int64 = 0
+    public init(config: AgentConfig, provider: Provider,
+        toolReg: ToolRegistry, store: SessionStore,
+        trustMgr: TrustManager, skillReg: SkillRegistry,
+        agentReg: AgentRegistry, providerReg: ProviderRegistry,
+        mcpMgr: McpManager) {
+        super(config, provider, toolReg, store, trustMgr, skillReg,
+            agentReg, providerReg, ArrayList<Hook>(), { q => "" }, mcpMgr)
+    }
+    public override func chat(messages: ArrayList<Message>): EventStream<AgentEvent, ArrayList<Message>> {
+        this.chatCalls++
+        super.chat(messages)
+    }
+}
+
+@Test
+public func runtime_openSubclassOverridesEntry() {
+    let inner = StubProvider()
+    let toolReg = ToolRegistry()
+    let trustMgr = TrustManager()
+    let skillReg = SkillRegistry()
+    let agentReg = AgentRegistry()
+    let providerReg = ProviderRegistry()
+    providerReg.register("default", inner)
+    let store = MemorySessionStore()
+    let rt = TrackingRuntime(subConfig(), inner, toolReg, store, trustMgr,
+        skillReg, agentReg, providerReg, McpManager())
+    let msgs = ArrayList<Message>()
+    msgs.add(UserMessage(ContentList.ofText("hi"), 0))
+    let result = rt.chat(msgs).result()
+    @Expect(rt.chatCalls, Int64(1))
+    @Expect(result.size >= Int64(1), true)
+}

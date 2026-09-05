@@ -28,7 +28,7 @@ import std.time.MonoTime
 import stdx.log.*
 import opencj::ulid.nextId
 
-public class AgentRuntime {
+public open class AgentRuntime {
     private let config: AgentConfig
     private let provider: Provider
     private let toolRegistry: ToolRegistry
@@ -112,7 +112,7 @@ public class AgentRuntime {
     // 取消进行中的会话回合（幂等：未知/已结束会话为 no-op）。
     // 取消后 runtime 在当前检查点尽快收敛并按正常路径收尾（AgentEndEvent + result），
     // 不再发起新的 provider 请求与工具批次；正在执行的工具不强制中断。
-    public func cancelSession(sessionId: String): Unit {
+    public open func cancelSession(sessionId: String): Unit {
         synchronized(this.cancelLock) {
             match (this.cancels.get(sessionId)) {
                 case Some(flag) => flag.store(true)
@@ -121,7 +121,7 @@ public class AgentRuntime {
         }
     }
 
-    public func chat(messages: ArrayList<Message>): EventStream<AgentEvent, ArrayList<Message>> {
+    public open func chat(messages: ArrayList<Message>): EventStream<AgentEvent, ArrayList<Message>> {
         this.chatWithSessionId("sess_" + nextId(), messages, this.sessionEnv)
     }
 
@@ -135,12 +135,12 @@ public class AgentRuntime {
     }
 
     // 库用户兼容签名：内部生成 ulid 会话 id
-    public func chatWithEnv(messages: ArrayList<Message>, sessionEnv: SessionEnvironment): EventStream<AgentEvent, ArrayList<Message>> {
+    public open func chatWithEnv(messages: ArrayList<Message>, sessionEnv: SessionEnvironment): EventStream<AgentEvent, ArrayList<Message>> {
         this.chatWithSessionId("sess_" + nextId(), messages, sessionEnv)
     }
 
     // 显式会话 id（如 REPL 的持久化 sessionId），runtime 不落库，由调用方统一持久化
-    public func chatWithSessionId(sessionId: String, messages: ArrayList<Message>,
+    public open func chatWithSessionId(sessionId: String, messages: ArrayList<Message>,
         sessionEnv: SessionEnvironment): EventStream<AgentEvent, ArrayList<Message>> {
         this.chatWithEnv(sessionId, messages, sessionEnv)
     }
