@@ -7,6 +7,7 @@ import std.env.getVariable
 import std.sync.*
 import stdx.log.*
 import opencj::ulid.nextId
+import acp.transport.SubprocessTransport
 import atelier.message.*
 import atelier.provider.*
 import atelier.tool.*
@@ -55,7 +56,8 @@ public enum SubagentState {
 // ===================== 子 Agent 句柄 =====================
 
 // 可持续子 Agent 句柄：父侧持有。send() 投递消息（唤醒空闲子）；recv() 取子来信（阻塞可超时）。
-public class SubAgentHandle {
+// open：跨进程远程句柄（RemoteSubAgentHandle）继承复用队列与状态
+public open class SubAgentHandle {
     public let subSessionId: String
     public let parentSessionId: String
 
@@ -79,7 +81,7 @@ public class SubAgentHandle {
     }
 
     // 父 → 子：异步投递（worker 空闲时被唤醒；已终止的 no-op）
-    public func send(mail: AgentMail): Unit {
+    public open func send(mail: AgentMail): Unit {
         if (this.exited.load()) { return }
         this.inbox.add(mail)
     }
@@ -105,12 +107,12 @@ public class SubAgentHandle {
     }
 
     // 请求取消当前回合（worker 轮询后执行 cancelSession，幂等）
-    public func cancel(): Unit {
+    public open func cancel(): Unit {
         this.cancelRequested.store(true)
     }
 
     // 请求终止 worker（空闲/回合中均尽快生效；幂等；会话历史保留）
-    public func close(): Unit {
+    public open func close(): Unit {
         this.closeRequested.store(true)
     }
 
@@ -243,6 +245,23 @@ public class SubAgentManager {
 
     public func has(subSessionId: String): Bool {
         synchronized(this.lock) { this.handles.contains(subSessionId) }
+    }
+
+    // 跨进程启动：子 agent 跑独立 `atelier acp <agent> [sessionDir]` 进程（ACP 桥）。
+    // executable：子进程可执行文件（父二进制同款，如 /path/to/atelier.cli）；
+    // sessionDir：子进程隔离会话目录（勿与父共享）；cwd：子会话工作目录。
+    // 返回句柄；握手/建会话失败以 done 错误回信（异步可见于 recv）。
+    public func startRemote(executable: String, agentName: String, parentSessionId: String,
+        initialPrompt: String, cwd: String, sessionDir: String): ?SubAgentHandle {
+        let childId = "rsub_" + nextId()
+        let args: Array<String> = ["acp", agentName, sessionDir]
+        let transport = SubprocessTransport(executable, args: args)
+        let h = RemoteSubAgentHandle(childId, parentSessionId, transport, cwd,
+            { m => this.parentBoxFor(parentSessionId).add(m) })
+        synchronized(this.lock) { this.handles[childId] = h }
+        h.send(AgentMail(parentSessionId, childId, AgentMailKindUserText, initialPrompt))
+        h.serveRemote()
+        Some(h)
     }
 
     // 父会话级联：关闭该父的全部子 Agent（句柄从注册表移除）

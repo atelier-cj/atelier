@@ -1,6 +1,7 @@
 package atelier.cli
 
 import std.env.*
+import std.fs.{Directory, Path}
 import atelier.agent.*
 import atelier.provider.*
 import atelier.tool.*
@@ -13,9 +14,11 @@ import atelier.provider.EchoProvider
 
 // atelier acp [agent]：以 ACP v1 Agent（stdio 服务端）身份被外部 ACP Client 拉起。
 // 约束：本进程 stdout 只允许 ACP 帧，一切诊断走 stderr；serve() 阻塞至 stdin EOF。
+// sessionDirOverride：非空时覆盖会话目录（远程子进程隔离用，不与父共享 bstorm/映射文件）
 public func runAcp(agentNameArg: String, toolReg: ToolRegistry, trustMgr: TrustManager,
     skillReg: SkillRegistry, agentReg: AgentRegistry, providerReg: ProviderRegistry,
-    sessionStore: SessionStore, mcpMgr: McpManager, sessionDir: String): Unit {
+    sessionStore: SessionStore, mcpMgr: McpManager, sessionDir: String,
+    sessionDirOverride: String): Unit {
     // agent 启动时选择：参数优先，未注册则回退 default（不存在则补建）
     let agentName: String
     if (agentNameArg != "" && agentReg.has(agentNameArg)) {
@@ -25,6 +28,11 @@ public func runAcp(agentNameArg: String, toolReg: ToolRegistry, trustMgr: TrustM
         if (!agentReg.has("default")) {
             agentReg.create("default", AgentConfig.default())
         }
+    }
+    let effectiveSessionDir = if (sessionDirOverride != "") { sessionDirOverride } else { sessionDir }
+    // 覆盖目录需存在（调用方（远程桥）负责创建）
+    if (sessionDirOverride != "") {
+        try { Directory.create(Path(effectiveSessionDir)) } catch (_) { () }
     }
     let cfg = match (agentReg.get(agentName)) {
         case Some(c) => c
@@ -47,7 +55,7 @@ public func runAcp(agentNameArg: String, toolReg: ToolRegistry, trustMgr: TrustM
         resolveProviderFor(cfg, providerReg)
     }
     // 会话映射文件与会话数据同目录（已由调用方创建）
-    let mappingFile = if (sessionDir != "") { sessionDir + "/acp-sessions.json" } else { "acp-sessions.json" }
+    let mappingFile = if (effectiveSessionDir != "") { effectiveSessionDir + "/acp-sessions.json" } else { "acp-sessions.json" }
     let modelReg = ModelContextRegistry()
     let bridge = AcpBridge(agentName, cfg, provider, toolReg, trustMgr, skillReg,
         agentReg, providerReg, sessionStore, mcpMgr, modelReg, mappingFile,

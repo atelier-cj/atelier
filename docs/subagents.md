@@ -99,7 +99,16 @@ match (h.recv(timeout: 5 * Duration.minute)) {
 
 - REPL/HTTP/ACP 会话循环当前仍由各自宿主驱动；`awaitChildren` 与父工具为宿主集成提供
   「子消息唤醒父」的阻塞原语（宿主输入循环可轮询），统一 SessionRunner（输入源可插拔）属后续演进。
-- 跨进程子 Agent（子跑独立进程/ACP 实例）不在本版本范围。
+## 跨进程子 Agent（ACP 桥）
+
+`manager.startRemote(executable, agentName, parentSessionId, prompt, cwd, sessionDir)`：
+子 Agent 运行在独立 `atelier acp <agent> <sessionDir>` 进程（同一可执行文件），协议经 acp-cj
+`AcpClient` 桥接——句柄语义与本地子一致（done/reply/recv/close），**send = 一次子自主回合**。
+
+- sessionDir：子进程独立会话/映射目录（勿与父共享，父若为 REPL/HTTP/ACP 会同目录争用 bstorm）
+- 验证：`scripts/remote_subagent_e2e.sh`（隔离 HOME + echo 模式跑条件 e2e：握手→首回合 done→续聊 reply→close）
+- **限制（ACP v1）**：回合内 waitReply 不可跨进程（子以分回合提问表达）；子无法主动唤醒空闲父
+  （父在自身回合内 await/watch 不受影响——本地子全能力保留）
 
 ## 测试
 

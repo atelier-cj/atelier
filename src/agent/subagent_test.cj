@@ -4,6 +4,8 @@ import std.collection.*
 import std.core.Duration
 import std.core.sleep
 import std.time.MonoTime
+import std.env.getVariable
+import std.fs.*
 import jsonvalue.*
 import atelier.message.*
 import atelier.provider.*
@@ -613,4 +615,53 @@ public func subagent_parentListAndCount() {
     @Expect(mgr.activeCountFor("parent_l1"), Int64(1))
     a.close()
     other.close()
+}
+
+// ========== P7：跨进程子 Agent（ACP 桥）条件 e2e ==========
+// 前置：ATELIER_PROVIDER=echo（bash 脚本注入）且 release 二进制存在（cjpm build 后）；
+// 否则本用例空转跳过（保持常规 cjpm test 全绿）。
+@Test
+public func subagent_remoteBridge_e2e() {
+    let echoMode = match (getVariable("ATELIER_PROVIDER")) {
+        case Some(v) => v == "echo"
+        case None => false
+    }
+    if (!echoMode) { return }
+    // 由 scripts/remote_subagent_e2e.sh 保证 release 已构建（本用例随脚本运行）
+    let base = match (getVariable("PWD")) { case Some(v) => v; case None => "." }
+    let exe = base + "/target/release/bin/atelier.cli"
+    let provider = SubRecordProvider()   // 本地父 provider 仅占位（父无回合也可）
+    let toolReg = ToolRegistry()
+    let trustMgr = TrustManager()
+    let skillReg = SkillRegistry()
+    let agentReg = AgentRegistry()
+    let providerReg = ProviderRegistry()
+    providerReg.register("default", provider)
+    let store = MemorySessionStore()
+    let mcp = McpManager()
+    let mgr = SubAgentManager(toolReg, trustMgr, skillReg, agentReg, providerReg, store, mcp)
+
+    let sessionDir = Directory.createTemp(Path("/tmp")).toString() + "/remote-sub-test"
+    Directory.create(sessionDir, recursive: true)
+    let h = mgr.startRemote(exe, "default", "parent_rm", "远程你好", "/tmp", sessionDir)
+    @Expect(h.isSome(), true)
+    let handle = h.getOrThrow()
+    // 首回合 done：子进程（atelier acp echo provider）回显
+    match (handle.recv(timeout: 30 * Duration.second)) {
+        case Some(mail) =>
+            @Expect(mail.kind, AgentMailKindDone)
+            @Expect(mail.text.contains("echo: 远程你好"), true)
+        case None => @Fail("timeout waiting remote done")
+    }
+    // 续聊（第二封）：新回合 reply
+    handle.send(AgentMail("parent_rm", handle.subSessionId, AgentMailKindUserText, "远程第二问"))
+    match (handle.recv(timeout: 30 * Duration.second)) {
+        case Some(mail) =>
+            @Expect(mail.kind, AgentMailKindReply)
+            @Expect(mail.text.contains("echo: 远程第二问"), true)
+        case None => @Fail("timeout waiting remote reply")
+    }
+    handle.close()
+    @Expect(waitState(handle, SubagentState.Closed), true)
+    try { remove(Path(sessionDir), recursive: true) } catch (_) { () }
 }
