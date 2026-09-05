@@ -26,7 +26,7 @@ public func sessionLoop_onEventSeesLifecycle() {
     let cfg = subConfig()
     let outcome = loop.run("sess_loop_1", "你好", cfg, StubProvider(), None, SessionEnvironment(),
         { => false }, { => false },
-        { ev =>
+        onEvent: { ev =>
             match (ev) {
                 case _: AgentStartEvent => events.add("start")
                 case _: AgentEndEvent => events.add("end")
