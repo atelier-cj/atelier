@@ -83,6 +83,13 @@ main(): Int64 {
             let port = if (args.size > 2) { args[2] } else { serverCfg.port.toString() }
             serve(handler, serverCfg.host, port)
 
+        case "acp" =>
+            // ACP v1 Agent（stdio 服务端）：被 Zed/opencode 等 ACP Client 拉起；
+            // agent 启动时选择（默认 default），运行期一个进程服务一个 agent
+            let acpAgentName = if (args.size > 2) { args[2] } else { "" }
+            runAcp(acpAgentName, toolReg, trustMgr, skillReg,
+                agentReg, providerRegForCli, sessionStore, mcpMgr, sessionDir)
+
         case "repl" =>
             let agentName = if (args.size > 2) { args[2] } else { "default" }
             let resumeId = if (args.size > 3) { args[3] } else { "" }
@@ -140,6 +147,7 @@ main(): Int64 {
             println("Atelier Agent Runtime")
             println("Usage:")
             println("  atelier serve [port]          Start HTTP server")
+            println("  atelier acp [agent]           Serve as ACP v1 agent over stdio (agent picked at startup)")
             println("  atelier repl [agent] [sid]    Start interactive REPL (resume session if sid given)")
             println("  atelier run [agent] <prompt>  Run single prompt")
             println("")
