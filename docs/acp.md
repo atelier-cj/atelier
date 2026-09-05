@@ -52,7 +52,7 @@ atelier acp [agent]
 | `terminal/*` `fs/*`（Agent→Client） | ❌ | 未使用（atelier 工具在本地执行，不委托 Client 侧能力） |
 | `elicitation/create`（form） | ✅ | client 声明 form 时 `ask_user` 工具经单字段表单向用户提问（accept 答案回流回合；decline/cancel/未声明 → 拒绝语义）；URL 模式未启用（无敏感采集场景） |
 | prompt 图片/音频/内嵌上下文 | ❌ | 未声明（`promptCapabilities` 默认 false，Client 不会发送） |
-| MCP over ACP 透传 | ❌ | `session/new.mcpServers` 忽略（acp-cj 结论一致） |
+| MCP over ACP（宿主代管） | ✅ | `session/new.mcpServers` → McpManager 注册（与本地 `[[mcpServer]]` 并集、同 on-demand 门控；stdio/streamable-http 形态；stdio env 支持 `env` 注入；sse 形态不支持） |
 
 ## 概念映射（ACP ↔ Atelier）
 

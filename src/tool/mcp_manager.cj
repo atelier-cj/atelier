@@ -12,6 +12,7 @@ import jsonvalue.*
 import std.collection.*
 import std.sync.Mutex
 import stdx.log.*
+import std.env.getVariable
 
 public struct McpServerConfig {
     public let name: String
@@ -19,13 +20,24 @@ public struct McpServerConfig {
     public let command: String
     public let url: String
     public let headers: HashMap<String, String>
+    // stdio 子进程额外环境（std launch environment=Some 为整体替换语义，
+    // createTransport 会先并入 PATH/LD_LIBRARY_PATH/HOME 等关键变量）
+    public let env: HashMap<String, String>
 
     public init(name: String, transport: String, command: String, url: String) {
-        this.name = name; this.transport = transport; this.command = command; this.url = url; this.headers = HashMap()
+        this.name = name; this.transport = transport; this.command = command; this.url = url
+        this.headers = HashMap(); this.env = HashMap()
     }
 
     public init(name: String, transport: String, command: String, url: String, headers: HashMap<String, String>) {
-        this.name = name; this.transport = transport; this.command = command; this.url = url; this.headers = headers
+        this.name = name; this.transport = transport; this.command = command; this.url = url
+        this.headers = headers; this.env = HashMap()
+    }
+
+    public init(name: String, transport: String, command: String, url: String,
+        headers: HashMap<String, String>, env: HashMap<String, String>) {
+        this.name = name; this.transport = transport; this.command = command; this.url = url
+        this.headers = headers; this.env = env
     }
 }
 
@@ -304,7 +316,20 @@ func createTransport(cfg: McpServerConfig): Option<Transport> {
     try {
         if (cfg.transport == "stdio") {
             if (cfg.command == "") { log.warn("mcp ${cfg.name}: missing command", Array<Attr>()); return Option<Transport>.None }
-            Option<Transport>.Some(StdioClientTransport(cfg.command))
+            if (cfg.env.size > 0) {
+                // environment=Some 为整体替换：并入关键变量后叠加自定义
+                let merged = HashMap<String, String>()
+                for (k in ["PATH", "LD_LIBRARY_PATH", "HOME"]) {
+                    match (getVariable(k)) {
+                        case Some(v) => merged[k] = v
+                        case None => ()
+                    }
+                }
+                for ((k, v) in cfg.env) { merged[k] = v }
+                Option<Transport>.Some(StdioClientTransport(cfg.command, env: Some(merged)))
+            } else {
+                Option<Transport>.Some(StdioClientTransport(cfg.command))
+            }
         } else if (cfg.transport == "streamable-http") {
             if (cfg.url == "") { log.warn("mcp ${cfg.name}: missing url", Array<Attr>()); return Option<Transport>.None }
             let t = StatelessHttpClient_2026_07_28(cfg.url)

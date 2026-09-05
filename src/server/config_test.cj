@@ -293,3 +293,28 @@ func agentConfigFrom_noCompactionNone() {
         case Some(_) => @Fail("expected compaction to be None")
     }
 }
+
+// TOML mcpServer env（数组字符串 "K=V"）→ McpServerConfig.env
+@Test
+public func config_mcpServerEnvParsing() {
+    let t = TomlMcpServer()
+    t.name = "svc"
+    t.transport = "stdio"
+    t.command = "server-tool"
+    t.envList.add("API_TOKEN=secret")
+    t.envList.add("EMPTY_KEY=")      // 空值保留空串
+    t.envList.add("no-separator")    // 无分隔符跳过
+    let cfg = t.toMcpServerConfig()
+    @Expect(cfg.env.size, 2)
+    match (cfg.env.get("API_TOKEN")) {
+        case Some(v) => @Expect(v, "secret")
+        case None => @Fail("env API_TOKEN lost")
+    }
+    match (cfg.env.get("EMPTY_KEY")) {
+        case Some(v) => @Expect(v, "")
+        case None => @Fail("env EMPTY_KEY lost")
+    }
+    @Expect(cfg.env.get("no-separator").isNone(), true)
+    // headers 不受影响
+    @Expect(cfg.headers.size, 0)
+}

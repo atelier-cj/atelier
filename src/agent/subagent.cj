@@ -74,6 +74,8 @@ public open class SubAgentHandle {
     let closeRequested = AtomicBool(false)
     let cancelRequested = AtomicBool(false)
     let exited = AtomicBool(false)
+    // 子回合内 send_message(waitReply=true) 阻塞等待父回复中（respond 据此分派直通/唤醒）
+    let waitingForReply = AtomicBool(false)
 
     public init(subSessionId: String, parentSessionId: String) {
         this.subSessionId = subSessionId
@@ -96,11 +98,18 @@ public open class SubAgentHandle {
         this.outbox.remove(Duration.millisecond)
     }
 
-    // 父 → 子：回复子回合内 send_message(waitReply=true) 的提问（专用通道）。
-    // 子空闲时调用无即时效果（消息留存，供其后续回合内 waitReply 消费）。
+    // 父 → 子：回复子（状态感知分派，对齐 dsh「父可随时向可持续子发 follow-up」语义）：
+    // - 子正阻塞在 send_message(waitReply=true)（waitingForReply 置位）→ 专用通道解锁其当前回合；
+    // - 子空闲 / 回合中未等待（含远程子，无 waitReply 通道）→ 投 inbox 作 follow-up：
+    //   子在回合边界（worker 空闲循环）消费并开新回合——不滞留、不错配、不打断当前回合。
     public func respond(text: String): Unit {
         if (this.exited.load()) { return }
-        this.replyQueue.add(AgentMail(this.parentSessionId, this.subSessionId, AgentMailKindReply, text))
+        let waiting = this.waitingForReply.load()
+        if (waiting) {
+            this.replyQueue.add(AgentMail(this.parentSessionId, this.subSessionId, AgentMailKindReply, text))
+        } else {
+            this.inbox.add(AgentMail(this.parentSessionId, this.subSessionId, AgentMailKindUserText, text))
+        }
     }
 
     public func state(): SubagentState {
@@ -371,10 +380,19 @@ public class SubAgentManager {
                 h.outbox.add(mail)
                 this.parentBoxFor(h.parentSessionId).add(mail)
             },
-            { timeoutMs => match (h.replyQueue.remove(Duration.millisecond * timeoutMs)) {
-                case Some(m) => Some(m.text)
-                case None => None
-            } })
+            { timeoutMs =>
+                // 置位等待标志：respond 据此走 replyQueue 直通；超时/收到回复即复位
+                h.waitingForReply.store(true)
+                var res: ?String = None
+                try {
+                    match (h.replyQueue.remove(Duration.millisecond * timeoutMs)) {
+                        case Some(m) => res = Some(m.text)
+                        case None => ()
+                    }
+                } catch (_) { () }
+                h.waitingForReply.store(false)
+                res
+            })
         childToolReg.register(sendTool)
 
         let outcome = this.loop.run(h.subSessionId, text, config, provider, Some(childToolReg), env,
