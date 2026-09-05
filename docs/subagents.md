@@ -35,6 +35,10 @@ Atelier 的 **Agent-as-Tool** 升级形态：子 Agent 不再是「一次性委�
   （聚合收件箱）——**收到即当前回合继续**，不等待 = 回合结束由宿主决定，子消息保留在收件箱。
 - **终止**：`close`（库 API）/ `subagent_close`（工具）请求停止 worker（幂等）；
   父会话级联 `closeForParent` 关闭全部子；会话历史保留。
+- **空闲自动回收（可配，默认关）**：`SubAgentManager(..., idleTimeoutSec: N)`（N>0 时）本地子
+  worker 连续空闲 N 秒自动回收（等效 close + 从注册表摘除；会话历史保留，`resumeSession` 可重建；
+  句柄 send 此后 no-op）。来信/回合重置计时。适合「一次性委派不复用」场景控制长驻线程；
+  默认 0 = 永不自动回收（可持续子语义）。远程子无 idle 探测通道，仅显式 close。
 
 ## 消息信封
 
@@ -47,7 +51,7 @@ Atelier 的 **Agent-as-Tool** 升级形态：子 Agent 不再是「一次性委�
 
 | 类型 | 说明 |
 |---|---|
-| `SubAgentManager(toolReg, trustMgr, skillReg, agentReg, providerReg, sessionStore, mcpMgr)` | 注册表 + worker 启动器 |
+| `SubAgentManager(toolReg, trustMgr, skillReg, agentReg, providerReg, sessionStore, mcpMgr, idleTimeoutSec!: Int64 = 0)` | 注册表 + worker 启动器；`idleTimeoutSec` 开启本地子空闲自动回收（0=不回收） |
 | `manager.start(config, provider, parentSessionId, initialPrompt)` | 启动子（立即返回句柄） |
 | `manager.startByName(agentName, parentSessionId, prompt)` | 按注册名启动（config/provider 自动解析） |
 | `manager.get / has / closeForParent / awaitChildren(parentId, timeout)` | 查询/级联关闭/聚合收信 |
@@ -96,7 +100,9 @@ match (h.recv(timeout: 5 * Duration.minute)) {
   非阻塞查看子来信（真正「父被唤醒开新回合」由宿主按自身输入模型决定；`awaitChildren` 提供阻塞原语）。
 - **REPL**（进程内父宿主）：
   - 回合内工具：`send_message / subagent_start / subagent_reply / subagent_await / subagent_watch / subagent_close`（自动注册）
-  - `/subagent list | poll | start <agent> <prompt> | send <id> <text> | respond <id> <text> | close <id>`
+  - `/subagent list | poll | start [--remote] <agent> <prompt> | send <id> <text> | respond <id> <text> | close <id>`
+  - `start` 默认本地子；`start --remote` 以当前进程（`/proc/self/exe`）启动独立 `atelier acp`
+    子进程，数据隔离于 `<sessionDir>/remote-sub/<childId>`（不与父会话共享 bstorm/映射）
   - 每回合收尾自动展示该父子的未读消息（poll 结果）
 - **跨进程子（ACP 桥）在 REPL 的兼容**：`/subagent list/send/close` 对远程句柄同样有效
   （send=一次远程自主回合）；`respond` 对远程子 = follow-up 追问（新回合）——
@@ -147,4 +153,5 @@ cjpm test -j 16 --no-progress   # 全量（含 subagent P0-P2 用例）
 覆盖：消息唤醒/多轮、recv 超时、close 幂等与级联、cancel 快速收敛、progress 先于 done 可见、
 waitReply 父回复回流子上下文、超时路径、respond 状态分派（空闲/回合中 follow-up 不滞留不串线）、
 父端 send_message 更名与两上下文同名覆盖、subagent_reply 即时应答、父回合完整编排
-（start→watch 收 done）、跨进程 respond=follow-up 追问、信任隔离。
+（start→watch 收 done）、跨进程 respond=follow-up 追问、空闲回收（超时回收/来信重置/默认关）、
+`/subagent start --remote` 参数解析（本地/远程/缺参/多词 prompt）、信任隔离。

@@ -104,7 +104,7 @@ main(): Int64 {
             let prov = resolveProviderFor(cfg, providerRegForCli)
             let repl = REPL(agentName, slashReg, cfg, prov,
                 toolReg, sessionStore, trustMgr, skillReg,
-                agentReg, providerRegForCli, resumeId, mcpMgr)
+                agentReg, providerRegForCli, resumeId, mcpMgr, sessionDir)
             repl.run()
 
         case "run" =>

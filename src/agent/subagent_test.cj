@@ -74,7 +74,7 @@ class SubRecordProvider <: Provider {
     }
 }
 
-func makeSubManager(provider: Provider): (SubAgentManager, ProviderRegistry) {
+func makeSubManager(provider: Provider, idleTimeoutSec!: Int64 = 0): (SubAgentManager, ProviderRegistry) {
     let toolReg = ToolRegistry()
     let trustMgr = TrustManager()
     let skillReg = SkillRegistry()
@@ -82,7 +82,8 @@ func makeSubManager(provider: Provider): (SubAgentManager, ProviderRegistry) {
     let providerReg = ProviderRegistry()
     providerReg.register("default", provider)
     let store = MemorySessionStore()
-    let mgr = SubAgentManager(toolReg, trustMgr, skillReg, agentReg, providerReg, store, McpManager())
+    let mgr = SubAgentManager(toolReg, trustMgr, skillReg, agentReg, providerReg, store, McpManager(),
+        idleTimeoutSec: idleTimeoutSec)
     (mgr, providerReg)
 }
 
@@ -881,4 +882,74 @@ public func subagent_pollOnceAndPollChildren() {
     @Expect(agg.size >= Int64(0), true)   // 无未读即空
     h.close()
     b.close()
+}
+
+// ========== 演进 D：空闲超时自动回收（可配 idleTimeoutSec，默认 0 = 不回收） ==========
+
+// 开启回收：子空闲达阈值自动 close 并从注册表摘除；句柄 send 变 no-op
+@Test
+public func subagent_idleReclaim_closesAndUnregisters() {
+    let provider = SubRecordProvider()
+    let (mgr, providerReg) = makeSubManager(provider, idleTimeoutSec: 1)
+    let h = mgr.start(subConfig(), provider, "parent_ir1", "任务")
+    match (h.recv(timeout: 10 * Duration.second)) {
+        case Some(mail) => @Expect(mail.kind, AgentMailKindDone)
+        case None => @Fail("timeout waiting done")
+    }
+    @Expect(waitState(h, SubagentState.Idle), true)
+    // 1s 空闲 → 自动回收：Closed + 注册表摘除 + send no-op
+    @Expect(waitState(h, SubagentState.Closed, attempts: 100), true)
+    @Expect(mgr.has(h.subSessionId), false)
+    @Expect(mgr.size(), Int64(0))
+    h.send(AgentMail("parent_ir1", h.subSessionId, AgentMailKindUserText, "回收后"))
+    @Expect(h.recv(timeout: 300 * Duration.millisecond).isNone(), true)
+}
+
+// 来信重置空闲计时；回合结束后计时从零重算仍会回收
+// 时序说明：idleTimeoutSec=3 提供宽窗口（-j16 满载下 sleep 膨胀不越过阈值）；
+// 回收等待 10s（attempts 100×100ms）容忍调度延迟
+@Test
+public func subagent_idleReclaim_letterResetsTimer() {
+    let provider = SubRecordProvider()
+    let (mgr, providerReg) = makeSubManager(provider, idleTimeoutSec: 3)
+    let h = mgr.start(subConfig(), provider, "parent_ir2", "任务")
+    match (h.recv(timeout: 10 * Duration.second)) {
+        case Some(mail) => @Expect(mail.kind, AgentMailKindDone)
+        case None => @Fail("timeout waiting done")
+    }
+    // 空闲未达阈值时来信 → 正常唤醒开新回合（计时重置）
+    sleep(Duration.second)
+    h.send(AgentMail("parent_ir2", h.subSessionId, AgentMailKindUserText, "第二单"))
+    match (h.recv(timeout: 10 * Duration.second)) {
+        case Some(mail) =>
+            @Expect(mail.kind, AgentMailKindReply)
+            @Expect(mail.text, "答: 第二单")
+        case None => @Fail("timeout: letter after idle did not wake child")
+    }
+    // 回合结束 → 空闲计时从零重算 → 仍自动回收
+    @Expect(waitState(h, SubagentState.Closed, attempts: 100), true)
+    @Expect(mgr.has(h.subSessionId), false)
+}
+
+// 默认关闭（0）：长空闲仍存活、可正常唤醒（可持续子语义保持）
+@Test
+public func subagent_idleReclaim_disabledByDefault() {
+    let provider = SubRecordProvider()
+    let (mgr, providerReg) = makeSubManager(provider)
+    let h = mgr.start(subConfig(), provider, "parent_ir3", "任务")
+    match (h.recv(timeout: 10 * Duration.second)) {
+        case Some(mail) => @Expect(mail.kind, AgentMailKindDone)
+        case None => @Fail("timeout waiting done")
+    }
+    sleep(Duration.second * 2)   // 空闲超过回收测试阈值时长
+    @Expect(mgr.has(h.subSessionId), true)
+    @Expect(waitState(h, SubagentState.Idle), true)
+    h.send(AgentMail("parent_ir3", h.subSessionId, AgentMailKindUserText, "还在吗"))
+    match (h.recv(timeout: 10 * Duration.second)) {
+        case Some(mail) =>
+            @Expect(mail.kind, AgentMailKindReply)
+            @Expect(mail.text, "答: 还在吗")
+        case None => @Fail("timeout: disabled reclaim should keep child alive")
+    }
+    h.close()
 }
