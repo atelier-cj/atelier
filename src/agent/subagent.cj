@@ -60,8 +60,10 @@ public class SubAgentHandle {
 
     // 父 → 子（内容消息）；worker 空闲时阻塞取、回合中不消费（回合后处理）
     let inbox = LinkedBlockingQueue<AgentMail>()
-    // 子 → 父（回合结束回信）；父经 recv() 取
+    // 子 → 父（回合结束回信/主动消息）；父经 recv() 取
     let outbox = LinkedBlockingQueue<AgentMail>()
+    // 父 → 子（回合内 send_message waitReply 的专用回复通道，子回合内阻塞取）
+    let replyQueue = LinkedBlockingQueue<AgentMail>()
 
     private let stateLock = Mutex()
     private var st = SubagentState.Idle
@@ -84,6 +86,13 @@ public class SubAgentHandle {
     // 子 → 父：阻塞取信，可超时（timeout 到期返回 None）
     public func recv(timeout!: Duration = 30 * Duration.second): ?AgentMail {
         this.outbox.remove(timeout)
+    }
+
+    // 父 → 子：回复子回合内 send_message(waitReply=true) 的提问（专用通道）。
+    // 子空闲时调用无即时效果（消息留存，供其后续回合内 waitReply 消费）。
+    public func respond(text: String): Unit {
+        if (this.exited.load()) { return }
+        this.replyQueue.add(AgentMail(this.parentSessionId, this.subSessionId, AgentMailKindReply, text))
     }
 
     public func state(): SubagentState {
@@ -223,7 +232,18 @@ public class SubAgentManager {
         let msgs = ArrayList<Message>(oldLoaded)
         msgs.add(UserMessage(ContentList.ofText(text), 0))
 
-        let runtime = AgentRuntime(config, provider, this.toolReg, this.sessionStore,
+        // 子工具注册表 = 共享全量 + send_message（避免 send_message 泄漏进父的工具列表）
+        let childToolReg = ToolRegistry()
+        for (t in this.toolReg.list()) { childToolReg.register(t) }
+        let sendTool = SendMessageTool(
+            { body, kind => h.outbox.add(AgentMail(h.subSessionId, h.parentSessionId, kind, body)) },
+            { timeoutMs => match (h.replyQueue.remove(Duration.millisecond * timeoutMs)) {
+                case Some(m) => Some(m.text)
+                case None => None
+            } })
+        childToolReg.register(sendTool)
+
+        let runtime = AgentRuntime(config, provider, childToolReg, this.sessionStore,
             this.trustMgr, this.skillReg, this.agentReg, this.providerReg,
             ArrayList<Hook>(), { q => "" }, env, this.mcpMgr)
         let stream = runtime.chatWithSessionId(h.subSessionId, msgs, env)

@@ -221,3 +221,141 @@ public func subagent_cancel_interruptsRunningTurn() {
     h.close()
     @Expect(waitState(h, SubagentState.Closed), true)
 }
+
+// ========== P1：子端 send_message（取代 report）+ 父回复唤醒 ==========
+
+// 脚本化 Provider：第 1 次流式调用返回 ToolUse(send_message, toolArgs)，之后 EndTurn；
+// 记录每次请求的全部消息文本（含工具结果，供断言父回复进入子上下文）
+class ScriptMsgProvider <: Provider {
+    public var streamCalls: Int64 = 0
+    public var reqTexts = ArrayList<String>()
+    private let toolArgs: JsonValue
+    public init(toolArgs: JsonValue) { this.toolArgs = toolArgs }
+
+    public func name(): String { "stub-scriptmsg" }
+
+    private func fullText(req: ChatRequest): String {
+        var out = ""
+        for (m in req.messages) { out = out + " | " + textOfMsg(m) }
+        out
+    }
+
+    public func chat(req: ChatRequest): ChatResponse {
+        let msg = AssistantMessage(ContentList.ofText("完成"), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0)
+        ChatResponse(msg)
+    }
+
+    public func chatStreaming(req: ChatRequest): EventStream<ChatDelta, AssistantMessage> {
+        this.streamCalls++
+        this.reqTexts.add(this.fullText(req))
+        let stream = EventStream<ChatDelta, AssistantMessage>()
+        spawn {
+            if (this.streamCalls == Int64(1)) {
+                let blocks = ArrayList<ContentBlock>()
+                blocks.add(ContentBlock.ToolCall(ToolCallBlock("sm_1", "send_message", this.toolArgs)))
+                let msg = AssistantMessage(ContentList(blocks), "", "", StopReason.ToolUse, TokenUsage(0, 0), 0)
+                stream.emit(ChatDelta("", "", Some(msg.stopReason)))
+                stream.setResult(msg)
+            } else {
+                let msg = AssistantMessage(ContentList.ofText("完成"), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0)
+                stream.emit(ChatDelta("", "", Some(msg.stopReason)))
+                stream.setResult(msg)
+            }
+            ()
+        }
+        stream
+    }
+}
+
+func msgArgs(text: String, kind: String, waitReply: Bool, timeoutMs: Int64): JsonValue {
+    let m = HashMap<String, JsonValue>()
+    m["text"] = JsonValue.String(text)
+    m["kind"] = JsonValue.String(kind)
+    m["waitReply"] = JsonValue.Boolean(waitReply)
+    m["timeoutMs"] = JsonValue.Number(Float64(timeoutMs))
+    JsonValue.Map(m)
+}
+
+// progress：子回合内主动发进度（不等待）→ 父 outbox 在 done 前收到 progress
+@Test
+public func subagent_sendMessage_progressVisibleToParent() {
+    let provider = ScriptMsgProvider(msgArgs("进度 50%", "progress", false, 0))
+    let (mgr, providerReg) = makeSubManager(provider)
+    let h = mgr.start(subConfig(), provider, "parent_p1", "汇报进度")
+    var gotProgress = false
+    var gotDone = false
+    var progressBeforeDone = false
+    var i: Int64 = 0
+    while (i < 60 && !gotDone) {
+        i++
+        match (h.recv(timeout: Duration.second)) {
+            case Some(mail) =>
+                if (mail.kind == "progress" && mail.text == "进度 50%") { gotProgress = true }
+                if (mail.kind == AgentMailKindDone) {
+                    gotDone = true
+                    progressBeforeDone = gotProgress
+                }
+            case None => ()
+        }
+    }
+    @Expect(gotDone, true)
+    @Expect(progressBeforeDone, true)
+    // 子上下文吸收过工具结果（"消息已发送"）
+    @Expect(provider.reqTexts.size >= Int64(2), true)
+    @Expect(provider.reqTexts[1].contains("消息已发送"), true)
+    h.close()
+    @Expect(waitState(h, SubagentState.Closed), true)
+}
+
+// waitReply：子问父答 → 父回复进入子下一轮上下文，回合继续至 done
+@Test
+public func subagent_sendMessage_waitReply_continuesTurn() {
+    let provider = ScriptMsgProvider(msgArgs("继续吗？", "reply", true, 10000))
+    let (mgr, providerReg) = makeSubManager(provider)
+    let h = mgr.start(subConfig(), provider, "parent_p2", "需要确认")
+    // 父先收到子的提问
+    var gotQuestion = false
+    var i: Int64 = 0
+    while (i < 40 && !gotQuestion) {
+        i++
+        match (h.recv(timeout: Duration.second)) {
+            case Some(mail) =>
+                if (mail.kind == "reply" && mail.text == "继续吗？") { gotQuestion = true }
+                else if (mail.kind == AgentMailKindDone) { @Fail("done 早于提问到达") }
+            case None => ()
+        }
+    }
+    @Expect(gotQuestion, true)
+    // 父回复 → 子回合内 waitReply 被唤醒
+    h.respond("好的，继续")
+    match (h.recv(timeout: 10 * Duration.second)) {
+        case Some(mail) => @Expect(mail.kind, AgentMailKindDone)
+        case None => @Fail("timeout waiting done after respond")
+    }
+    // 第二轮请求上下文包含父回复（工具结果 "父 Agent 回复：好的，继续"）
+    @Expect(provider.reqTexts.size >= Int64(2), true)
+    @Expect(provider.reqTexts[1].contains("父 Agent 回复：好的，继续"), true)
+    h.close()
+    @Expect(waitState(h, SubagentState.Closed), true)
+}
+
+// waitReply 超时：父不回复 → 工具返回超时提示，子回合照常结束
+@Test
+public func subagent_sendMessage_replyTimeout() {
+    let provider = ScriptMsgProvider(msgArgs("在吗？", "reply", true, 300))
+    let (mgr, providerReg) = makeSubManager(provider)
+    let h = mgr.start(subConfig(), provider, "parent_p3", "等回复")
+    // 第一封：子的提问（reply 投递）；随后父不回复 → 工具超时 → 回合结束 done
+    match (h.recv(timeout: 10 * Duration.second)) {
+        case Some(mail) => @Expect(mail.kind, "reply")
+        case None => @Fail("timeout waiting question")
+    }
+    match (h.recv(timeout: 10 * Duration.second)) {
+        case Some(mail) => @Expect(mail.kind, AgentMailKindDone)
+        case None => @Fail("timeout waiting done")
+    }
+    @Expect(provider.reqTexts.size >= Int64(2), true)
+    @Expect(provider.reqTexts[1].contains("超时"), true)
+    h.close()
+    @Expect(waitState(h, SubagentState.Closed), true)
+}
