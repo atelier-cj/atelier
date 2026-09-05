@@ -1042,9 +1042,10 @@ public interface Hook {
 - [x] 会话导出与 HTML 回放（JSONL 导出 + 自足 HTML 页面，REPL + HTTP 端点）
 - [ ] 包管理器（安装/卸载 Skills/Tools）
 - [x] 可持续子 Agent（常驻 worker + 双向 send_message，取代单向 report）
-  - [x] SubAgentManager/句柄/邮箱/消息唤醒（P0）
-  - [x] 子端 send_message 工具（progress/reply + waitReply 阻塞等待，P1）
-  - [x] 父端调度工具（start/send/await/watch/close）+ 信任 per-session（P2）
+  - [x] 基础设施 P0–P3（manager/句柄/邮箱/消息唤醒/父端工具/信任 per-session/文档）
+  - [x] 二期 P4–P7（SessionLoop 统一回合层 / resumeSession 重启恢复 / REPL 集成 / 跨进程 ACP 桥 RemoteSubAgentHandle）
+  - [x] 演进：send_message 对齐 dsh（父端更名 + subagent_reply + respond 状态感知——空闲/未等待 = follow-up 唤醒）、REPL `/subagent start --remote`、空闲回收（`idleTimeoutSec` 可配默认关）
+  - [ ] 候选/边界见下方「候选演进清单（待对账）」
 - [x] HTTP 信任管理端点（`/trust` POST，支持 get/set/reset）
 - [x] HTTP 会话管理端点（`/sessions` 列表 + `/session/fork` 克隆）
 - [x] 信任提示/申请流程（TrustDecision 三态 + ask_user 三选）
@@ -1061,8 +1062,31 @@ public interface Hook {
 - [x] CLI `atelier acp`（ACP v1 stdio Agent，被 Zed/opencode 等宿主拉起）
 - [x] Session Config Options（模型选择 `model_config` + 压缩开关）
 - [x] 会话全能力（list/load 重放/resume/delete/close）+ 工具授权（request_permission）
-- [x] e2e 线协议验证（离线 echo provider，35 断言）
-- [x] 发版衔接：`acp` 0.2.0 已发布，依赖切注册表版本
+- [x] e2e 线协议验证（离线 echo provider，38 断言）
+- [x] 发版衔接：`acp` 0.2.2 / `mcp` 2.3.7 注册表版本，依赖切回注册表
+- [x] Elicitation ask_user 表单桥（accept 答案回流回合 / decline/cancel/未声明 → 拒绝语义）
+- [x] additionalDirectories 附加工作区（会话级预信任，cwd 维持审批）
+- [x] MCP over ACP：宿主代管（session/new.mcpServers → 本地 McpManager 注册；stdio env 注入；http → streamable-http）
+
+### 候选演进清单（待对账，2026-09-05 标记）
+
+> 以下为「有意暂不实施」的候选与边界，集中在此**对账**（防遗忘、防重复评估）。
+> 条目落地/放弃时更新本表（打勾或删除），同时回标对应 plan 文档（acp-server-plan / subagent-duplex-plan 完成记录）。
+
+| 候选 | 状态 | 触发 / 再评估条件 |
+|---|---|---|
+| 父自动开回合（受控版：子来信 → 父下一回合注入，一次来信一回合） | 候选 | 出现「父长期 idle、需自动应答子 done」真实场景（现：原语 + REPL 回合边界展示 + 手动 poll/respond/subagent_reply） |
+| SessionLoop 迁移 REPL 主循环 | 暂缓 | REPL `oldMsgs` 差集落库语义冲突解决 / 出现多宿主统一输入语义需求（回归风险 > 收益） |
+| 统一 SessionRunner（输入源可插拔，REPL/HTTP/ACP 共用） | 后续演进 | 第三个会话宿主形态出现时再抽象 |
+| detach 成全局后台 agent | 后置不做 | 无明确场景 |
+| 跨进程子 waitReply 回合内插话 | 协议限制 | ACP v2 回合内消息能力落地（现降级：分回合问答，文档明示） |
+| 子主动唤醒空闲父（ACP 桥） | 协议限制 | ACP v1 无 agent 主动发起；本地子不受限（await/watch） |
+| config_option_update 主动推送 | fallback 未启用 | 出现需要 agent 主动改会话配置的宿主（现 set_config_option 响应式已覆盖） |
+| elicitation 结构化多字段 schema（工具层暴露） | 候选 | 出现多字段采集场景（现单字段表单，URL 模式未启用） |
+| session/list 元数据（title/updatedAt） | 候选 | ACP Client 需要列表元数据展示 |
+| MCP over ACP 透传（非代管形态） | 不做 | 出现「agent 远程调用宿主侧 MCP」需求再评（现宿主代管已覆盖主要场景） |
+| ACP v2（2026-07 Draft）/ HTTP-WS 传输 | 不追 | 官方 v1/v2 并行期结束 / 宿主普遍切 v2 / transports WG draft 落地 |
+| 包管理器（安装/卸载 Skills/Tools） | 未做 | Skills/Tools 安装分发场景出现 |
 
 ---
 
