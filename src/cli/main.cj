@@ -85,10 +85,13 @@ main(): Int64 {
 
         case "acp" =>
             // ACP v1 Agent（stdio 服务端）：被 Zed/opencode 等 ACP Client 拉起；
-            // agent 启动时选择（默认 default），运行期一个进程服务一个 agent
+            // agent 启动时选择（默认 default），运行期一个进程服务一个 agent。
+            // 第三参数 sessionDirOverride：远程子进程数据隔离（独立会话/映射目录）
             let acpAgentName = if (args.size > 2) { args[2] } else { "" }
+            let acpSessionDirOverride = if (args.size > 3) { args[3] } else { "" }
             runAcp(acpAgentName, toolReg, trustMgr, skillReg,
-                agentReg, providerRegForCli, sessionStore, mcpMgr, sessionDir)
+                agentReg, providerRegForCli, sessionStore, mcpMgr, sessionDir,
+                acpSessionDirOverride)
 
         case "repl" =>
             let agentName = if (args.size > 2) { args[2] } else { "default" }

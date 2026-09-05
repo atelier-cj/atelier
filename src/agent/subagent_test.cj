@@ -4,6 +4,8 @@ import std.collection.*
 import std.core.Duration
 import std.core.sleep
 import std.time.MonoTime
+import std.env.getVariable
+import std.fs.*
 import jsonvalue.*
 import atelier.message.*
 import atelier.provider.*
@@ -507,4 +509,159 @@ public func parentTools_startAndWatchInTurn() {
     @Expect(turn3.contains("[done]"), true)
     @Expect(turn3.contains("答: 帮我写报告"), true)
     @Expect(result.size >= 1, true)
+}
+
+// ========== P5：子句柄重启恢复（parentSession 标记 + resumeSession） ==========
+
+// 子会话落库 header 记录 parentSession
+@Test
+public func subagent_headerMarksParentSession() {
+    let provider = SubRecordProvider()
+    let (mgr, providerReg) = makeSubManager(provider)
+    let h = mgr.start(subConfig(), provider, "parent_r0", "首任务")
+    h.recv(timeout: 10 * Duration.second)
+    // store 经 makeSubManager 未返回——重建同构组件以取 store
+    let toolReg = ToolRegistry()
+    let trustMgr = TrustManager()
+    let skillReg = SkillRegistry()
+    let agentReg = AgentRegistry()
+    let providerReg2 = ProviderRegistry()
+    providerReg2.register("default", provider)
+    let store = MemorySessionStore()
+    let mcp = McpManager()
+    let mgr2 = SubAgentManager(toolReg, trustMgr, skillReg, agentReg, providerReg2, store, mcp)
+    let h2 = mgr2.start(subConfig(), provider, "parent_r0b", "任务B")
+    h2.recv(timeout: 10 * Duration.second)
+    match (store.loadEntries(h2.subSessionId).header.parentSession) {
+        case Some(p) => @Expect(p, "parent_r0b")
+        case None => @Fail("header.parentSession not marked")
+    }
+    h.close()
+    h2.close()
+}
+
+// 恢复：复用既有子会话历史重建句柄；续聊请求上下文包含历史
+@Test
+public func subagent_resumeSession_reusesHistory() {
+    let provider = ScriptToolProvider(ArrayList<(String, JsonValue)>())
+    let toolReg = ToolRegistry()
+    let trustMgr = TrustManager()
+    let skillReg = SkillRegistry()
+    let agentReg = AgentRegistry()
+    let providerReg = ProviderRegistry()
+    providerReg.register("default", provider)
+    let store = MemorySessionStore()
+    let mcp = McpManager()
+    let mgr1 = SubAgentManager(toolReg, trustMgr, skillReg, agentReg, providerReg, store, mcp)
+    let h1 = mgr1.start(subConfig(), provider, "parent_r1", "首任务")
+    match (h1.recv(timeout: 10 * Duration.second)) {
+        case Some(mail) => @Expect(mail.kind, AgentMailKindDone)
+        case None => @Fail("timeout waiting done")
+    }
+    let childId = h1.subSessionId
+    h1.close()
+    @Expect(waitState(h1, SubagentState.Closed), true)
+
+    // 模拟进程重启：新 manager 同一 store，恢复该子会话
+    let mgr2 = SubAgentManager(toolReg, trustMgr, skillReg, agentReg, providerReg, store, mcp)
+    match (mgr2.resumeSession(subConfig(), provider, "parent_r1", childId, SessionEnvironment())) {
+        case Some(h2) =>
+            h2.send(AgentMail("parent_r1", childId, AgentMailKindUserText, "续问"))
+            match (h2.recv(timeout: 10 * Duration.second)) {
+                case Some(mail) => @Expect(mail.kind, AgentMailKindReply)
+                case None => @Fail("timeout waiting resume reply")
+            }
+            // 续聊回合请求上下文含历史（首任务）与新输入（续问）
+            @Expect(provider.reqTexts.size >= Int64(2), true)
+            @Expect(provider.reqTexts[1].contains("首任务"), true)
+            @Expect(provider.reqTexts[1].contains("续问"), true)
+            h2.close()
+        case None => @Fail("resumeSession failed")
+    }
+}
+
+// 恢复失败路径：未知会话 / 已活跃会话
+@Test
+public func subagent_resumeSession_unknownOrActiveReturnsNone() {
+    let provider = SubRecordProvider()
+    let (mgr, providerReg) = makeSubManager(provider)
+    @Expect(mgr.resumeSession(subConfig(), provider, "parent_r2", "sub_notexist", SessionEnvironment()).isNone(), true)
+    let h = mgr.start(subConfig(), provider, "parent_r2", "任务")
+    h.recv(timeout: 10 * Duration.second)
+    // 活跃子不可重复 resume
+    @Expect(mgr.resumeSession(subConfig(), provider, "parent_r2", h.subSessionId, SessionEnvironment()).isNone(), true)
+    h.close()
+}
+
+// ========== P6：REPL /subagent 的数据源（listForParent/activeCountFor） ==========
+
+@Test
+public func subagent_parentListAndCount() {
+    let provider = SubRecordProvider()
+    let (mgr, providerReg) = makeSubManager(provider)
+    let a = mgr.start(subConfig(), provider, "parent_l1", "任务A")
+    let b = mgr.start(subConfig(), provider, "parent_l1", "任务B")
+    let other = mgr.start(subConfig(), provider, "parent_l2", "任务C")
+    a.recv(timeout: 10 * Duration.second)
+    b.recv(timeout: 10 * Duration.second)
+    other.recv(timeout: 10 * Duration.second)
+    @Expect(mgr.listForParent("parent_l1").size, 2)
+    @Expect(mgr.activeCountFor("parent_l1"), Int64(2))
+    @Expect(mgr.activeCountFor("parent_l2"), Int64(1))
+    // close 一个：仍可列出，但活跃数下降
+    b.close()
+    @Expect(waitState(b, SubagentState.Closed), true)
+    @Expect(mgr.listForParent("parent_l1").size, 2)
+    @Expect(mgr.activeCountFor("parent_l1"), Int64(1))
+    a.close()
+    other.close()
+}
+
+// ========== P7：跨进程子 Agent（ACP 桥）条件 e2e ==========
+// 前置：ATELIER_PROVIDER=echo（bash 脚本注入）且 release 二进制存在（cjpm build 后）；
+// 否则本用例空转跳过（保持常规 cjpm test 全绿）。
+@Test
+public func subagent_remoteBridge_e2e() {
+    let echoMode = match (getVariable("ATELIER_PROVIDER")) {
+        case Some(v) => v == "echo"
+        case None => false
+    }
+    if (!echoMode) { return }
+    // 由 scripts/remote_subagent_e2e.sh 保证 release 已构建（本用例随脚本运行）
+    let base = match (getVariable("PWD")) { case Some(v) => v; case None => "." }
+    let exe = base + "/target/release/bin/atelier.cli"
+    let provider = SubRecordProvider()   // 本地父 provider 仅占位（父无回合也可）
+    let toolReg = ToolRegistry()
+    let trustMgr = TrustManager()
+    let skillReg = SkillRegistry()
+    let agentReg = AgentRegistry()
+    let providerReg = ProviderRegistry()
+    providerReg.register("default", provider)
+    let store = MemorySessionStore()
+    let mcp = McpManager()
+    let mgr = SubAgentManager(toolReg, trustMgr, skillReg, agentReg, providerReg, store, mcp)
+
+    let sessionDir = Directory.createTemp(Path("/tmp")).toString() + "/remote-sub-test"
+    Directory.create(sessionDir, recursive: true)
+    let h = mgr.startRemote(exe, "default", "parent_rm", "远程你好", "/tmp", sessionDir)
+    @Expect(h.isSome(), true)
+    let handle = h.getOrThrow()
+    // 首回合 done：子进程（atelier acp echo provider）回显
+    match (handle.recv(timeout: 30 * Duration.second)) {
+        case Some(mail) =>
+            @Expect(mail.kind, AgentMailKindDone)
+            @Expect(mail.text.contains("echo: 远程你好"), true)
+        case None => @Fail("timeout waiting remote done")
+    }
+    // 续聊（第二封）：新回合 reply
+    handle.send(AgentMail("parent_rm", handle.subSessionId, AgentMailKindUserText, "远程第二问"))
+    match (handle.recv(timeout: 30 * Duration.second)) {
+        case Some(mail) =>
+            @Expect(mail.kind, AgentMailKindReply)
+            @Expect(mail.text.contains("echo: 远程第二问"), true)
+        case None => @Fail("timeout waiting remote reply")
+    }
+    handle.close()
+    @Expect(waitState(handle, SubagentState.Closed), true)
+    try { remove(Path(sessionDir), recursive: true) } catch (_) { () }
 }

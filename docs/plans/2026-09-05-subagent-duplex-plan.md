@@ -202,3 +202,87 @@ public class SubAgentManager {
 - 有状态工具（todo/ask_user/mcp 连接状态）在父子共享下的语义：ask_user 阻塞在子回合内不阻塞父（线程隔离 OK）；todo 等按工具评估隔离。
 - 父子同时跑大回合的资源：首版同进程线程模型，文档注明建议并发度。
 - `sessionTrusts` per-session 化是**行为兼容修复**：现 API 调用点（runtime/REPL/HTTP）逐一适配并回归，默认行为不变（无 session 上下文时退化为当前行为）。
+
+---
+
+# 二期（2026-09-05 追加）：宿主集成与演进
+
+P0-P3 已完成并合并（f51200c）。二期四项：
+
+## P4：SessionLoop 统一回合执行层
+把「历史 + 输入文本 → chatWithSessionId → 事件消费（可挂 cancel/事件回调）→ 落库 → 结果」从
+SubAgentWorker.runTurn 抽为公共组件（atelier.agent.SessionLoop），worker/ACP bridge/未来宿主共用；
+worker 保留消息循环与收发信职责。验收：现有 subagent P0-P2 用例全绿（无行为变化）。
+
+## P5：子句柄进程重启恢复
+- 会话落库 header 记录 parentSession（子会话 → 父会话 id）
+- manager.resumeSession(parentSessionId, childStoreId, env) → 复用既有子会话历史的句柄
+  （worker 载入历史，不再投 initial；首封消息走来信）
+验收：新 manager + 旧 store（模拟重启）resume → 续聊上下文包含历史；恢复失败路径返回 None。
+
+## P6：REPL 宿主集成
+- REPL 构建 SubAgentManager 并注册父端工具（回合内 start/watch 可用）
+- `/subagent` 斜杠命令：list / send <id> <text> / respond <id> <text> / close <id> / status
+- 每回合结束提示未处理子消息数（回合边界感知；终端阻塞读行不强行轮询）
+验收：REPL 会话中可启动子任务、跨回合查看状态与手动收发；父回合内 watch 可用。
+
+## P7：跨进程子 agent（方案先行）
+进程隔离的子 worker。候选方案：
+1) ACP 桥：父内 SubAgentHandle 后端 = AcpClient(SubprocessTransport("atelier acp <agent>"))，
+   回合语义映射 prompt/update（消息驱动 + 回合内等待均可映射，复用 acp 0.2.0）；
+2) 同进程线程（现状）仅加崩溃隔离声明；
+3) 一次性 exec（`atelier run`）——不支持双向，弃。
+推荐方案 1。先出设计评审（消息信封↔ACP 方法映射、生命周期/取消/关闭语义、acp client 复用点），
+再按设计实施（TDD）。
+
+---
+
+# P7 设计评审：跨进程子 Agent（ACP 桥）
+
+## 目标与候选
+
+进程隔离的子 worker：子 Agent 跑在独立 `atelier acp <agent>` 进程（协议边界复用 acp 0.2.0）。
+候选 2（同进程线程+崩溃隔离声明）、候选 3（一次性 exec 无双向）被否；**采用候选 1：ACP 桥**。
+
+## 拓扑
+
+```
+父进程（宿主会话/父 Agent）                     子进程（独立 atelier acp <agent>）
+  SubAgentManager ── RemoteSubAgentHandle ──> AcpClient(SubprocessTransport)
+       │  （本地 SubAgentHandle 不变）              ├─ initialize / session/new(cwd)
+       │                                            ├─ prompt(text)  ← 父 send / 首回合
+       │  setOnSessionUpdate → 收集流式进度         └─ session/cancel | close
+```
+
+## 方法映射（ACP v1 能力内）
+
+| 本地语义 | ACP 映射 | 说明 |
+|---|---|---|
+| start(agent, prompt) | connect + `session/new` + 首回合 `prompt(initial)` | 返回句柄后首回合异步（spawn 线程） |
+| send(text)（续聊/委派） | `prompt(新 user_text)` 阻塞至回合结束 | 一次 prompt = 子一次**自主回合**（含工具循环） |
+| 回信 done/reply | prompt 响应 stopReason + 最后文本 | 写 handle.outbox（聚合盒同本地） |
+| 子回合内 progress | `session/update`（tool_call/文本 chunk 等） | 经 `setOnSessionUpdate` 过滤转 progress 通知（可选增强） |
+| cancel | `session/cancel` | 子进程回合取消 → 响应 cancelled |
+| close | `session/close` + terminate 进程 | 幂等 |
+| **waitReply（回合中等待父回复）** | ❌ 不支持 | ACP v1 prompt 回合中不可插话；子需自行决策或分回合提问（父在**下一封**回复）——跨进程语义降级为「分回合问答」，文档明示 |
+| **子主动唤醒空闲父** | ❌ 不支持 | v1 无 agent 主动发起；父在回合内 watch（本地）不受影响 |
+
+## 复用点
+
+- acp 0.2.0 `AcpClient` / `SubprocessTransport` / `setOnSessionUpdate`（acp-cj 已全量验证）
+- 会话目录隔离：子进程 `HOME=独立目录`（防共享 ~/.atelier 生产数据；复用 e2e 同款临时 HOME 姿势）
+- 取消语义：client.cancel + handle 状态机复用本地实现骨架
+
+## 落地方式（建议分两步）
+
+1. **RemoteSubAgentHandle**：`SubAgentHandle` 子类覆写 send/recv/cancel/close（基类字段复用：
+   outbox 由远程结果回调写入）；manager 增加 `startRemote(agentName, parentId, prompt, cwd, envs)` 与注册表统一
+   `get()`（本地/远程并存）。父工具经 manager 调用天然同时支持两者（无接口重构）。
+2. **验证**：库行为单测用「传输抽象」注入（若 AcpClient 可注入内存对端则走 PipePair + 伪 agent；
+   否则脚本 e2e：父进程 @Test 外驱动——`scripts/` 起父（REPL 管道或独立 driver）→ 子 atelier acp
+   真实子进程 → 断言 done/reply/cancel）。全量回归 + 文档更新（跨进程能力矩阵与限制）。
+
+## 限制记录（首版接受）
+
+- 跨进程 send 为**回合式**（无回合内插话）；waitReply 跨进程 → 建议子以「分回合提问」表达
+- 子进程资源：每个远程子 = 1 个 OS 进程；close/崩溃后句柄清理路径要覆盖（进程退出检测）

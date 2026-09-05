@@ -8,6 +8,12 @@ import atelier.message.*
 // 返回错误消息字符串（成功为 None）；由调用方决定日志/告警策略。
 public func persistAppend(store: SessionStore, sessionId: String,
     oldLoaded: ArrayList<Message>, all: ArrayList<Message>): ?String {
+    persistAppendWithParent(store, sessionId, oldLoaded, all, None)
+}
+
+// 同上，但首轮 save 时在 SessionHeader 记录 parentSession（子 agent 会话标记父会话用）
+public func persistAppendWithParent(store: SessionStore, sessionId: String,
+    oldLoaded: ArrayList<Message>, all: ArrayList<Message>, parentSession: ?String): ?String {
     let newMsgs = extractNewMessages(oldLoaded, all)
     if (newMsgs.size == 0) { return None }
     let lastLeaf: Option<String> = try {
@@ -27,7 +33,7 @@ public func persistAppend(store: SessionStore, sessionId: String,
             }
         case None =>
             try {
-                let header = SessionHeader(1, sessionId, 0, 0, "", "", "", None)
+                let header = SessionHeader(1, sessionId, 0, 0, "", "", "", parentSession)
                 store.save(sessionId, header, all)
                 None
             } catch (e: Exception) {

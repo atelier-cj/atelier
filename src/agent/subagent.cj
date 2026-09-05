@@ -7,6 +7,7 @@ import std.env.getVariable
 import std.sync.*
 import stdx.log.*
 import opencj::ulid.nextId
+import acp.transport.SubprocessTransport
 import atelier.message.*
 import atelier.provider.*
 import atelier.tool.*
@@ -55,7 +56,8 @@ public enum SubagentState {
 // ===================== 子 Agent 句柄 =====================
 
 // 可持续子 Agent 句柄：父侧持有。send() 投递消息（唤醒空闲子）；recv() 取子来信（阻塞可超时）。
-public class SubAgentHandle {
+// open：跨进程远程句柄（RemoteSubAgentHandle）继承复用队列与状态
+public open class SubAgentHandle {
     public let subSessionId: String
     public let parentSessionId: String
 
@@ -79,7 +81,7 @@ public class SubAgentHandle {
     }
 
     // 父 → 子：异步投递（worker 空闲时被唤醒；已终止的 no-op）
-    public func send(mail: AgentMail): Unit {
+    public open func send(mail: AgentMail): Unit {
         if (this.exited.load()) { return }
         this.inbox.add(mail)
     }
@@ -105,12 +107,12 @@ public class SubAgentHandle {
     }
 
     // 请求取消当前回合（worker 轮询后执行 cancelSession，幂等）
-    public func cancel(): Unit {
+    public open func cancel(): Unit {
         this.cancelRequested.store(true)
     }
 
     // 请求终止 worker（空闲/回合中均尽快生效；幂等；会话历史保留）
-    public func close(): Unit {
+    public open func close(): Unit {
         this.closeRequested.store(true)
     }
 
@@ -138,6 +140,8 @@ public class SubAgentManager {
     private let lock = Mutex()
     // 父级聚合收件箱（该父全部子的来信副本；子隔离走 handle.outbox，聚合等待走这里）
     private let parentBoxes = HashMap<String, LinkedBlockingQueue<AgentMail>>()
+    // 统一回合执行（历史装载/事件消费/落库）
+    private let loop: SessionLoop
 
     public init(toolReg: ToolRegistry, trustMgr: TrustManager,
         skillReg: SkillRegistry, agentReg: AgentRegistry,
@@ -150,6 +154,7 @@ public class SubAgentManager {
         this.providerReg = providerReg
         this.sessionStore = sessionStore
         this.mcpMgr = mcpMgr
+        this.loop = SessionLoop(toolReg, trustMgr, skillReg, agentReg, providerReg, sessionStore, mcpMgr)
     }
 
     // 启动子 Agent：立即返回句柄（首回合在 worker 线程异步执行，完成后 outbox 投 done）
@@ -158,7 +163,7 @@ public class SubAgentManager {
         let childId = "sub_" + nextId()
         let h = SubAgentHandle(childId, parentSessionId)
         synchronized(this.lock) { this.handles[childId] = h }
-        this.runWorker(h, config, provider, initialPrompt, env)
+        this.runWorker(h, config, provider, Some(initialPrompt), env)
         h
     }
 
@@ -166,6 +171,23 @@ public class SubAgentManager {
     public func start(config: AgentConfig, provider: Provider,
         parentSessionId: String, initialPrompt: String): SubAgentHandle {
         this.start(config, provider, parentSessionId, initialPrompt, SessionEnvironment())
+    }
+
+    // 恢复：复用既有子会话（store 中的历史）重建可持续句柄（模拟进程重启后恢复）。
+    // 会话不存在或已注册 → None。恢复的 worker 不再投 initial，首封信即续聊输入。
+    public func resumeSession(config: AgentConfig, provider: Provider,
+        parentSessionId: String, childSessionId: String,
+        env: SessionEnvironment): ?SubAgentHandle {
+        // 会话必须存在于 store
+        let exists = try { this.sessionStore.load(childSessionId).size >= Int64(0) } catch (_) { false }
+        if (!exists) { return None }
+        synchronized(this.lock) {
+            if (this.handles.contains(childSessionId)) { return None }
+        }
+        let h = SubAgentHandle(childSessionId, parentSessionId)
+        synchronized(this.lock) { this.handles[childSessionId] = h }
+        this.runWorker(h, config, provider, None, env)
+        Some(h)
     }
 
     // 按 agent 注册名启动（父端 subagent_start 工具入口）；config/provider 从注册表解析
@@ -225,6 +247,23 @@ public class SubAgentManager {
         synchronized(this.lock) { this.handles.contains(subSessionId) }
     }
 
+    // 跨进程启动：子 agent 跑独立 `atelier acp <agent> [sessionDir]` 进程（ACP 桥）。
+    // executable：子进程可执行文件（父二进制同款，如 /path/to/atelier.cli）；
+    // sessionDir：子进程隔离会话目录（勿与父共享）；cwd：子会话工作目录。
+    // 返回句柄；握手/建会话失败以 done 错误回信（异步可见于 recv）。
+    public func startRemote(executable: String, agentName: String, parentSessionId: String,
+        initialPrompt: String, cwd: String, sessionDir: String): ?SubAgentHandle {
+        let childId = "rsub_" + nextId()
+        let args: Array<String> = ["acp", agentName, sessionDir]
+        let transport = SubprocessTransport(executable, args: args)
+        let h = RemoteSubAgentHandle(childId, parentSessionId, transport, cwd,
+            { m => this.parentBoxFor(parentSessionId).add(m) })
+        synchronized(this.lock) { this.handles[childId] = h }
+        h.send(AgentMail(parentSessionId, childId, AgentMailKindUserText, initialPrompt))
+        h.serveRemote()
+        Some(h)
+    }
+
     // 父会话级联：关闭该父的全部子 Agent（句柄从注册表移除）
     public func closeForParent(parentSessionId: String): Unit {
         let toClose = ArrayList<SubAgentHandle>()
@@ -243,6 +282,29 @@ public class SubAgentManager {
         }
     }
 
+    // 该父的全部子句柄（宿主 /subagent list 等用）
+    public func listForParent(parentSessionId: String): ArrayList<SubAgentHandle> {
+        let out = ArrayList<SubAgentHandle>()
+        synchronized(this.lock) {
+            for ((_, h) in this.handles) {
+                if (h.parentSessionId == parentSessionId) { out.add(h) }
+            }
+        }
+        out
+    }
+
+    // 该父的活跃（未关闭）子数量
+    public func activeCountFor(parentSessionId: String): Int64 {
+        let out = ArrayList<SubAgentHandle>()
+        for (h in this.listForParent(parentSessionId)) {
+            match (h.state()) {
+                case SubagentState.Closed => ()
+                case _ => out.add(h)
+            }
+        }
+        out.size
+    }
+
     // 测试/统计
     public func size(): Int64 {
         synchronized(this.lock) { this.handles.size }
@@ -251,18 +313,19 @@ public class SubAgentManager {
     // ===================== Worker：消息驱动回合循环 =====================
 
     private func runWorker(h: SubAgentHandle, config: AgentConfig, provider: Provider,
-        initialPrompt: String, env: SessionEnvironment): Unit {
+        initialMail: ?String, env: SessionEnvironment): Unit {
         spawn {
             let log = getGlobalLogger([("name", "SubAgent")])
-            var firstTurn = true
-            var turnNo: Int64 = 0
+            var pendingInitial: ?String = initialMail
+            // start：首回合(turnNo=1) 标 done；resume（无 initial）：续聊首回合即 reply
+            var turnNo: Int64 = if (initialMail.isSome()) { 0 } else { 1 }
             while (!h.closeRequested.load() && !h.exited.load()) {
-                // 首回合用启动消息；之后阻塞等待来信（1s 轮询以响应 close）
-                let mail: ?AgentMail = if (firstTurn) {
-                    firstTurn = false
-                    Some(AgentMail(h.parentSessionId, h.subSessionId, AgentMailKindUserText, initialPrompt))
-                } else {
-                    h.inbox.remove(Duration.second)
+                // 首回合可用启动消息；否则阻塞等待来信（1s 轮询以响应 close）
+                let mail: ?AgentMail = match (pendingInitial) {
+                    case Some(text) =>
+                        pendingInitial = None
+                        Some(AgentMail(h.parentSessionId, h.subSessionId, AgentMailKindUserText, text))
+                    case None => h.inbox.remove(Duration.second)
                 }
                 match (mail) {
                     case Some(m) =>
@@ -278,15 +341,10 @@ public class SubAgentManager {
         }
     }
 
-    // 单回合：历史 + 来信 → runtime 回合 → 落库 → outbox 回信（kind=首回合 done / 后续 reply）
+    // 单回合：来信 → SessionLoop（历史/消费/落库）→ outbox 回信（kind=首回合 done / 后续 reply）
     private func runTurn(h: SubAgentHandle, config: AgentConfig, provider: Provider,
         text: String, env: SessionEnvironment, log: Logger, replyKind: String): Unit {
         h.setState(SubagentState.Running)
-        var oldLoaded = ArrayList<Message>()
-        try { oldLoaded = this.sessionStore.load(h.subSessionId) } catch (_) { () }
-        let msgs = ArrayList<Message>(oldLoaded)
-        msgs.add(UserMessage(ContentList.ofText(text), 0))
-
         // 子工具注册表 = 共享全量 + send_message（避免 send_message 泄漏进父的工具列表）
         let childToolReg = ToolRegistry()
         for (t in this.toolReg.list()) { childToolReg.register(t) }
@@ -302,53 +360,15 @@ public class SubAgentManager {
             } })
         childToolReg.register(sendTool)
 
-        let runtime = AgentRuntime(config, provider, childToolReg, this.sessionStore,
-            this.trustMgr, this.skillReg, this.agentReg, this.providerReg,
-            ArrayList<Hook>(), { q => "" }, env, this.mcpMgr)
-        let stream = runtime.chatWithSessionId(h.subSessionId, msgs, env)
-        // 回合内轮询控制标志（cancel/close 及时生效），事件流消费至回合结束。
-        // AgentStartEvent 到达 ⇔ runtime 已注册 cancelFlag：此前的取消/关闭请求此时补发（幂等）。
-        var cancelArmed = false
-        var abortedByClose = false
-        var ended = false
-        while (!ended && !abortedByClose) {
-            if (h.closeRequested.load()) {
-                runtime.cancelSession(h.subSessionId)
-                abortedByClose = true
-                break
-            }
-            if (cancelArmed && h.cancelRequested.load()) {
-                runtime.cancelSession(h.subSessionId)
-                h.cancelRequested.store(false)
-            }
-            match (stream.receive(Duration.millisecond * 200)) {
-                case Some(_: AgentStartEvent) =>
-                    cancelArmed = true
-                    if (h.cancelRequested.load()) {
-                        runtime.cancelSession(h.subSessionId)
-                        h.cancelRequested.store(false)
-                    }
-                case Some(_: AgentEndEvent) => ended = true
-                case Some(_) =>
-                    if (h.cancelRequested.load()) {
-                        runtime.cancelSession(h.subSessionId)
-                        h.cancelRequested.store(false)
-                    }
-                case None => ()
-            }
-        }
-        let all = try { stream.result() } catch (e: Exception) {
-            log.error("subagent ${h.subSessionId} turn error: ${e.message}", Array<Attr>())
-            ArrayList<Message>(oldLoaded)
-        }
-        // 落库（runtime 不落库，由 worker 统一追加；错误仅记日志）
-        match (persistAppend(this.sessionStore, h.subSessionId, oldLoaded, all)) {
-            case Some(err) => log.error("subagent persist: ${err}", Array<Attr>())
-            case None => ()
-        }
+        let outcome = this.loop.run(h.subSessionId, text, config, provider, Some(childToolReg), env,
+            { => h.closeRequested.load() },
+            { => h.cancelRequested.load() },
+            parentSession: Some(h.parentSessionId))
+        // 消费掉本次取消请求（一个请求对应一次回合打断）
+        h.cancelRequested.store(false)
         // 回信：close 打断不回；否则首回合 done、后续 reply（kind 由调用方决定）
-        if (!abortedByClose) {
-            let body = lastAgentText(all)
+        if (!outcome.stoppedByClose) {
+            let body = lastAgentText(outcome.messages)
             let mail = AgentMail(h.subSessionId, h.parentSessionId, replyKind, body)
             h.outbox.add(mail)
             this.parentBoxFor(h.parentSessionId).add(mail)
