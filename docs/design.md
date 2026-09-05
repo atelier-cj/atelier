@@ -1049,6 +1049,17 @@ public interface Hook {
   - [x] REPL 交互支持（暂停 → 显示问题 → 获取输入 → 恢复）
   - [x] HTTP 端点支持（SSE `user_input_request` 事件 + `/agent/input` 端点）
 
+### Phase 5：ACP 接入（Agent 侧）
+
+- [x] AgentRuntime 会话级取消（cancelSession + 检查点，供 session/cancel）
+- [x] 工具执行开始/结束事件发射（修复事件无 producer 缺口）
+- [x] ACP 适配层 `src/acp/`（translator / session_map / config options / bridge）
+- [x] CLI `atelier acp`（ACP v1 stdio Agent，被 Zed/opencode 等宿主拉起）
+- [x] Session Config Options（模型选择 `model_config` + 压缩开关）
+- [x] 会话全能力（list/load 重放/resume/delete/close）+ 工具授权（request_permission）
+- [x] e2e 线协议验证（离线 echo provider，35 断言）
+- [ ] 发版衔接：`acp` 依赖发版后切注册表版本（当前 path 依赖）
+
 ---
 
 ## 十二、技术选型

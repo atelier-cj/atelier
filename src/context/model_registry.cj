@@ -37,4 +37,19 @@ public class ModelContextRegistry {
             case None => this.defaultContextWindow
         }
     }
+
+    // 注册自定义模型及其上下文窗口（覆盖内置同名项）
+    public func register(model: String, contextWindow: Int64): Unit {
+        this.knownModels[model] = contextWindow
+    }
+
+    // 全部已知模型名（去重无序，供枚举模型候选等场景）
+    public func list(): ArrayList<String> {
+        ArrayList<String>(this.knownModels.keys())
+    }
+
+    // 内置默认模型的上下文窗口（注册表未命中时使用）
+    public func windowOf(model: String): Int64 {
+        this.get(model)
+    }
 }
