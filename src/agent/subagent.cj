@@ -138,6 +138,8 @@ public class SubAgentManager {
     private let lock = Mutex()
     // 父级聚合收件箱（该父全部子的来信副本；子隔离走 handle.outbox，聚合等待走这里）
     private let parentBoxes = HashMap<String, LinkedBlockingQueue<AgentMail>>()
+    // 统一回合执行（历史装载/事件消费/落库）
+    private let loop: SessionLoop
 
     public init(toolReg: ToolRegistry, trustMgr: TrustManager,
         skillReg: SkillRegistry, agentReg: AgentRegistry,
@@ -150,6 +152,7 @@ public class SubAgentManager {
         this.providerReg = providerReg
         this.sessionStore = sessionStore
         this.mcpMgr = mcpMgr
+        this.loop = SessionLoop(toolReg, trustMgr, skillReg, agentReg, providerReg, sessionStore, mcpMgr)
     }
 
     // 启动子 Agent：立即返回句柄（首回合在 worker 线程异步执行，完成后 outbox 投 done）
@@ -278,15 +281,10 @@ public class SubAgentManager {
         }
     }
 
-    // 单回合：历史 + 来信 → runtime 回合 → 落库 → outbox 回信（kind=首回合 done / 后续 reply）
+    // 单回合：来信 → SessionLoop（历史/消费/落库）→ outbox 回信（kind=首回合 done / 后续 reply）
     private func runTurn(h: SubAgentHandle, config: AgentConfig, provider: Provider,
         text: String, env: SessionEnvironment, log: Logger, replyKind: String): Unit {
         h.setState(SubagentState.Running)
-        var oldLoaded = ArrayList<Message>()
-        try { oldLoaded = this.sessionStore.load(h.subSessionId) } catch (_) { () }
-        let msgs = ArrayList<Message>(oldLoaded)
-        msgs.add(UserMessage(ContentList.ofText(text), 0))
-
         // 子工具注册表 = 共享全量 + send_message（避免 send_message 泄漏进父的工具列表）
         let childToolReg = ToolRegistry()
         for (t in this.toolReg.list()) { childToolReg.register(t) }
@@ -302,53 +300,15 @@ public class SubAgentManager {
             } })
         childToolReg.register(sendTool)
 
-        let runtime = AgentRuntime(config, provider, childToolReg, this.sessionStore,
-            this.trustMgr, this.skillReg, this.agentReg, this.providerReg,
-            ArrayList<Hook>(), { q => "" }, env, this.mcpMgr)
-        let stream = runtime.chatWithSessionId(h.subSessionId, msgs, env)
-        // 回合内轮询控制标志（cancel/close 及时生效），事件流消费至回合结束。
-        // AgentStartEvent 到达 ⇔ runtime 已注册 cancelFlag：此前的取消/关闭请求此时补发（幂等）。
-        var cancelArmed = false
-        var abortedByClose = false
-        var ended = false
-        while (!ended && !abortedByClose) {
-            if (h.closeRequested.load()) {
-                runtime.cancelSession(h.subSessionId)
-                abortedByClose = true
-                break
-            }
-            if (cancelArmed && h.cancelRequested.load()) {
-                runtime.cancelSession(h.subSessionId)
-                h.cancelRequested.store(false)
-            }
-            match (stream.receive(Duration.millisecond * 200)) {
-                case Some(_: AgentStartEvent) =>
-                    cancelArmed = true
-                    if (h.cancelRequested.load()) {
-                        runtime.cancelSession(h.subSessionId)
-                        h.cancelRequested.store(false)
-                    }
-                case Some(_: AgentEndEvent) => ended = true
-                case Some(_) =>
-                    if (h.cancelRequested.load()) {
-                        runtime.cancelSession(h.subSessionId)
-                        h.cancelRequested.store(false)
-                    }
-                case None => ()
-            }
-        }
-        let all = try { stream.result() } catch (e: Exception) {
-            log.error("subagent ${h.subSessionId} turn error: ${e.message}", Array<Attr>())
-            ArrayList<Message>(oldLoaded)
-        }
-        // 落库（runtime 不落库，由 worker 统一追加；错误仅记日志）
-        match (persistAppend(this.sessionStore, h.subSessionId, oldLoaded, all)) {
-            case Some(err) => log.error("subagent persist: ${err}", Array<Attr>())
-            case None => ()
-        }
+        let outcome = this.loop.run(h.subSessionId, text, config, provider, Some(childToolReg), env,
+            { => h.closeRequested.load() },
+            { => h.cancelRequested.load() },
+            None)
+        // 消费掉本次取消请求（一个请求对应一次回合打断）
+        h.cancelRequested.store(false)
         // 回信：close 打断不回；否则首回合 done、后续 reply（kind 由调用方决定）
-        if (!abortedByClose) {
-            let body = lastAgentText(all)
+        if (!outcome.stoppedByClose) {
+            let body = lastAgentText(outcome.messages)
             let mail = AgentMail(h.subSessionId, h.parentSessionId, replyKind, body)
             h.outbox.add(mail)
             this.parentBoxFor(h.parentSessionId).add(mail)
