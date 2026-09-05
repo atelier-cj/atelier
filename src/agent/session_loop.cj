@@ -49,11 +49,13 @@ public class SessionLoop {
     // 执行一次回合。requestStop：close 请求（打断且不回信语义由调用方判定）；
     // requestCancel：cancel 请求（中断进行中回合，回合正常收敛收尾）。
     // onEvent：可选的逐事件钩子（如 ACP 事件翻译），在事件被内部消费前调用。
+    // parentSession：首轮落库写入 header.parentSession 的提示（子 agent 标记父会话用）。
     public func run(sessionId: String, inputText: String,
         config: AgentConfig, provider: Provider, toolRegOverride: ?ToolRegistry,
         env: SessionEnvironment,
         requestStop: () -> Bool, requestCancel: () -> Bool,
-        onEvent: ?(AgentEvent) -> Unit): TurnOutcome {
+        onEvent!: ?(AgentEvent) -> Unit = None,
+        parentSession!: ?String = None): TurnOutcome {
         let toolRegistry = match (toolRegOverride) {
             case Some(r) => r
             case None => this.toolReg
@@ -104,19 +106,10 @@ public class SessionLoop {
             ArrayList<Message>(oldLoaded)
         }
         // 落库（错误由调用方按日志策略处理）
-        match (persistAppend(this.sessionStore, sessionId, oldLoaded, all)) {
+        match (persistAppendWithParent(this.sessionStore, sessionId, oldLoaded, all, parentSession)) {
             case Some(err) => getGlobalLogger([("name", "SessionLoop")]).error("persist: ${err}", Array<Attr>())
             case None => ()
         }
         TurnOutcome(all, stoppedByClose)
-    }
-
-    // 无 onEvent 版本
-    public func run(sessionId: String, inputText: String,
-        config: AgentConfig, provider: Provider, toolRegOverride: ?ToolRegistry,
-        env: SessionEnvironment,
-        requestStop: () -> Bool, requestCancel: () -> Bool): TurnOutcome {
-        this.run(sessionId, inputText, config, provider, toolRegOverride, env,
-            requestStop, requestCancel, None)
     }
 }

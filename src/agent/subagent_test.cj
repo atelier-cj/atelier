@@ -508,3 +508,85 @@ public func parentTools_startAndWatchInTurn() {
     @Expect(turn3.contains("答: 帮我写报告"), true)
     @Expect(result.size >= 1, true)
 }
+
+// ========== P5：子句柄重启恢复（parentSession 标记 + resumeSession） ==========
+
+// 子会话落库 header 记录 parentSession
+@Test
+public func subagent_headerMarksParentSession() {
+    let provider = SubRecordProvider()
+    let (mgr, providerReg) = makeSubManager(provider)
+    let h = mgr.start(subConfig(), provider, "parent_r0", "首任务")
+    h.recv(timeout: 10 * Duration.second)
+    // store 经 makeSubManager 未返回——重建同构组件以取 store
+    let toolReg = ToolRegistry()
+    let trustMgr = TrustManager()
+    let skillReg = SkillRegistry()
+    let agentReg = AgentRegistry()
+    let providerReg2 = ProviderRegistry()
+    providerReg2.register("default", provider)
+    let store = MemorySessionStore()
+    let mcp = McpManager()
+    let mgr2 = SubAgentManager(toolReg, trustMgr, skillReg, agentReg, providerReg2, store, mcp)
+    let h2 = mgr2.start(subConfig(), provider, "parent_r0b", "任务B")
+    h2.recv(timeout: 10 * Duration.second)
+    match (store.loadEntries(h2.subSessionId).header.parentSession) {
+        case Some(p) => @Expect(p, "parent_r0b")
+        case None => @Fail("header.parentSession not marked")
+    }
+    h.close()
+    h2.close()
+}
+
+// 恢复：复用既有子会话历史重建句柄；续聊请求上下文包含历史
+@Test
+public func subagent_resumeSession_reusesHistory() {
+    let provider = ScriptToolProvider(ArrayList<(String, JsonValue)>())
+    let toolReg = ToolRegistry()
+    let trustMgr = TrustManager()
+    let skillReg = SkillRegistry()
+    let agentReg = AgentRegistry()
+    let providerReg = ProviderRegistry()
+    providerReg.register("default", provider)
+    let store = MemorySessionStore()
+    let mcp = McpManager()
+    let mgr1 = SubAgentManager(toolReg, trustMgr, skillReg, agentReg, providerReg, store, mcp)
+    let h1 = mgr1.start(subConfig(), provider, "parent_r1", "首任务")
+    match (h1.recv(timeout: 10 * Duration.second)) {
+        case Some(mail) => @Expect(mail.kind, AgentMailKindDone)
+        case None => @Fail("timeout waiting done")
+    }
+    let childId = h1.subSessionId
+    h1.close()
+    @Expect(waitState(h1, SubagentState.Closed), true)
+
+    // 模拟进程重启：新 manager 同一 store，恢复该子会话
+    let mgr2 = SubAgentManager(toolReg, trustMgr, skillReg, agentReg, providerReg, store, mcp)
+    match (mgr2.resumeSession(subConfig(), provider, "parent_r1", childId, SessionEnvironment())) {
+        case Some(h2) =>
+            h2.send(AgentMail("parent_r1", childId, AgentMailKindUserText, "续问"))
+            match (h2.recv(timeout: 10 * Duration.second)) {
+                case Some(mail) => @Expect(mail.kind, AgentMailKindReply)
+                case None => @Fail("timeout waiting resume reply")
+            }
+            // 续聊回合请求上下文含历史（首任务）与新输入（续问）
+            @Expect(provider.reqTexts.size >= Int64(2), true)
+            @Expect(provider.reqTexts[1].contains("首任务"), true)
+            @Expect(provider.reqTexts[1].contains("续问"), true)
+            h2.close()
+        case None => @Fail("resumeSession failed")
+    }
+}
+
+// 恢复失败路径：未知会话 / 已活跃会话
+@Test
+public func subagent_resumeSession_unknownOrActiveReturnsNone() {
+    let provider = SubRecordProvider()
+    let (mgr, providerReg) = makeSubManager(provider)
+    @Expect(mgr.resumeSession(subConfig(), provider, "parent_r2", "sub_notexist", SessionEnvironment()).isNone(), true)
+    let h = mgr.start(subConfig(), provider, "parent_r2", "任务")
+    h.recv(timeout: 10 * Duration.second)
+    // 活跃子不可重复 resume
+    @Expect(mgr.resumeSession(subConfig(), provider, "parent_r2", h.subSessionId, SessionEnvironment()).isNone(), true)
+    h.close()
+}

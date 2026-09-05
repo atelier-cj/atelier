@@ -161,7 +161,7 @@ public class SubAgentManager {
         let childId = "sub_" + nextId()
         let h = SubAgentHandle(childId, parentSessionId)
         synchronized(this.lock) { this.handles[childId] = h }
-        this.runWorker(h, config, provider, initialPrompt, env)
+        this.runWorker(h, config, provider, Some(initialPrompt), env)
         h
     }
 
@@ -169,6 +169,23 @@ public class SubAgentManager {
     public func start(config: AgentConfig, provider: Provider,
         parentSessionId: String, initialPrompt: String): SubAgentHandle {
         this.start(config, provider, parentSessionId, initialPrompt, SessionEnvironment())
+    }
+
+    // 恢复：复用既有子会话（store 中的历史）重建可持续句柄（模拟进程重启后恢复）。
+    // 会话不存在或已注册 → None。恢复的 worker 不再投 initial，首封信即续聊输入。
+    public func resumeSession(config: AgentConfig, provider: Provider,
+        parentSessionId: String, childSessionId: String,
+        env: SessionEnvironment): ?SubAgentHandle {
+        // 会话必须存在于 store
+        let exists = try { this.sessionStore.load(childSessionId).size >= Int64(0) } catch (_) { false }
+        if (!exists) { return None }
+        synchronized(this.lock) {
+            if (this.handles.contains(childSessionId)) { return None }
+        }
+        let h = SubAgentHandle(childSessionId, parentSessionId)
+        synchronized(this.lock) { this.handles[childSessionId] = h }
+        this.runWorker(h, config, provider, None, env)
+        Some(h)
     }
 
     // 按 agent 注册名启动（父端 subagent_start 工具入口）；config/provider 从注册表解析
@@ -254,18 +271,19 @@ public class SubAgentManager {
     // ===================== Worker：消息驱动回合循环 =====================
 
     private func runWorker(h: SubAgentHandle, config: AgentConfig, provider: Provider,
-        initialPrompt: String, env: SessionEnvironment): Unit {
+        initialMail: ?String, env: SessionEnvironment): Unit {
         spawn {
             let log = getGlobalLogger([("name", "SubAgent")])
-            var firstTurn = true
-            var turnNo: Int64 = 0
+            var pendingInitial: ?String = initialMail
+            // start：首回合(turnNo=1) 标 done；resume（无 initial）：续聊首回合即 reply
+            var turnNo: Int64 = if (initialMail.isSome()) { 0 } else { 1 }
             while (!h.closeRequested.load() && !h.exited.load()) {
-                // 首回合用启动消息；之后阻塞等待来信（1s 轮询以响应 close）
-                let mail: ?AgentMail = if (firstTurn) {
-                    firstTurn = false
-                    Some(AgentMail(h.parentSessionId, h.subSessionId, AgentMailKindUserText, initialPrompt))
-                } else {
-                    h.inbox.remove(Duration.second)
+                // 首回合可用启动消息；否则阻塞等待来信（1s 轮询以响应 close）
+                let mail: ?AgentMail = match (pendingInitial) {
+                    case Some(text) =>
+                        pendingInitial = None
+                        Some(AgentMail(h.parentSessionId, h.subSessionId, AgentMailKindUserText, text))
+                    case None => h.inbox.remove(Duration.second)
                 }
                 match (mail) {
                     case Some(m) =>
@@ -303,7 +321,7 @@ public class SubAgentManager {
         let outcome = this.loop.run(h.subSessionId, text, config, provider, Some(childToolReg), env,
             { => h.closeRequested.load() },
             { => h.cancelRequested.load() },
-            None)
+            parentSession: Some(h.parentSessionId))
         // 消费掉本次取消请求（一个请求对应一次回合打断）
         h.cancelRequested.store(false)
         // 回信：close 打断不回；否则首回合 done、后续 reply（kind 由调用方决定）
