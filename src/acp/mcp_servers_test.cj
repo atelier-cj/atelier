@@ -12,7 +12,7 @@ public func acpMcp_stdioMapping() {
     let c = cfg.getOrThrow()
     @Expect(c.name, "fs")
     @Expect(c.transport, "stdio")
-    @Expect(c.command, "npx")
+    @Expect(c.command, "npx -y x")   // args 已拼回 command
 }
 
 // http：type http + url + headers → streamable-http + headers
@@ -58,4 +58,23 @@ public func acpMcp_underscoreNamePassesThrough() {
     let cfg = acpMcpServerToConfig(s)
     @Expect(cfg.isSome(), true)
     @Expect(cfg.getOrThrow().name, "my_fs")
+}
+
+// stdio + env：EnvVariable → cfg.env
+@Test
+public func acpMcp_stdioEnvMapping() {
+    let ev = EnvVariable()
+    ev.name = "API_TOKEN"
+    ev.value = "secret"
+    let evs = ArrayList<EnvVariable>()
+    evs.add(ev)
+    let s = McpServer.stdio("svc", "server-tool", env: evs)
+    let cfg = acpMcpServerToConfig(s)
+    @Expect(cfg.isSome(), true)
+    let c = cfg.getOrThrow()
+    @Expect(c.env.size, 1)
+    match (c.env.get("API_TOKEN")) {
+        case Some(v) => @Expect(v, "secret")
+        case None => @Fail("env lost")
+    }
 }

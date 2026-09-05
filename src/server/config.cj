@@ -342,6 +342,8 @@ public class TomlMcpServer <: Serializable<TomlMcpServer> {
     public var command: String = ""
     public var url: String = ""
     public var headerList: ArrayList<String> = ArrayList()
+    // stdio 子进程环境（数组字符串 "K=V"，同 headers 风格）
+    public var envList: ArrayList<String> = ArrayList()
     public init() {}
 
     public func serialize(): DataModel {
@@ -351,6 +353,7 @@ public class TomlMcpServer <: Serializable<TomlMcpServer> {
             .add(field<String>("command", command))
             .add(field<String>("url", url))
             .add(field<ArrayList<String>>("headers", headerList))
+            .add(field<ArrayList<String>>("env", envList))
     }
 
     public static func deserialize(dm: DataModel): TomlMcpServer {
@@ -367,22 +370,38 @@ public class TomlMcpServer <: Serializable<TomlMcpServer> {
                 }
             case _ => ()
         }
+        match (dms.get("env")) {
+            case seq: DataModelSeq =>
+                for (e in seq.getItems()) {
+                    match (e) { case s: DataModelString => r.envList.add(s.getValue()); case _ => () }
+                }
+            case _ => ()
+        }
         r
     }
 
     public func toMcpServerConfig(): McpServerConfig {
         let hdrs = HashMap<String, String>()
-        for (h in this.headerList) {
-            let colonIdx = h.indexOf(":")
-            match (colonIdx) {
-                case Some(idx) =>
-                    let key = trimStr(h[0..idx])
-                    let val = trimStr(h[(idx + 1)..])
-                    hdrs[key] = val
-                case None => ()
-            }
+        for (h in this.headerList) { kvAssign(hdrs, h, ":") }
+        let envs = HashMap<String, String>()
+        for (e in this.envList) { kvAssign(envs, e, "=") }
+        if (envs.size > 0) {
+            McpServerConfig(this.name, this.transport, this.command, this.url, hdrs, envs)
+        } else {
+            McpServerConfig(this.name, this.transport, this.command, this.url, hdrs)
         }
-        McpServerConfig(this.name, this.transport, this.command, this.url, hdrs)
+    }
+}
+
+// "K:V" / "K=V" 列表 → map（K/V 去首尾空白；分隔符缺失的项跳过）
+func kvAssign(m: HashMap<String, String>, entry: String, sep: String): Unit {
+    let idx = entry.indexOf(sep)
+    match (idx) {
+        case Some(i) =>
+            let key = trimStr(entry[0..i])
+            let val = trimStr(entry[(i + 1)..])
+            if (key != "") { m[key] = val }
+        case None => ()
     }
 }
 

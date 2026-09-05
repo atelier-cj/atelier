@@ -16,9 +16,29 @@ public func acpMcpServerToConfig(s: McpServer): ?McpServerConfig {
     }
     if (typ == "stdio") {
         match (s.command) {
-            case Some(cmd) =>
-                if (cmd == "") { return None }
-                Some(McpServerConfig(s.name, "stdio", cmd, ""))
+            case Some(cmd0) =>
+                if (cmd0 == "") { return None }
+                // args 拼回 command（McpServerConfig/StdioClientTransport 为单命令串模型）
+                var cmd = cmd0
+                match (s.args) {
+                    case Some(a) =>
+                        for (a0 in a) { cmd = cmd + " " + a0 }
+                    case None => ()
+                }
+                // stdio 进程 env：ACP EnvVariable → cfg.env（无 env 时保持旧构造）
+                var envMap = HashMap<String, String>()
+                match (s.env) {
+                    case Some(evs) =>
+                        for (ev in evs) {
+                            if (ev.name != "") { envMap[ev.name] = ev.value }
+                        }
+                    case None => ()
+                }
+                if (envMap.size > 0) {
+                    Some(McpServerConfig(s.name, "stdio", cmd, "", HashMap<String, String>(), envMap))
+                } else {
+                    Some(McpServerConfig(s.name, "stdio", cmd, ""))
+                }
             case None => None
         }
     } else if (typ == "http") {

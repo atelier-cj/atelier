@@ -280,6 +280,31 @@ def main():
     c3.proc.stdin.close()
     proc3.wait(timeout=15)
 
+    # ---- 10. 真实 MCP server 接入（mini_mcp_server + stdio env 注入） ----
+    marker = tempfile.mkdtemp(prefix="acp-mcp-") + "/marker.log"
+    c4, homedir4, proc4 = spawn_client()
+    c4.rpc("initialize", {"protocolVersion": 1, "clientCapabilities": {}})
+    resp = c4.rpc("session/new", {"cwd": "/tmp", "mcpServers": [{
+        "name": "minisrv", "command": "python3",
+        "args": [os.path.join(ROOT, "scripts", "mini_mcp_server.py")],
+        "env": [{"name": "TOKEN", "value": "t123"}, {"name": "MCP_MARKER_FILE", "value": marker}]}]})
+    check("mcp session/new ok", resp.get("error") is None, str(resp.get("error")))
+    # 轮询 server marker：真实握手 + env 注入
+    mcp_ok = False
+    end = time.time() + 25
+    while time.time() < end and not mcp_ok:
+        if os.path.exists(marker):
+            try:
+                content = open(marker).read()
+                if "initialize" in content and "token=t123" in content:
+                    mcp_ok = True
+            except Exception:
+                pass
+        time.sleep(0.5)
+    check("mcp 真实握手+env 注入", mcp_ok, "marker missing/incomplete")
+    c4.proc.stdin.close()
+    proc4.wait(timeout=15)
+
     print(f"\n结果: PASS {passed} / FAIL {failed}")
     sys.exit(1 if failed else 0)
 
