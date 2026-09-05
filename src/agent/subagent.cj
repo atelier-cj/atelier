@@ -142,6 +142,8 @@ public open class SubAgentHandle {
 
 // 组件与 AgentTool 同源（同进程共享 toolReg/trustMgr/mcpMgr 等），
 // start() 为每个子 Agent 启动常驻 worker（消息驱动回合循环）。
+// idleTimeoutSec > 0：本地子 worker 连续空闲 N 秒自动回收（close + 从注册表摘除，
+// 会话历史保留，resumeSession 可重建）；0（默认）= 永不自动回收（显式 close 语义）。
 public class SubAgentManager {
     private let toolReg: ToolRegistry
     private let trustMgr: TrustManager
@@ -150,6 +152,8 @@ public class SubAgentManager {
     private let providerReg: ProviderRegistry
     private let sessionStore: SessionStore
     private let mcpMgr: McpManager
+    // 本地子空闲自动回收阈值（秒；0 = 不回收）。远程子无 idle 探测通道，仅显式 close。
+    private let idleTimeoutSec: Int64
     private let handles = HashMap<String, SubAgentHandle>()
     private let lock = Mutex()
     // 父级聚合收件箱（该父全部子的来信副本；子隔离走 handle.outbox，聚合等待走这里）
@@ -160,7 +164,7 @@ public class SubAgentManager {
     public init(toolReg: ToolRegistry, trustMgr: TrustManager,
         skillReg: SkillRegistry, agentReg: AgentRegistry,
         providerReg: ProviderRegistry, sessionStore: SessionStore,
-        mcpMgr: McpManager) {
+        mcpMgr: McpManager, idleTimeoutSec!: Int64 = 0) {
         this.toolReg = toolReg
         this.trustMgr = trustMgr
         this.skillReg = skillReg
@@ -168,6 +172,7 @@ public class SubAgentManager {
         this.providerReg = providerReg
         this.sessionStore = sessionStore
         this.mcpMgr = mcpMgr
+        this.idleTimeoutSec = idleTimeoutSec
         this.loop = SessionLoop(toolReg, trustMgr, skillReg, agentReg, providerReg, sessionStore, mcpMgr)
     }
 
@@ -345,8 +350,11 @@ public class SubAgentManager {
             var pendingInitial: ?String = initialMail
             // start：首回合(turnNo=1) 标 done；resume（无 initial）：续聊首回合即 reply
             var turnNo: Int64 = if (initialMail.isSome()) { 0 } else { 1 }
+            // 空闲计时（秒）：来信/回合重置；达 idleTimeoutSec 触发自动回收
+            var idleSec: Int64 = 0
+            var reclaimed = false
             while (!h.closeRequested.load() && !h.exited.load()) {
-                // 首回合可用启动消息；否则阻塞等待来信（1s 轮询以响应 close）
+                // 首回合可用启动消息；否则阻塞等待来信（1s 轮询以响应 close/回收计时）
                 let mail: ?AgentMail = match (pendingInitial) {
                     case Some(text) =>
                         pendingInitial = None
@@ -355,15 +363,26 @@ public class SubAgentManager {
                 }
                 match (mail) {
                     case Some(m) =>
+                        idleSec = 0
                         if (m.kind == AgentMailKindUserText) {
                             turnNo++
                             let kind = if (turnNo == Int64(1)) { AgentMailKindDone } else { AgentMailKindReply }
                             this.runTurn(h, config, provider, m.text, env, log, kind)
                         }
-                    case None => ()
+                    case None =>
+                        // 1s 轮询空转：累计空闲（回合外无来信不打断正在执行的回合）
+                        idleSec++
+                        if (this.idleTimeoutSec > 0 && idleSec >= this.idleTimeoutSec) {
+                            reclaimed = true
+                            break
+                        }
                 }
             }
             h.markExited()
+            if (reclaimed) {
+                // 自动回收：从注册表摘除（显式 close / closeForParent 不摘除，语义保持）
+                synchronized(this.lock) { this.handles.remove(h.subSessionId) }
+            }
         }
     }
 

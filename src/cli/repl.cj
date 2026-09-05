@@ -2,7 +2,7 @@ package atelier.cli
 
 import std.env.*
 import std.collection.*
-import std.fs.{File, Path}
+import std.fs.*
 import stdx.log.*
 import atelier.agent.*
 import atelier.message.*
@@ -15,6 +15,39 @@ import atelier.session.exportToHtml
 import atelier.trust.*
 import atelier.skill.*
 import opencj::ulid.nextId
+
+// ===================== /subagent start 参数解析（file-only，供单测） =====================
+
+// parts = "/subagent start ..." 切词结果：返回 (isRemote, agentName, prompt)
+// agentName == "" = 缺 agent（调用方打印用法）。prompt 允许空串（与旧行为一致由调用方容忍）。
+func parseSubStartArgs(parts: Array<String>): (Bool, String, String) {
+    if (parts.size < 3) { return (false, "", "") }
+    if (parts[2] == "--remote") {
+        if (parts.size < 4) { return (true, "", "") }
+        (true, parts[3], joinWords(parts, 4))
+    } else {
+        (false, parts[2], joinWords(parts, 3))
+    }
+}
+
+func joinWords(parts: Array<String>, from: Int64): String {
+    var out = ""
+    for (i in from..parts.size) {
+        if (out != "") { out = out + " " }
+        out = out + parts[Int64(i)]
+    }
+    out
+}
+
+// 当前可执行文件真实路径：Linux /proc/self/exe 符号链接递归解析；
+// 解析失败回退 "atelier.cli"（依赖 PATH/相对路径——远程子进程由此启动）。
+func currentExePath(): String {
+    try {
+        let p = SymbolicLink.readFrom(Path("/proc/self/exe"), recursive: true)
+        if (p.toString() != "") { return p.toString() }
+    } catch (_) { () }
+    "atelier.cli"
+}
 
 public class REPL {
     private let MaxLoadMessages: Int64 = 15
@@ -35,13 +68,15 @@ public class REPL {
     private var sessionCounter: Int64
     private var modelOverride: String
     private let subMgr: SubAgentManager
+    // 会话数据目录（远程子进程隔离目录的基座：<sessionDir>/remote-sub/<childId>）
+    private let sessionDir: String
 
     public init(agentName: String, registry: SlashCommandRegistry,
         agentConfig: AgentConfig, provider: Provider,
         toolRegistry: ToolRegistry, sessionStore: SessionStore,
         trustManager: TrustManager, skillRegistry: SkillRegistry,
         agentRegistry: AgentRegistry, providerRegistry: ProviderRegistry,
-        resumeSessionId: String, mcpManager: McpManager) {
+        resumeSessionId: String, mcpManager: McpManager, sessionDir: String) {
         this.agentName = agentName
         this.registry = registry
         this.agentConfig = agentConfig
@@ -53,6 +88,7 @@ public class REPL {
         this.agentRegistry = agentRegistry
         this.providerRegistry = providerRegistry
         this.mcpManager = mcpManager
+        this.sessionDir = sessionDir
         this.sessionCounter = 1
         this.modelOverride = ""
         // 可持续子 Agent：REPL 会话内的父端调度（回合内工具 + /subagent 命令）
@@ -209,18 +245,36 @@ public class REPL {
         }
     }
 
-    // /subagent list|status|send <id> <text>|respond <id> <text>|close <id>
+    // /subagent 命令区（file-only 解析函数在同文件尾部上方，见 parseSubStartArgs/currentExePath）
+
+    // /subagent start [--remote] <agent> <prompt>：默认本地子；--remote 启动独立
+    // `atelier acp` 进程承载的跨进程子（数据隔离于 <sessionDir>/remote-sub/<childId>）
+    private func startRemoteByName(agentName: String, prompt: String): Unit {
+        let exe = currentExePath()
+        let cwd = try { getWorkingDirectory().toString() } catch (_) { "." }
+        // 隔离目录：子进程 bstorm/映射文件不与会话目录争用（同 startRemote 库语义）
+        let childDir = this.sessionDir + "/remote-sub/" + nextId()
+        try { Directory.create(Path(childDir), recursive: true) } catch (_) { () }
+        match (this.subMgr.startRemote(exe, agentName, this.sessionId, prompt, cwd, childDir)) {
+            case Some(h) =>
+                println("已启动远程子 Agent：${h.subSessionId}（进程 ${exe}，目录 ${childDir}）")
+            case None =>
+                println("远程子启动失败：agent '${agentName}' 未注册或进程不可用")
+        }
+    }
+
+    // /subagent list|status|poll|start [--remote] <agent> <prompt>|send|respond|close
     private func handleSubagentCommand(line: String): Unit {
         let parts = line.split(" ")
         if (parts.size < 2) {
-            println("Usage: /subagent list | poll | start <agent> <prompt> | send <id> <text> | respond <id> <text> | close <id>")
+            println("Usage: /subagent list | poll | start [--remote] <agent> <prompt> | send <id> <text> | respond <id> <text> | close <id>")
             return
         }
         let sub = parts[1]
         if (sub == "list" || sub == "status") {
             let list = this.subMgr.listForParent(this.sessionId)
             if (list.size == 0) {
-                println("没有子 Agent（回合内可用 subagent_start 工具启动）")
+                println("没有子 Agent（回合内可用 subagent_start 工具启动；远程子经 /subagent start --remote）")
                 return
             }
             for (h in list) {
@@ -245,15 +299,17 @@ public class REPL {
             return
         }
         if (sub == "start") {
-            if (parts.size < 4) { println("Usage: /subagent start <agent> <prompt>"); return }
-            var promptText = ""
-            for (i in 3..parts.size) {
-                if (promptText != "") { promptText = promptText + " " }
-                promptText = promptText + parts[Int64(i)]
-            }
-            match (this.subMgr.startByName(parts[2], this.sessionId, promptText)) {
-                case Some(h) => println("已启动子 Agent：${h.subSessionId}")
-                case None => println("子 agent '${parts[2]}' 未注册或 provider 不可用")
+            // /subagent start [--remote] <agent> <prompt>：默认本地子；--remote 启动独立
+            // `atelier acp` 进程承载的跨进程子（数据隔离于 <sessionDir>/remote-sub/<childId>）
+            let (remote, agent, promptText) = parseSubStartArgs(parts)
+            if (agent == "") { println("Usage: /subagent start [--remote] <agent> <prompt>"); return }
+            if (remote) {
+                this.startRemoteByName(agent, promptText)
+            } else {
+                match (this.subMgr.startByName(agent, this.sessionId, promptText)) {
+                    case Some(h) => println("已启动子 Agent：${h.subSessionId}")
+                    case None => println("子 agent '${agent}' 未注册或 provider 不可用")
+                }
             }
             return
         }
