@@ -44,6 +44,9 @@ Atelier 的 **Agent-as-Tool** 升级形态：子 Agent 不再是「一次性委�
 | `SubAgentHandle.send(mail)` | 投递（异步，唤醒空闲子） |
 | `SubAgentHandle.recv(timeout)` | 收该子来信（阻塞可超时） |
 | `SubAgentHandle.respond(text)` | 回复子回合内提问（replyQueue） |
+| `SubAgentHandle.recv(timeout)` | 收该子来信（阻塞可超时） |
+| `SubAgentHandle.pollOnce()` | 非阻塞尝试取一封（宿主输入循环轮询用） |
+| `manager.pollChildren(parentId)` | 该父全部子的未读来信（非阻塞聚合） |
 | `SubAgentHandle.cancel() / close()` | 中断当前回合 / 请求终止 |
 
 ```cangjie
@@ -75,6 +78,18 @@ match (h.recv(timeout: 5 * Duration.minute)) {
 {"text": "进度 50%，遇到一个 API 疑问", "kind": "progress"}
 {"text": "是否允许改用方案 B？", "kind": "reply", "waitReply": true}
 ```
+
+## 宿主集成与回合外消息可见
+
+- **回合执行统一**：本地子 worker 与 ACP 会话桥均基于 `SessionLoop`（同一回合语义：历史装载/事件消费/取消/落库）。
+- **回合外消息可见**：宿主输入循环可用 `manager.pollChildren(parentSessionId)` / `handle.pollOnce()`
+  非阻塞查看子来信（真正「父被唤醒开新回合」由宿主按自身输入模型决定；`awaitChildren` 提供阻塞原语）。
+- **REPL**（进程内父宿主）：
+  - 回合内工具：`subagent_start / send / await / watch / close`（自动注册）
+  - `/subagent list | poll | start <agent> <prompt> | send <id> <text> | respond <id> <text> | close <id>`
+  - 每回合收尾自动展示该父子的未读消息（poll 结果）
+- **跨进程子（ACP 桥）在 REPL 的兼容**：`/subagent list/send/close` 对远程句柄同样有效
+  （send=一次远程自主回合）；`respond` 仅本地子支持（远程回合内插话受 ACP v1 限制）。
 
 ## 父 Agent 端工具
 

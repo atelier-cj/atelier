@@ -50,25 +50,31 @@ public class SessionLoop {
     // requestCancel：cancel 请求（中断进行中回合，回合正常收敛收尾）。
     // onEvent：可选的逐事件钩子（如 ACP 事件翻译），在事件被内部消费前调用。
     // parentSession：首轮落库写入 header.parentSession 的提示（子 agent 标记父会话用）。
+    // approvalFn：工具级授权回调（ACP 权限桥注入；None 走默认文本 askUser）。
+    // maxLoad：历史加载截断窗口（0=不截断；>0 语义同 truncateMessages，保留 Archive 头部）。
     public func run(sessionId: String, inputText: String,
         config: AgentConfig, provider: Provider, toolRegOverride: ?ToolRegistry,
         env: SessionEnvironment,
         requestStop: () -> Bool, requestCancel: () -> Bool,
         onEvent!: ?(AgentEvent) -> Unit = None,
-        parentSession!: ?String = None): TurnOutcome {
+        parentSession!: ?String = None,
+        approvalFn!: ?(ToolCallBlock, String) -> String = None,
+        maxLoad!: Int64 = 0): TurnOutcome {
         let toolRegistry = match (toolRegOverride) {
             case Some(r) => r
             case None => this.toolReg
         }
         var oldLoaded = ArrayList<Message>()
         try { oldLoaded = this.sessionStore.load(sessionId) } catch (_) { () }
-        let msgs = ArrayList<Message>(oldLoaded)
+        let loaded = if (maxLoad > 0) { truncateMessages(oldLoaded, maxLoad) } else { oldLoaded }
+        let msgs = ArrayList<Message>(loaded)
         if (inputText != "") {
             msgs.add(UserMessage(ContentList.ofText(inputText), 0))
         }
         let runtime = AgentRuntime(config, provider, toolRegistry, this.sessionStore,
             this.trustMgr, this.skillReg, this.agentReg, this.providerReg,
             ArrayList<Hook>(), { q => "" }, env, this.mcpMgr)
+        runtime.toolApprovalFn = approvalFn
         let stream = runtime.chatWithSessionId(sessionId, msgs, env)
         // 事件消费 + 控制轮询；AgentStartEvent 到达 ⇔ runtime 已注册 cancelFlag：
         // 早到的取消/关闭请求在事件到达后补发（幂等）。

@@ -42,6 +42,22 @@ public func persistAppendWithParent(store: SessionStore, sessionId: String,
     }
 }
 
+// 截断保留最近 max 条；窗口外的 ArchiveMessage（历史归档标记）保留在最前（防绝对序号错位）。
+// SessionLoop/ACP bridge/REPL 共用同一语义。
+public func truncateMessages(messages: ArrayList<Message>, max: Int64): ArrayList<Message> {
+    if (messages.size <= max) { return messages }
+    let recent = ArrayList<Message>()
+    let start = messages.size - max
+    for (i in 0..start) {
+        match (messages[Int64(i)]) {
+            case am: ArchiveMessage => recent.add(messages[Int64(i)])
+            case _ => ()
+        }
+    }
+    for (i in start..messages.size) { recent.add(messages[Int64(i)]) }
+    recent
+}
+
 // 提取 newMsgs 中 oldMsgs 最后一条消息之后的消息（内容比较定位，兼容压缩/归档轮）。
 // 定位失败（旧尾部被归档替换）时降级：差集法（newMsgs 中与 oldMsgs 全部不同的消息 = 新消息）。
 // REPL 与 ACP 回合落库共用（runtime 不落库，由宿主统一追加）。

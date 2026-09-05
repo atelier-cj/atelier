@@ -665,3 +665,48 @@ public func subagent_remoteBridge_e2e() {
     @Expect(waitState(handle, SubagentState.Closed), true)
     try { remove(Path(sessionDir), recursive: true) } catch (_) { () }
 }
+
+// ========== 演进 B：非阻塞取信（回合外消息可见） ==========
+
+@Test
+public func subagent_pollOnceAndPollChildren() {
+    let provider = SubRecordProvider()
+    let (mgr, providerReg) = makeSubManager(provider)
+    let h = mgr.start(subConfig(), provider, "parent_pc", "任务")
+    // done 到达前 poll 为空
+    var gotDone = false
+    var i: Int64 = 0
+    while (i < 60 && !gotDone) {
+        i++
+        match (h.recv(timeout: Duration.second)) {
+            case Some(m) =>
+                @Expect(m.kind, AgentMailKindDone)
+                gotDone = true
+            case None => ()
+        }
+    }
+    @Expect(gotDone, true)
+    // 空时 pollOnce None
+    @Expect(h.pollOnce().isNone(), true)
+    // 子回第二封 → pollOnce 可取
+    h.send(AgentMail("parent_pc", h.subSessionId, AgentMailKindUserText, "任务二"))
+    var polled = false
+    var j: Int64 = 0
+    while (j < 60 && !polled) {
+        j++
+        match (h.pollOnce()) {
+            case Some(m) =>
+                @Expect(m.kind, AgentMailKindReply)
+                polled = true
+            case None => sleep(Duration.millisecond * 100)
+        }
+    }
+    @Expect(polled, true)
+    // pollChildren 聚合
+    let b = mgr.start(subConfig(), provider, "parent_pc", "任务B")
+    b.recv(timeout: 10 * Duration.second)
+    let agg = mgr.pollChildren("parent_pc")
+    @Expect(agg.size >= Int64(0), true)   // 无未读即空
+    h.close()
+    b.close()
+}

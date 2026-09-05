@@ -91,6 +91,11 @@ public open class SubAgentHandle {
         this.outbox.remove(timeout)
     }
 
+    // 子 → 父：非阻塞尝试取一封（无信返回 None；宿主输入循环轮询用）
+    public func pollOnce(): ?AgentMail {
+        this.outbox.remove(Duration.millisecond)
+    }
+
     // 父 → 子：回复子回合内 send_message(waitReply=true) 的提问（专用通道）。
     // 子空闲时调用无即时效果（消息留存，供其后续回合内 waitReply 消费）。
     public func respond(text: String): Unit {
@@ -288,6 +293,18 @@ public class SubAgentManager {
         synchronized(this.lock) {
             for ((_, h) in this.handles) {
                 if (h.parentSessionId == parentSessionId) { out.add(h) }
+            }
+        }
+        out
+    }
+
+    // 该父全部子的未读来信（非阻塞；各子至多取一封，供宿主回合外展示/唤醒提示）
+    public func pollChildren(parentSessionId: String): ArrayList<AgentMail> {
+        let out = ArrayList<AgentMail>()
+        for (h in this.listForParent(parentSessionId)) {
+            match (h.pollOnce()) {
+                case Some(m) => out.add(m)
+                case None => ()
             }
         }
         out

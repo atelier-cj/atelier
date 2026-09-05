@@ -179,6 +179,10 @@ public class REPL {
         if (lastText != "") {
             println(lastText)
         }
+        let pending = this.subMgr.pollChildren(this.sessionId)
+        for (m in pending) {
+            println("  [subagent:${m.from}] ${m.kind}: ${m.text}")
+        }
         let subCount = this.subMgr.activeCountFor(this.sessionId)
         if (subCount > 0) {
             println("  [subagent] ${subCount} 个子 Agent 运行中 —— /subagent list 查看")
@@ -209,7 +213,7 @@ public class REPL {
     private func handleSubagentCommand(line: String): Unit {
         let parts = line.split(" ")
         if (parts.size < 2) {
-            println("Usage: /subagent list | send <id> <text> | respond <id> <text> | close <id>")
+            println("Usage: /subagent list | poll | start <agent> <prompt> | send <id> <text> | respond <id> <text> | close <id>")
             return
         }
         let sub = parts[1]
@@ -226,6 +230,30 @@ public class REPL {
                     case SubagentState.Closed => "closed"
                 }
                 println("  ${h.subSessionId}  ${st}")
+            }
+            return
+        }
+        if (sub == "poll") {
+            let got = this.subMgr.pollChildren(this.sessionId)
+            if (got.size == 0) {
+                println("没有未读子消息")
+                return
+            }
+            for (m in got) {
+                println("  [${m.from}] ${m.kind}: ${m.text}")
+            }
+            return
+        }
+        if (sub == "start") {
+            if (parts.size < 4) { println("Usage: /subagent start <agent> <prompt>"); return }
+            var promptText = ""
+            for (i in 3..parts.size) {
+                if (promptText != "") { promptText = promptText + " " }
+                promptText = promptText + parts[Int64(i)]
+            }
+            match (this.subMgr.startByName(parts[2], this.sessionId, promptText)) {
+                case Some(h) => println("已启动子 Agent：${h.subSessionId}")
+                case None => println("子 agent '${parts[2]}' 未注册或 provider 不可用")
             }
             return
         }

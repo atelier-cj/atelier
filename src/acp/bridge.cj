@@ -51,6 +51,8 @@ public class AcpBridge {
     private let manager: AcpSessionManager
     private let hosts = HashMap<String, HostState>()
     private let hostsLock = Mutex()
+    // 统一回合执行（与子 worker 同源）
+    private let loop: SessionLoop
     // session/new 钩子链：onNewSession 先于 setInitialSessionState，用于关联刚建的 host
     private var lastNewAcpId: String = ""
 
@@ -80,6 +82,7 @@ public class AcpBridge {
         this.mcpMgr = mcpMgr
         this.modelReg = modelReg
         this.manager = AcpSessionManager(mappingFile)
+        this.loop = SessionLoop(toolReg, trustMgr, skillReg, agentReg, providerReg, sessionStore, mcpMgr)
         this.agent = AcpAgent(StdioTransport(), acpName, acpVersion)
         this.agent.capabilities.loadSession = true
         this.agent.capabilities.sessionCapabilities.list = Some(EmptyCapability())
@@ -212,19 +215,8 @@ public class AcpBridge {
         this.manager.dropActive(acpId)
     }
 
-    // session/cancel：中断进行中回合（runtime 协作式取消，幂等）
-    private func onCancel(acpId: String): Unit {
-        synchronized(this.hostsLock) {
-            match (this.hosts.get(acpId)) {
-                case Some(h) =>
-                    match (h.activeRuntime) {
-                        case Some(r) => r.cancelSession(h.session.atelierId)
-                        case None => ()
-                    }
-                case None => ()
-            }
-        }
-    }
+    // session/cancel：AcpAgent 置 cancelFlag；回合消费循环经 ctx.isCancelled 触发作废（幂等空实现）
+    private func onCancel(acpId: String): Unit { () }
 
     // session/set_config_option：会话级覆盖（model select / compaction boolean），
     // 非法值返回 None（AcpAgent 回 -32602）；成功响应完整最新列表
@@ -291,116 +283,32 @@ public class AcpBridge {
         let atelierId = host.session.atelierId
         // 1. 会话级覆盖生效的 config（model / compaction）
         let cfg = this.buildConfig(host.options.effectiveModel(), host.options.effectiveCompaction())
-        // 2. runtime（13 参：含 sessionEnv 与 mcpManager）
         let env = SessionEnvironment(host.session.cwd, HashMap<String, String>())
-        let runtime = AgentRuntime(cfg, this.provider, this.toolReg, this.sessionStore,
-            this.trustMgr, this.skillReg, this.agentReg, this.providerReg,
-            ArrayList<Hook>(), { q => "" }, env, this.mcpMgr)
-        runtime.toolApprovalFn = { tc, wd => this.requestToolApproval(acpId, tc) }
-        synchronized(this.hostsLock) { host.activeRuntime = Some(runtime) }
-
-        // 3. 加载历史（截断窗口）并追加本轮用户输入
-        var oldLoaded = ArrayList<Message>()
-        try { oldLoaded = this.sessionStore.load(atelierId) } catch (_) { () }
-        var msgs = truncateMessages(oldLoaded, MaxAcpLoadMessages)
         let text = ctx.getText()
-        if (text != "") {
-            msgs.add(UserMessage(ContentList.ofText(text), 0))
-        }
-
-        // 4. 执行回合：事件 → session/update 推送
-        let stream = runtime.chatWithSessionId(atelierId, msgs, env)
-        var promptResp = PromptResponse(StopReasonEndTurn)
         let model = host.options.effectiveModel()
+        // 2. SessionLoop 统一回合（历史截断窗口 15 与迁移前一致；落库由 loop 完成）
         try {
-            var ended = false
-            while (!ended) {
-                match (stream.receive(Duration.millisecond * 500)) {
-                    case Some(ev) =>
-                        let ups = host.translator.translate(ev)
-                        for (u in ups) { this.agent.sessionUpdate(acpId, u) }
-                        match (ev) {
-                            case e: TurnEndEvent =>
-                                this.emitUsage(acpId, e.message, model)
-                            case _: AgentEndEvent => ended = true
-                            case _ => ()
-                        }
-                    case None =>
-                        // 轮询间隙：若已取消则确保 runtime 收到取消信号
-                        if (ctx.isCancelled()) {
-                            runtime.cancelSession(atelierId)
-                        }
-                }
-            }
-            let all = stream.result()
-            // 5. 落库：old 用加载全量（含被截断头部），确保本轮 user 与回复全部入库
-            if (text != "") {
-                this.persistRun(atelierId, oldLoaded, all)
-            }
-            promptResp = this.lastStopReason(all)
+            let outcome = this.loop.run(atelierId, text, cfg, this.provider, None, env,
+                { => false },
+                { => ctx.isCancelled() },
+                onEvent: { ev => this.pushEvent(acpId, host, ev, model) },
+                parentSession: None,
+                approvalFn: { tc, wd => this.requestToolApproval(acpId, tc) },
+                maxLoad: MaxAcpLoadMessages)
+            this.lastStopReason(outcome.messages)
         } catch (e: Exception) {
-            promptResp = if (ctx.isCancelled()) { PromptResponse(StopReasonCancelled) }
-                else { PromptResponse(StopReasonRefusal) }
+            if (ctx.isCancelled()) { PromptResponse(StopReasonCancelled) }
+            else { PromptResponse(StopReasonRefusal) }
         }
-        synchronized(this.hostsLock) { host.activeRuntime = None }
-        promptResp
     }
 
-    // 回合内 usage_update（provider 报告 inputTokens > 0 时发送）
-    private func emitUsage(acpId: String, msg: Message, model: String): Unit {
-        match (msg) {
-            case am: AssistantMessage =>
-                if (am.usage.inputTokens > 0) {
-                    let size = UInt64(this.modelReg.get(model))
-                    this.agent.sessionUpdate(acpId,
-                        SessionUpdate.usageUpdate(UInt64(am.usage.inputTokens), size))
-                }
+    // 回合事件 → session/update 推送 + usage_update（SessionLoop onEvent 钩子）
+    private func pushEvent(acpId: String, host: HostState, ev: AgentEvent, model: String): Unit {
+        let ups = host.translator.translate(ev)
+        for (u in ups) { this.agent.sessionUpdate(acpId, u) }
+        match (ev) {
+            case e: TurnEndEvent => this.emitUsage(acpId, e.message, model)
             case _ => ()
-        }
-    }
-
-    // 结果消息 → ACP stopReason（取最后一条 assistant 的停止原因）
-    private func lastStopReason(messages: ArrayList<Message>): PromptResponse {
-        var i = messages.size - 1
-        while (i >= 0) {
-            match (messages[i]) {
-                case am: AssistantMessage =>
-                    match (am.stopReason) {
-                        case StopReason.Length => return PromptResponse(StopReasonMaxTokens)
-                        case StopReason.Error => return PromptResponse(StopReasonRefusal)
-                        case _ => return PromptResponse(StopReasonEndTurn)
-                    }
-                case _ => ()
-            }
-            i--
-        }
-        PromptResponse(StopReasonEndTurn)
-    }
-
-    // ===================== 落库（单落库职责，与 REPL 同构） =====================
-
-    private func persistRun(atelierId: String, oldLoaded: ArrayList<Message>, all: ArrayList<Message>): Unit {
-        let newMsgs = extractNewMessages(oldLoaded, all)
-        if (newMsgs.size == 0) { return }
-        let lastLeaf: Option<String> = try {
-            let data = this.sessionStore.loadEntries(atelierId)
-            if (data.entries.size > 0) { Some(data.entries[data.entries.size - 1].id) } else { None }
-        } catch (_) {
-            // 首轮（会话尚未落库）正常路径；其它异常一并走 save 分支兜底
-            None
-        }
-        match (lastLeaf) {
-            case Some(leaf) =>
-                try { this.sessionStore.appendBranch(atelierId, leaf, newMsgs) } catch (e: Exception) {
-                    logErr("[atelier-acp] appendBranch: ${e.message}")
-                }
-            case None =>
-                try {
-                    let header = SessionHeader(1, atelierId, 0, 0, "", "", "", None)
-                    this.sessionStore.save(atelierId, header, all)
-                } catch (e: Exception) {
-                    logErr("[atelier-acp] save: ${e.message}")
-                }
         }
     }
 
@@ -438,6 +346,38 @@ public class AcpBridge {
         }
     }
 
+    // 回合内 usage_update（provider 报告 inputTokens > 0 时发送）
+    private func emitUsage(acpId: String, msg: Message, model: String): Unit {
+        match (msg) {
+            case am: AssistantMessage =>
+                if (am.usage.inputTokens > 0) {
+                    let size = UInt64(this.modelReg.get(model))
+                    this.agent.sessionUpdate(acpId,
+                        SessionUpdate.usageUpdate(UInt64(am.usage.inputTokens), size))
+                }
+            case _ => ()
+        }
+    }
+
+    // 结果消息 → ACP stopReason（取最后一条 assistant 的停止原因）
+    private func lastStopReason(messages: ArrayList<Message>): PromptResponse {
+        var i = messages.size - 1
+        while (i >= 0) {
+            match (messages[i]) {
+                case am: AssistantMessage =>
+                    match (am.stopReason) {
+                        case StopReason.Length => return PromptResponse(StopReasonMaxTokens)
+                        case StopReason.Error => return PromptResponse(StopReasonRefusal)
+                        case _ => return PromptResponse(StopReasonEndTurn)
+                    }
+                case _ => ()
+            }
+            i--
+        }
+        PromptResponse(StopReasonEndTurn)
+    }
+
+    // ===================== 落库（单落库职责，与 REPL 同构） =====================
     // ===================== 工具授权（request_permission 反向调用） =====================
 
     private func requestToolApproval(acpId: String, tc: ToolCallBlock): String {
@@ -486,28 +426,4 @@ public class AcpBridge {
             this.baseConfig.tags, this.baseConfig.createdBy,
             this.baseConfig.createdAt, this.baseConfig.updatedAt)
     }
-}
-
-// 截断保留最近 max 条；窗口外的 ArchiveMessage 保留在最前（防序号错位，语义同 REPL truncateRecent）
-func truncateMessages(messages: ArrayList<Message>, max: Int64): ArrayList<Message> {
-    if (messages.size <= max) { return messages }
-    let recent = ArrayList<Message>()
-    let start = messages.size - max
-    for (i in 0..start) {
-        match (messages[Int64(i)]) {
-            case am: ArchiveMessage => recent.add(messages[Int64(i)])
-            case _ => ()
-        }
-    }
-    for (i in start..messages.size) { recent.add(messages[Int64(i)]) }
-    recent
-}
-
-// ACP 进程诊断日志：stdout 只允许 ACP 帧，一切日志走 stderr
-func logErr(msg: String): Unit {
-    try {
-        let err = getStdErr()
-        err.write((msg + "\n").toArray())
-        err.flush()
-    } catch (_) { () }
 }
