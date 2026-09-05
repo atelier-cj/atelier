@@ -17,6 +17,7 @@ Atelier 是一个纯仓颉实现的 Agent 应用引擎。
 - **上下文压缩**：provider 报告用量 + 本地估算双策略
 - **钩子系统**：6 个生命周期钩子（beforeRun~afterTool）
 - **Agent-as-Tool**：子 Agent 委派模式，同进程隔离上下文
+- **可持续子 Agent**：常驻子 Agent + 双向 send_message（汇报/提问/唤醒取代单向 report）
 
 ## 安装
 
