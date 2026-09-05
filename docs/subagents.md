@@ -126,7 +126,8 @@ match (h.recv(timeout: 5 * Duration.minute)) {
 
 - 子会话历史独立存于 SessionStore（每回合自动落库，树形可续接）；父回信/进度在子上下文中体现为工具结果消息。
 - **重启边界**：进程重启后子句柄不存活（worker 随进程消亡）；子会话数据保留在 store。
-  恢复方式（当前版本）：应用层在父会话续期时按需重建子（历史可加载续聊的 Runner 恢复属后续增强）。
+  恢复方式：`manager.resumeSession(config, provider, parentSessionId, childStoreId, env)` 复用既有
+  子会话历史重建可持续句柄（worker 不再投 initial，首封信即续聊输入）；会话不存在/已活跃 → None。
 - 父子共享同进程组件（toolReg/trustMgr/mcpMgr）；信任判定已 per-session 化（父子并发授权互不干扰）。
 
 ## 与其它形态的关系

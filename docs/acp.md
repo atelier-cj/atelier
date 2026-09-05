@@ -92,7 +92,7 @@ atelier acp [agent]
 ## 离线验证
 
 ```bash
-# 全生命周期线协议 e2e（35 断言，无需 LLM/网络）
+# 全生命周期线协议 e2e（38 断言，无需 LLM/网络）
 python3 scripts/acp_e2e.py
 
 # 冒烟：用 acp-cj 的真实 ACP client 拉起

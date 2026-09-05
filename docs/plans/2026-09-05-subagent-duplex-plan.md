@@ -286,3 +286,28 @@ worker 保留消息循环与收发信职责。验收：现有 subagent P0-P2 用
 
 - 跨进程 send 为**回合式**（无回合内插话）；waitReply 跨进程 → 建议子以「分回合提问」表达
 - 子进程资源：每个远程子 = 1 个 OS 进程；close/崩溃后句柄清理路径要覆盖（进程退出检测）
+
+---
+
+# 完成记录（2026-09-05 收尾回标）
+
+P0–P3 ✅、P4（SessionLoop 统一回合层）✅、P5（resumeSession 重启恢复）✅、
+P6（REPL 集成：父工具 + /subagent list/send/respond/close + 回合边界未读展示）✅、
+P7（跨进程 ACP 桥 RemoteSubAgentHandle + startRemote + 条件 e2e）✅ —— 均合入 master。
+
+超出原计划的后续演进（全部 ✅）：
+- SessionLoop 迁移 ACP 桥（回合语义统一 + 回合外消息可见 + poll 原语）
+- REPL `/subagent start/poll` + 每回合未读展示；respond 状态感知（空闲/未等待 = follow-up
+  唤醒，远程子由此从无效变为有效追问）——send_message 对齐 dsh 双向语义（父端更名 +
+  subagent_reply 工具）
+- REPL `/subagent start --remote`（当前进程拉起独立 atelier acp 子，隔离目录）
+- 空闲超时自动回收（`idleTimeoutSec` 可配，默认 0 不回收）
+
+有意边界（维持）：
+- 跨进程 waitReply 回合内插话 ❌（ACP v1 限制，分回合问答降级，文档明示）
+- 子主动唤醒空闲父 ❌（v1 无 agent 主动发起；父回合内 await/watch 不受影响）
+- detach 成全局后台 agent：不做（后置）
+- 父自动开新回合（LLM 自动应答策略）：有意不做（回合循环/成本；交付 = 原语 + REPL
+  回合边界展示 + 手动 poll/respond/subagent_reply；受控版宿主事件注入留作候选）
+- SessionLoop 迁移 REPL 主循环：暂缓（REPL oldMsgs 差集落库语义，回归风险 > 收益）
+- 统一 SessionRunner（输入源可插拔）：后续演进

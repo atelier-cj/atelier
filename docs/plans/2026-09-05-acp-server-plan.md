@@ -245,3 +245,27 @@ bridge.serve()   // StdioTransport，阻塞
 - jsonrpc 0.7.3→0.7.4 若在 acp-cj 有回归 → 停在 0.7.4 前版本单独排查（预期纯增量，atelier 已在 0.7.4 跑通）。
 - 批内工具无法强杀 → cancel 延迟上界 = 当前工具最长执行时间 + receive 轮询 5s；文档中如实声明。
 - atelier 会话 id / ACP sid 双向映射若因 store id 规则受限 → 改用 acp `SessionStore` 记录后端 sid（已为此设计，无阻塞）。
+
+---
+
+# 完成记录（2026-09-05 收尾回标）
+
+主线（阶段 0–5：取消 / 适配层 / CLI / echo e2e / 文档）全部落地并合入 master；
+acp-cj 一路发到注册表 0.2.2（jsonrpc 0.7.4），atelier 依赖已切注册表版本。
+
+决策记录回标：
+1. 范围 ✅（生命周期全能力 + Session Config Options：model/compaction）
+2. 依赖 ✅（jsonrpc 0.7.4 + acp 注册表 0.2.2）
+3. 取消 ✅ 协作式（`$/cancel_request` + session/cancel；批内不强杀）
+4. ask_user：**演进已做** —— Elicitation 表单桥（acp-cj session/elicitation；accept 答案回流回合、
+   decline/cancel/未声明 → 拒绝语义），见 docs/acp.md 能力矩阵
+5. 多 agent ✅ 不做运行期切换（启动时选择）
+6. 非目标维持：ACP v2 / HTTP-WS 传输 / **MCP over ACP 透传**（未做）——其中「宿主代管 MCP」
+   （session/new.mcpServers → 本地 McpManager 注册，非透传）已另行实现 ✅；旧 Modes API 不追
+
+后续已做（超出原计划范围）：additionalDirectories 附加工作区（会话级预信任）、
+elicitation 表单桥、宿主代管 MCP + stdio env 注入（mcp-cj 2.3.7 / acp-cj 0.2.2 注册表）。
+
+边界维持（有意）：config_option_update 主动推送未启用（set_config_option 响应式已覆盖）；
+session/set_mode、authenticate/logout、terminal/* fs/*、prompt 多模态未实现；
+config options 覆盖不跨进程持久化。
