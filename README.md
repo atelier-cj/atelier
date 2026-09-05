@@ -7,6 +7,7 @@ Atelier 是一个纯仓颉实现的 Agent 应用引擎。
 ## 特性
 
 - **开箱即用**：库 + HTTP 服务 + CLI 三种形态
+- **ACP 兼容**：`atelier acp` 以 ACP v1 Agent 身份被 Zed/opencode 等宿主拉起（stdio）
 - **运行时动态**：Agent 在运行时通过 TOML 或代码定义，无需编译
 - **多模型**：OpenAI / Anthropic / Ollama 三种 Provider，覆盖绝大多数模型
 - **MCP 工具**：通过 `ystyle::mcp` 接入任意 MCP 服务器（stdio/Streamable HTTP）
@@ -117,7 +118,8 @@ command = "npx @playwright/mcp"
 | [信任闸门](docs/trust.md) | 权限控制 |
 | [Skill](docs/skills.md) | 声明式技能注入 |
 | [HTTP API](docs/http-api.md) | 端点参考 + curl 示例 |
-| [CLI 参考](docs/cli.md) | serve/repl/run |
+| [CLI 参考](docs/cli.md) | serve/repl/run/acp |
+| [ACP 接入](docs/acp.md) | ACP v1 Agent 侧：能力矩阵、接入示例、config options |
 | [架构设计](docs/design.md) | 总体设计文档 |
 
 ## 开发
@@ -140,5 +142,6 @@ cjpm test --show-all-output --filter 'TestName.*'
 | `ystyle::mcp` | MCP 协议层（工具发现/调用/传输） | MIT |
 | `bstorm` | 会话持久化（基于 badger-cj 的 ORM） | MIT |
 | `tomlcj` | TOML 解析 | MIT |
+| `acp`（本地 path，待发版） | ACP v1 协议层（Agent/Client 双端，acp-cj） | MulanPSL-2.0 |
 
 核心运行时（Agent Loop、事件流、上下文压缩、Provider、信任闸门）全部自研，零外部依赖。

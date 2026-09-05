@@ -40,7 +40,8 @@
 | 文档 | 说明 |
 |------|------|
 | [HTTP API](http-api.md) | 全部端点 + curl 示例 |
-| [CLI 参考](cli.md) | serve / repl / run 子命令 + 斜杠命令 |
+| [CLI 参考](cli.md) | serve / repl / run / acp 子命令 + 斜杠命令 |
+| [ACP 接入](acp.md) | ACP v1 Agent 侧：能力矩阵、接入示例、Session Config Options |
 
 ## 架构
 

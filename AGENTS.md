@@ -60,6 +60,7 @@ cjpm clean
 |------|------|------|
 | `ystyle::mcp` | MCP 协议层 | 工具发现/调用/传输 |
 | `bstorm` | 会话持久化 | 基于 badger-cj 的 ORM 库 |
+| `acp` | ACP v1 协议层 | path 依赖 ../acp-cj（Agent/Client 双端；acp 发版后改注册表版本） |
 
 ## 项目结构
 
@@ -78,6 +79,7 @@ atelier/
 │   ├── session/       # 会话模型 + 存储（内存/bstorm）
 │   ├── context/       # 上下文压缩
 │   ├── trust/         # 信任闸门
+│   ├── acp/           # ACP v1 Agent 侧适配（translator/映射/config options/bridge）
 │   ├── skill/         # Skill 系统（Phase 3）
 │   ├── server/        # HTTP 服务（Phase 2）
 │   └── cli/           # CLI 入口（Phase 3）
