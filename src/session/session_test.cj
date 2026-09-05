@@ -150,3 +150,32 @@ func storm_fork() {
     @Expect(fork.entries.size, 2)
     closeAndClean(store)
 }
+
+// ========== 消息 metadata 通道（宿主业务数据随消息持久化；不参与语义比较） ==========
+
+@Test
+func entry_metadataRoundTrip_viaEntriesJson() {
+    let md = HashMap<String, String>()
+    md["taskId"] = "t-9"
+    let u = UserMessage(ContentList.ofText("干活"), 0, metadata: md)
+    let entries = ArrayList<Entry>()
+    entries.add(Entry("e1", None, 0, u))
+    let back = entriesFromJson(entriesToJson(entries))
+    @Expect(back.size, 1)
+    match (back[0].message) {
+        case um: UserMessage =>
+            @Expect(um.metadata["taskId"], "t-9")
+        case _ => @Fail("expected UserMessage")
+    }
+}
+
+@Test
+func sameMessage_ignoresMetadata() {
+    let md1 = HashMap<String, String>()
+    md1["tag"] = "a"
+    let md2 = HashMap<String, String>()
+    md2["tag"] = "b"
+    let a = UserMessage(ContentList.ofText("hello"), 0, metadata: md1)
+    let b = UserMessage(ContentList.ofText("hello"), 0, metadata: md2)
+    @Expect(sameMessage(a, b), true)
+}
