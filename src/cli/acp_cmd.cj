@@ -9,6 +9,7 @@ import atelier.trust.*
 import atelier.skill.*
 import atelier.context.ModelContextRegistry
 import atelier.acp.AcpBridge
+import atelier.provider.EchoProvider
 
 // atelier acp [agent]：以 ACP v1 Agent（stdio 服务端）身份被外部 ACP Client 拉起。
 // 约束：本进程 stdout 只允许 ACP 帧，一切诊断走 stderr；serve() 阻塞至 stdin EOF。
@@ -29,7 +30,22 @@ public func runAcp(agentNameArg: String, toolReg: ToolRegistry, trustMgr: TrustM
         case Some(c) => c
         case None => AgentConfig.default()
     }
-    let provider = resolveProviderFor(cfg, providerReg)
+    // 离线通道：ATELIER_PROVIDER=echo 时使用 EchoProvider（e2e/冒烟，不连真实 LLM），
+    // ATELIER_ECHO_DELAY_MS 可加延时供取消路径验证
+    let echoMode = match (getVariable("ATELIER_PROVIDER")) {
+        case Some(v) => v == "echo"
+        case None => false
+    }
+    let provider: Provider = if (echoMode) {
+        let delayMs = match (getVariable("ATELIER_ECHO_DELAY_MS")) {
+            case Some(v) =>
+                try { parseInt(v) } catch (_) { 0 }
+            case None => 0
+        }
+        EchoProvider(delayMs)
+    } else {
+        resolveProviderFor(cfg, providerReg)
+    }
     // 会话映射文件与会话数据同目录（已由调用方创建）
     let mappingFile = if (sessionDir != "") { sessionDir + "/acp-sessions.json" } else { "acp-sessions.json" }
     let modelReg = ModelContextRegistry()
