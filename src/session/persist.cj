@@ -3,6 +3,39 @@ package atelier.session
 import std.collection.*
 import atelier.message.*
 
+// 通用回合落库：把本次 run 新增消息追加到会话树（首轮 save 创建）。
+// oldLoaded 传「加载时的全量消息」（勿传截断后子集——保证本轮 user 与回复都被追加）。
+// 返回错误消息字符串（成功为 None）；由调用方决定日志/告警策略。
+public func persistAppend(store: SessionStore, sessionId: String,
+    oldLoaded: ArrayList<Message>, all: ArrayList<Message>): ?String {
+    let newMsgs = extractNewMessages(oldLoaded, all)
+    if (newMsgs.size == 0) { return None }
+    let lastLeaf: Option<String> = try {
+        let data = store.loadEntries(sessionId)
+        if (data.entries.size > 0) { Some(data.entries[data.entries.size - 1].id) } else { None }
+    } catch (_) {
+        // 首轮（会话尚未落库）正常路径；其它异常一并走 save 分支兜底
+        None
+    }
+    match (lastLeaf) {
+        case Some(leaf) =>
+            try {
+                store.appendBranch(sessionId, leaf, newMsgs)
+                None
+            } catch (e: Exception) {
+                Some("appendBranch: ${e.message}")
+            }
+        case None =>
+            try {
+                let header = SessionHeader(1, sessionId, 0, 0, "", "", "", None)
+                store.save(sessionId, header, all)
+                None
+            } catch (e: Exception) {
+                Some("save: ${e.message}")
+            }
+    }
+}
+
 // 提取 newMsgs 中 oldMsgs 最后一条消息之后的消息（内容比较定位，兼容压缩/归档轮）。
 // 定位失败（旧尾部被归档替换）时降级：差集法（newMsgs 中与 oldMsgs 全部不同的消息 = 新消息）。
 // REPL 与 ACP 回合落库共用（runtime 不落库，由宿主统一追加）。
