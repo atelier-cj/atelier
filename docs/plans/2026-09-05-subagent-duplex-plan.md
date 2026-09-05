@@ -202,3 +202,35 @@ public class SubAgentManager {
 - 有状态工具（todo/ask_user/mcp 连接状态）在父子共享下的语义：ask_user 阻塞在子回合内不阻塞父（线程隔离 OK）；todo 等按工具评估隔离。
 - 父子同时跑大回合的资源：首版同进程线程模型，文档注明建议并发度。
 - `sessionTrusts` per-session 化是**行为兼容修复**：现 API 调用点（runtime/REPL/HTTP）逐一适配并回归，默认行为不变（无 session 上下文时退化为当前行为）。
+
+---
+
+# 二期（2026-09-05 追加）：宿主集成与演进
+
+P0-P3 已完成并合并（f51200c）。二期四项：
+
+## P4：SessionLoop 统一回合执行层
+把「历史 + 输入文本 → chatWithSessionId → 事件消费（可挂 cancel/事件回调）→ 落库 → 结果」从
+SubAgentWorker.runTurn 抽为公共组件（atelier.agent.SessionLoop），worker/ACP bridge/未来宿主共用；
+worker 保留消息循环与收发信职责。验收：现有 subagent P0-P2 用例全绿（无行为变化）。
+
+## P5：子句柄进程重启恢复
+- 会话落库 header 记录 parentSession（子会话 → 父会话 id）
+- manager.resumeSession(parentSessionId, childStoreId, env) → 复用既有子会话历史的句柄
+  （worker 载入历史，不再投 initial；首封消息走来信）
+验收：新 manager + 旧 store（模拟重启）resume → 续聊上下文包含历史；恢复失败路径返回 None。
+
+## P6：REPL 宿主集成
+- REPL 构建 SubAgentManager 并注册父端工具（回合内 start/watch 可用）
+- `/subagent` 斜杠命令：list / send <id> <text> / respond <id> <text> / close <id> / status
+- 每回合结束提示未处理子消息数（回合边界感知；终端阻塞读行不强行轮询）
+验收：REPL 会话中可启动子任务、跨回合查看状态与手动收发；父回合内 watch 可用。
+
+## P7：跨进程子 agent（方案先行）
+进程隔离的子 worker。候选方案：
+1) ACP 桥：父内 SubAgentHandle 后端 = AcpClient(SubprocessTransport("atelier acp <agent>"))，
+   回合语义映射 prompt/update（消息驱动 + 回合内等待均可映射，复用 acp 0.2.0）；
+2) 同进程线程（现状）仅加崩溃隔离声明；
+3) 一次性 exec（`atelier run`）——不支持双向，弃。
+推荐方案 1。先出设计评审（消息信封↔ACP 方法映射、生命周期/取消/关闭语义、acp client 复用点），
+再按设计实施（TDD）。
