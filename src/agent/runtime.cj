@@ -45,6 +45,8 @@ public class AgentRuntime {
     private let mcpManager: McpManager
     // 自定义系统提示段贡献者（宿主扩展点，见 PromptSegmentContributor）
     private let promptContributors: ArrayList<PromptSegmentContributor>
+    // 全局事件总线（可选挂载：宿主跨会话审计/监控；None = 不发布）
+    private let eventBus: ?EventBus
 
     // 会话级取消：sessionId → 取消标志（chat 开始注册，收尾统一清理）
     private let cancels = HashMap<String, AtomicBool>()
@@ -62,7 +64,8 @@ public class AgentRuntime {
         hooks: ArrayList<Hook>, askUser: AskUserFn,
         sessionEnv: SessionEnvironment, mcpManager: McpManager,
         promptContributors!: ArrayList<PromptSegmentContributor> = ArrayList(),
-        middlewares!: ArrayList<ProviderMiddleware> = ArrayList()) {
+        middlewares!: ArrayList<ProviderMiddleware> = ArrayList(),
+        eventBus!: ?EventBus = None) {
         this.config = config
         this.toolRegistry = toolRegistry
         this.sessionStore = sessionStore
@@ -77,6 +80,7 @@ public class AgentRuntime {
         this.sessionEnv = sessionEnv
         this.mcpManager = mcpManager
         this.promptContributors = promptContributors
+        this.eventBus = eventBus
         // 请求级中间件链 wrap（先注入者最外层；委托链末端为原始 provider）
         var p = provider
         for (m in middlewares) { p = m.wrap(p) }
@@ -121,6 +125,15 @@ public class AgentRuntime {
         this.chatWithSessionId("sess_" + nextId(), messages, this.sessionEnv)
     }
 
+    // 统一事件出口：可选事件总线（进程级发布）先行，随后进会话流（消费序不变）
+    private func emit(stream: EventStream<AgentEvent, ArrayList<Message>>, ev: AgentEvent): Unit {
+        match (this.eventBus) {
+            case Some(bus) => bus.publish(ev)
+            case None => ()
+        }
+        stream.emit(ev)
+    }
+
     // 库用户兼容签名：内部生成 ulid 会话 id
     public func chatWithEnv(messages: ArrayList<Message>, sessionEnv: SessionEnvironment): EventStream<AgentEvent, ArrayList<Message>> {
         this.chatWithSessionId("sess_" + nextId(), messages, sessionEnv)
@@ -145,7 +158,7 @@ public class AgentRuntime {
             let cancelFlag = AtomicBool(false)
             synchronized(this.cancelLock) { this.cancels[sessionId] = cancelFlag }
             try {
-                stream.emit(AgentStartEvent(sessionId))
+                this.emit(stream, AgentStartEvent(sessionId))
                 log.info("agent start: ${this.config.name}", Array<Attr>())
                 let hookState = HookState()
                 callHooks("beforeRun", 0, hookState)
@@ -159,7 +172,7 @@ public class AgentRuntime {
                 var finished = false
 
                 while (!finished && !cancelFlag.load() && turnCount < Int64(this.config.maxTurns)) {
-                    stream.emit(TurnStartEvent())
+                    this.emit(stream, TurnStartEvent())
                     turnCount++
                     this.mcpManager.advanceTurn()
                     log.info("turn ${turnCount} start", Array<Attr>())
@@ -168,7 +181,7 @@ public class AgentRuntime {
                     currentMessages = ctxBuilder.applyArchiveMarks(currentMessages)
                     currentMessages = ctxBuilder.applyArchives(currentMessages)
 
-                    stream.emit(MessageStartEvent(currentMessages[0]))
+                    this.emit(stream, MessageStartEvent(currentMessages[0]))
                     let actualModel = this.pickModel(this.config.model)
                     let tools = this.resolveTools()
                     var chatReq = ctxBuilder.buildChatRequest(actualModel, currentMessages,
@@ -184,7 +197,7 @@ public class AgentRuntime {
                             currentMessages = chatReq.messages
                         case None =>
                             log.info("beforeTurn hook short-circuited run", Array<Attr>())
-                            stream.emit(TurnEndEvent(AssistantMessage(ContentList.ofText("[Run short-circuited by hook]"), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0), ArrayList<ToolResultMessage>()))
+                            this.emit(stream, TurnEndEvent(AssistantMessage(ContentList.ofText("[Run short-circuited by hook]"), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0), ArrayList<ToolResultMessage>()))
                             finished = true
                             break
                     }
@@ -205,7 +218,7 @@ public class AgentRuntime {
                                 case Some(delta) =>
                                     if (delta.delta != "") {
                                         contentBuilder.append(delta.delta)
-                                        stream.emit(MessageUpdateEvent(
+                                        this.emit(stream, MessageUpdateEvent(
                                             AssistantMessage(ContentList.ofText(contentBuilder.toString()), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0),
                                             delta.delta))
                                     }
@@ -219,12 +232,12 @@ public class AgentRuntime {
                         if (!aborted) { assistantMsg = chatStream.result() }
                     } catch (e: Exception) {
                         log.error("provider error: ${e.message}", Array<Attr>())
-                        stream.emit(TurnEndEvent(AssistantMessage(ContentList.ofText(e.message), "", "", StopReason.Error, TokenUsage(0, 0), 0), ArrayList<ToolResultMessage>()))
+                        this.emit(stream, TurnEndEvent(AssistantMessage(ContentList.ofText(e.message), "", "", StopReason.Error, TokenUsage(0, 0), 0), ArrayList<ToolResultMessage>()))
                         finished = true
                         break
                     }
                     log.info("provider response received", Array<Attr>())
-                    stream.emit(MessageEndEvent(assistantMsg))
+                    this.emit(stream, MessageEndEvent(assistantMsg))
                     currentMessages.add(assistantMsg)
 
                     match (assistantMsg.stopReason) {
@@ -232,7 +245,7 @@ public class AgentRuntime {
                             if (cancelFlag.load()) {
                                 // 取消：不再发起工具批次，直接收尾
                                 log.info("run cancelled at tool boundary", Array<Attr>())
-                                stream.emit(TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
+                                this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
                                 finished = true
                                 break
                             }
@@ -242,7 +255,7 @@ public class AgentRuntime {
                             if (toolCallCount >= maxCalls) {
                                 log.warn("max tool calls (${maxCalls}) reached", Array<Attr>())
                                 currentMessages.add(ToolResultMessage("", "", ContentList.ofText("Max tool calls (${maxCalls}) reached, skipping"), true, 0))
-                                stream.emit(TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
+                                this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
                                 finished = true
                                 break
                             }
@@ -343,14 +356,14 @@ public class AgentRuntime {
                             }
                             // 工具执行开始事件（供流式消费方展示工具进度；被跳过/拦截的工具不发）
                             for (k in 0..runCallIds.size) {
-                                stream.emit(ToolExecutionStartEvent(runCallIds[Int64(k)], runNames[Int64(k)]))
+                                this.emit(stream, ToolExecutionStartEvent(runCallIds[Int64(k)], runNames[Int64(k)]))
                             }
                             let results = try {
                                 this.toolExecutor.executeBatch(batch)
                             } catch (e: Exception) {
                                 log.error("tool execute error: ${e.message}", Array<Attr>())
                                 currentMessages.add(ToolResultMessage("", "", ContentList.ofText("[Tool error: ${e.message}]"), true, 0))
-                                stream.emit(TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
+                                this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
                                 continue
                             }
                             var resIdx: Int64 = 0
@@ -366,7 +379,7 @@ public class AgentRuntime {
                                             log.info("tool ${tc.name} done: err=${r.isError}", Array<Attr>())
                                             this.mcpManager.markUsedTool(tc.name)
                                             // 工具执行结束事件（与开始事件一一对应）
-                                            stream.emit(ToolExecutionEndEvent(tc.id, r.text, r.isError))
+                                            this.emit(stream, ToolExecutionEndEvent(tc.id, r.text, r.isError))
                                             let tr = ToolResultMessage(tc.id, tc.name, ContentList.ofText(r.text), r.isError, 0)
                                             currentMessages.add(tr)
                                             callAfterToolHooks(hookState, turnCount, tc, tr)
@@ -376,13 +389,13 @@ public class AgentRuntime {
                             }
                             toolCallCount += toolCalls.size
                             lastToolTime = MonoTime.now()
-                            stream.emit(TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
+                            this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
 
                         case _ =>
                             if (cancelFlag.load()) {
                                 // 取消：跳过 afterTurn 改写与压缩等后续处理，直接收尾
                                 log.info("run cancelled at turn end", Array<Attr>())
-                                stream.emit(TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
+                                this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
                                 finished = true
                                 break
                             }
@@ -396,7 +409,7 @@ public class AgentRuntime {
                             }
                             if (turnUpdate.shortCircuit) {
                                 log.info("afterTurn hook short-circuited run", Array<Attr>())
-                                stream.emit(TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
+                                this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
                                 finished = true
                                 break
                             }
@@ -451,7 +464,7 @@ public class AgentRuntime {
                                     currentMessages = compactMessages(currentMessages, contextWindow, reserve, keepRecent)
                                 }
                             }
-                            stream.emit(TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
+                            this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
                             finished = true
                     }
                 }
@@ -459,12 +472,12 @@ public class AgentRuntime {
                 log.info("agent end, total turns=${turnCount}", Array<Attr>())
                 callHooks("afterRun", turnCount, hookState)
                 stream.setResult(currentMessages)
-                stream.emit(AgentEndEvent(currentMessages))
+                this.emit(stream, AgentEndEvent(currentMessages))
             } catch (e: Exception) {
                 log.error("unhandled error: ${e.message}", Array<Attr>())
                 // 先发结束事件（携带错误说明），再置错误信号：流消费者按 AgentEndEvent 收敛，
                 // 随后 result() 抛错由调用方决定策略
-                stream.emit(AgentEndEvent(ArrayList<Message>([UserMessage(ContentList.ofText("[Runtime error: ${e.message}]"), 0)])))
+                this.emit(stream, AgentEndEvent(ArrayList<Message>([UserMessage(ContentList.ofText("[Runtime error: ${e.message}]"), 0)])))
                 stream.setError(e)
             }
             // 会话结束（正常/取消/异常统一路径）后清理取消标志
