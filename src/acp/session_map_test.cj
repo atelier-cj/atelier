@@ -98,3 +98,19 @@ func sessionMap_listCounts() {
     @Expect(b.acpId != a.acpId, true)
     cleanupMapDir(dir)
 }
+
+// 外部指定 ACP id（AcpAgent 生成的 sess_xxx）建映射：lookup 使用同一 id 寻址
+@Test
+func sessionMap_newSessionWithExplicitAcpId() {
+    let dir = mapTempDir()
+    let mgr = AcpSessionManager(dir + "/map.json")
+    let s = mgr.newSessionWithId("sess_abc123", "/proj")
+    @Expect(s.acpId, "sess_abc123")
+    @Expect(s.atelierId != "", true)
+    match (mgr.lookup("sess_abc123")) {
+        case Some(v) => @Expect(v.atelierId, s.atelierId)
+        case None => @Fail("explicit id lookup failed")
+    }
+    @Expect(mgr.lookup("sess_other").isNone(), true)
+    cleanupMapDir(dir)
+}

@@ -43,7 +43,13 @@ public class AcpSessionManager {
 
     // 建新会话：生成 ACP id 与 atelier 会话 id，登记 active 并持久化映射
     public func newSession(cwd: String): AcpSession {
-        let s = AcpSession("acp_" + nextId(), cwd, nextId())
+        this.newSessionWithId("acp_" + nextId(), cwd)
+    }
+
+    // 以外部给定的 ACP sessionId（AcpAgent 生成的 sess_xxx）建映射——ACP client 后续
+    // prompt/load/resume 均以该 id 寻址，因此映射 key 必须与之一致
+    public func newSessionWithId(acpId: String, cwd: String): AcpSession {
+        let s = AcpSession(acpId, cwd, nextId())
         synchronized(this.lock) {
             this.active[s.acpId] = s
             this.store.upsert(SessionRecord(s.acpId, s.cwd, s.atelierId))

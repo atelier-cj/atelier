@@ -453,6 +453,9 @@ public class AgentRuntime {
                 stream.emit(AgentEndEvent(currentMessages))
             } catch (e: Exception) {
                 log.error("unhandled error: ${e.message}", Array<Attr>())
+                // 先发结束事件（携带错误说明），再置错误信号：流消费者按 AgentEndEvent 收敛，
+                // 随后 result() 抛错由调用方决定策略
+                stream.emit(AgentEndEvent(ArrayList<Message>([UserMessage(ContentList.ofText("[Runtime error: ${e.message}]"), 0)])))
                 stream.setError(e)
             }
             // 会话结束（正常/取消/异常统一路径）后清理取消标志
