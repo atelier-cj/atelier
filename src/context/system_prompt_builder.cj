@@ -6,11 +6,19 @@ import atelier.tool.McpManager
 import std.collection.*
 import std.fs.*
 
+// 宿主自定义系统提示段贡献者（扩展点：租户/合规/项目元数据/审计声明等）。
+// 追加在 [Session Context] 之后、MCP/Skill 目录段之前；返回 "" 表示无内容跳过。
+// 段文本自带标题格式（如 "[Tenant Rules]")——库不约束。
+public interface PromptSegmentContributor {
+    func render(env: SessionEnvironment): String
+}
+
 public class SystemPromptBuilder {
     public init() {}
 
     public func build(systemPrompt: String, skillNames: ArrayList<String>,
-        skills: SkillRegistry, env: SessionEnvironment): String {
+        skills: SkillRegistry, env: SessionEnvironment,
+        contributors!: ArrayList<PromptSegmentContributor> = ArrayList()): String {
         let sb = StringBuilder()
         if (systemPrompt != "") {
             sb.append(systemPrompt)
@@ -47,6 +55,14 @@ public class SystemPromptBuilder {
                 sb.append("\n")
             }
             sb.append("\n")
+        }
+        for (c in contributors) {
+            let seg = c.render(env)
+            if (seg != "") {
+                sb.append(seg)
+                if (!seg.endsWith("\n")) { sb.append("\n") }
+                sb.append("\n")
+            }
         }
         sb.toString()
     }

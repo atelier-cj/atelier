@@ -13,26 +13,32 @@ public class ContextBuilder {
     private let env: SessionEnvironment
     private let mcpManager: Option<McpManager>
     private let promptBuilder: SystemPromptBuilder
+    private let contributors: ArrayList<PromptSegmentContributor>
 
-    public init(skills: SkillRegistry, env: SessionEnvironment) {
+    public init(skills: SkillRegistry, env: SessionEnvironment,
+        contributors!: ArrayList<PromptSegmentContributor> = ArrayList()) {
         this.skills = skills
         this.env = env
         this.mcpManager = None
         this.promptBuilder = SystemPromptBuilder()
+        this.contributors = contributors
     }
 
-    public init(skills: SkillRegistry, env: SessionEnvironment, mcpManager: McpManager) {
+    public init(skills: SkillRegistry, env: SessionEnvironment, mcpManager: McpManager,
+        contributors!: ArrayList<PromptSegmentContributor> = ArrayList()) {
         this.skills = skills
         this.env = env
         this.mcpManager = Some(mcpManager)
         this.promptBuilder = SystemPromptBuilder()
+        this.contributors = contributors
     }
 
     // run 一次：系统提示（若有）作为首条 UserMessage，再追加历史
     public func initMessages(systemPrompt: String, skillNames: ArrayList<String>,
         history: ArrayList<Message>): ArrayList<Message> {
         let result = ArrayList<Message>()
-        var text = this.promptBuilder.build(systemPrompt, skillNames, this.skills, this.env)
+        var text = this.promptBuilder.build(systemPrompt, skillNames, this.skills, this.env,
+            contributors: this.contributors)
         match (this.mcpManager) {
             case Some(m) =>
                 let catalog = this.promptBuilder.buildMcpCatalog(m)

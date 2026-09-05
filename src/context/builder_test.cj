@@ -550,3 +550,45 @@ func applyArchives_afterMarks_fullChain() {
         case _ => @Fail("expected m0 at index 0")
     }
 }
+
+// ========== PromptSegmentContributor：自定义系统提示段（宿主扩展点） ==========
+
+class StubContributor <: PromptSegmentContributor {
+    public var calls: Int64 = 0
+    private let text: String
+    public init(text: String) { this.text = text }
+    public func render(env: SessionEnvironment): String {
+        this.calls++
+        this.text
+    }
+}
+
+@Test
+func sysPrompt_contributorAppended() {
+    let spb = SystemPromptBuilder()
+    let cs = ArrayList<PromptSegmentContributor>()
+    cs.add(StubContributor("[Tenant Rules]\n内部数据不得外泄"))
+    let out = spb.build("你是助手", ArrayList(), SkillRegistry(), SessionEnvironment(), contributors: cs)
+    @Expect(out.contains("[Tenant Rules]"), true)
+    @Expect(out.endsWith("内部数据不得外泄\n\n"), true)
+}
+
+@Test
+func sysPrompt_contributorEmptySkipped() {
+    let spb = SystemPromptBuilder()
+    let cs = ArrayList<PromptSegmentContributor>()
+    cs.add(StubContributor(""))
+    let out = spb.build("你是助手", ArrayList(), SkillRegistry(), SessionEnvironment(), contributors: cs)
+    @Expect(out, "你是助手\n\n")
+}
+
+@Test
+func sysPrompt_multipleContributorsInOrder() {
+    let spb = SystemPromptBuilder()
+    let cs = ArrayList<PromptSegmentContributor>()
+    cs.add(StubContributor("[段一]"))
+    cs.add(StubContributor("[段二]"))
+    let out = spb.build("", ArrayList(), SkillRegistry(), SessionEnvironment(), contributors: cs)
+    @Expect(pos(out, "[段一]") >= Int64(0), true)
+    @Expect(pos(out, "[段二]") > pos(out, "[段一]"), true)
+}

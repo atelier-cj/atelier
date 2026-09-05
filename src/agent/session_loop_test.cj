@@ -9,6 +9,7 @@ import atelier.session.*
 import atelier.trust.*
 import atelier.skill.*
 import atelier.event.EventStream
+import atelier.context.PromptSegmentContributor
 import jsonvalue.*
 
 // onEvent 钩子：逐事件回调（ACP 翻译等宿主集成的挂载点）
@@ -74,4 +75,33 @@ public func sessionLoop_askUserFnInjectedToAskTool() {
     // 答案作为工具结果进入第二轮上下文
     @Expect(provider.reqTexts.size >= Int64(2), true)
     @Expect(provider.reqTexts[1].contains("选 A"), true)
+}
+
+// promptContributors 下传：SessionLoop 构造注入 → 回合内 runtime 系统提示含自定义段
+class SegContributor <: PromptSegmentContributor {
+    public func render(env: SessionEnvironment): String { "[Test Seg]\n来自宿主" }
+}
+
+@Test
+public func sessionLoop_forwardsPromptContributors() {
+    let provider = ScriptToolProvider(ArrayList<(String, JsonValue)>())
+    let toolReg = ToolRegistry()
+    let trustMgr = TrustManager()
+    let skillReg = SkillRegistry()
+    let agentReg = AgentRegistry()
+    let providerReg = ProviderRegistry()
+    providerReg.register("default", provider)
+    let store = MemorySessionStore()
+    let mcpMgr = McpManager()
+    let cs = ArrayList<PromptSegmentContributor>()
+    cs.add(SegContributor())
+    let loop = SessionLoop(toolReg, trustMgr, skillReg, agentReg, providerReg, store, mcpMgr,
+        promptContributors: cs)
+    let cfg = subConfig()
+    let outcome = loop.run("sess_pc", "你好", cfg, provider, None, SessionEnvironment(),
+        { => false }, { => false })
+    @Expect(outcome.messages.size >= Int64(1), true)
+    @Expect(provider.reqTexts.size >= Int64(1), true)
+    @Expect(provider.reqTexts[0].contains("[Test Seg]"), true)
+    @Expect(provider.reqTexts[0].contains("来自宿主"), true)
 }

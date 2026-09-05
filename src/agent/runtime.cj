@@ -8,6 +8,7 @@ import atelier.session.*
 import atelier.trust.*
 import atelier.context.compactMessages
 import atelier.context.ContextBuilder
+import atelier.context.PromptSegmentContributor
 import atelier.context.ModelContextRegistry
 import atelier.context.renderCompactionPrompt
 import atelier.context.findPreviousSummary
@@ -42,6 +43,8 @@ public class AgentRuntime {
     private let modelRegistry: ModelContextRegistry
     private let sessionEnv: SessionEnvironment
     private let mcpManager: McpManager
+    // 自定义系统提示段贡献者（宿主扩展点，见 PromptSegmentContributor）
+    private let promptContributors: ArrayList<PromptSegmentContributor>
 
     // 会话级取消：sessionId → 取消标志（chat 开始注册，收尾统一清理）
     private let cancels = HashMap<String, AtomicBool>()
@@ -57,7 +60,8 @@ public class AgentRuntime {
         trustManager: TrustManager, skillRegistry: SkillRegistry,
         agentRegistry: AgentRegistry, providerRegistry: ProviderRegistry,
         hooks: ArrayList<Hook>, askUser: AskUserFn,
-        sessionEnv: SessionEnvironment, mcpManager: McpManager) {
+        sessionEnv: SessionEnvironment, mcpManager: McpManager,
+        promptContributors!: ArrayList<PromptSegmentContributor> = ArrayList()) {
         this.config = config
         this.provider = provider
         this.toolRegistry = toolRegistry
@@ -72,6 +76,7 @@ public class AgentRuntime {
         this.modelRegistry = ModelContextRegistry()
         this.sessionEnv = sessionEnv
         this.mcpManager = mcpManager
+        this.promptContributors = promptContributors
     }
 
     // 11 参：hooks + askUser + mcpManager
@@ -128,7 +133,7 @@ public class AgentRuntime {
         let se = sessionEnv
         let workDir = if (se.directory != "") { se.directory } else { "." }
         let ctx = ToolContext(workDir, this.askUser, se.context, sessionId)
-        let ctxBuilder = ContextBuilder(this.skillRegistry, se)
+        let ctxBuilder = ContextBuilder(this.skillRegistry, se, contributors: this.promptContributors)
 
         spawn {
             let log = getGlobalLogger([("name", "AgentRuntime")])
