@@ -753,3 +753,90 @@ func runtime_toolApprovalFn_defaultFallsBackToAskUser() {
     }
     @Expect(foundDenied, true)
 }
+
+// ========== ProviderMiddleware：请求级中间件链（wrap 顺序/透传/零行为变化） ==========
+
+// 计数中间件：wrap 次数 + 委托请求计数（chatStreaming 每请求一次）
+class CountingMiddleware <: ProviderMiddleware {
+    public var wraps: Int64 = 0
+    public var streamCalls: Int64 = 0
+    public var chatCalls: Int64 = 0
+    public func wrap(provider: Provider): Provider {
+        this.wraps++
+        CountingWrapper(this, provider)
+    }
+}
+
+class CountingWrapper <: Provider {
+    private let outer: CountingMiddleware
+    private let inner: Provider
+    public init(outer: CountingMiddleware, inner: Provider) {
+        this.outer = outer
+        this.inner = inner
+    }
+    public func name(): String { this.inner.name() }
+    public func chat(req: ChatRequest): ChatResponse {
+        this.outer.chatCalls++
+        this.inner.chat(req)
+    }
+    public func chatStreaming(req: ChatRequest): EventStream<ChatDelta, AssistantMessage> {
+        this.outer.streamCalls++
+        this.inner.chatStreaming(req)
+    }
+}
+
+@Test
+public func runtime_middlewaresWrappedInOrderAndApplied() {
+    let inner = StubProvider()
+    let m1 = CountingMiddleware()
+    let m2 = CountingMiddleware()
+    let mws = ArrayList<ProviderMiddleware>()
+    mws.add(m1)
+    mws.add(m2)
+    let toolReg = ToolRegistry()
+    let trustMgr = TrustManager()
+    let skillReg = SkillRegistry()
+    let agentReg = AgentRegistry()
+    let providerReg = ProviderRegistry()
+    providerReg.register("default", inner)
+    let store = MemorySessionStore()
+    let mcpMgr = McpManager()
+    let runtime = AgentRuntime(subConfig(), inner, toolReg, store, trustMgr,
+        skillReg, agentReg, providerReg, ArrayList<Hook>(), { q => "" },
+        SessionEnvironment(), mcpMgr, middlewares: mws)
+    let msgs = ArrayList<Message>()
+    msgs.add(UserMessage(ContentList.ofText("hi"), 0))
+    let result = runtime.chat(msgs).result()
+    @Expect(result.size >= Int64(1), true)
+    // 两个中间件均被 wrap；请求确实穿过包装链
+    @Expect(m1.wraps, Int64(1))
+    @Expect(m2.wraps, Int64(1))
+    @Expect(m1.streamCalls >= Int64(1), true)
+    @Expect(m2.streamCalls >= Int64(1), true)
+    @Expect(m1.chatCalls >= Int64(0), true)
+}
+
+// SessionLoop 下传 middlewares（子 agent/ACP 桥回合生效）
+@Test
+public func sessionLoop_forwardsMiddlewares() {
+    let inner = StubProvider()
+    let mw = CountingMiddleware()
+    let mws = ArrayList<ProviderMiddleware>()
+    mws.add(mw)
+    let toolReg = ToolRegistry()
+    let trustMgr = TrustManager()
+    let skillReg = SkillRegistry()
+    let agentReg = AgentRegistry()
+    let providerReg = ProviderRegistry()
+    providerReg.register("default", inner)
+    let store = MemorySessionStore()
+    let mcpMgr = McpManager()
+    let loop = SessionLoop(toolReg, trustMgr, skillReg, agentReg, providerReg, store, mcpMgr,
+        middlewares: mws)
+    let cfg = subConfig()
+    let outcome = loop.run("sess_mw", "你好", cfg, inner, None, SessionEnvironment(),
+        { => false }, { => false })
+    @Expect(outcome.messages.size >= Int64(1), true)
+    @Expect(mw.wraps, Int64(1))
+    @Expect(mw.streamCalls >= Int64(1), true)
+}

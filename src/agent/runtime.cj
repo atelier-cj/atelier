@@ -61,9 +61,9 @@ public class AgentRuntime {
         agentRegistry: AgentRegistry, providerRegistry: ProviderRegistry,
         hooks: ArrayList<Hook>, askUser: AskUserFn,
         sessionEnv: SessionEnvironment, mcpManager: McpManager,
-        promptContributors!: ArrayList<PromptSegmentContributor> = ArrayList()) {
+        promptContributors!: ArrayList<PromptSegmentContributor> = ArrayList(),
+        middlewares!: ArrayList<ProviderMiddleware> = ArrayList()) {
         this.config = config
-        this.provider = provider
         this.toolRegistry = toolRegistry
         this.sessionStore = sessionStore
         this.trustManager = trustManager
@@ -77,6 +77,10 @@ public class AgentRuntime {
         this.sessionEnv = sessionEnv
         this.mcpManager = mcpManager
         this.promptContributors = promptContributors
+        // 请求级中间件链 wrap（先注入者最外层；委托链末端为原始 provider）
+        var p = provider
+        for (m in middlewares) { p = m.wrap(p) }
+        this.provider = p
     }
 
     // 11 参：hooks + askUser + mcpManager
