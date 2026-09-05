@@ -51,6 +51,7 @@ public class SessionLoop {
     // onEvent：可选的逐事件钩子（如 ACP 事件翻译），在事件被内部消费前调用。
     // parentSession：首轮落库写入 header.parentSession 的提示（子 agent 标记父会话用）。
     // approvalFn：工具级授权回调（ACP 权限桥注入；None 走默认文本 askUser）。
+    // askUserFn：用户问答实现（ask_user 工具调用；ACP 场景注入 Elicitation 表单桥）。
     // maxLoad：历史加载截断窗口（0=不截断；>0 语义同 truncateMessages，保留 Archive 头部）。
     public func run(sessionId: String, inputText: String,
         config: AgentConfig, provider: Provider, toolRegOverride: ?ToolRegistry,
@@ -59,6 +60,7 @@ public class SessionLoop {
         onEvent!: ?(AgentEvent) -> Unit = None,
         parentSession!: ?String = None,
         approvalFn!: ?(ToolCallBlock, String) -> String = None,
+        askUserFn!: (String) -> String = { q => "" },
         maxLoad!: Int64 = 0): TurnOutcome {
         let toolRegistry = match (toolRegOverride) {
             case Some(r) => r
@@ -73,7 +75,7 @@ public class SessionLoop {
         }
         let runtime = AgentRuntime(config, provider, toolRegistry, this.sessionStore,
             this.trustMgr, this.skillReg, this.agentReg, this.providerReg,
-            ArrayList<Hook>(), { q => "" }, env, this.mcpMgr)
+            ArrayList<Hook>(), askUserFn, env, this.mcpMgr)
         runtime.toolApprovalFn = approvalFn
         let stream = runtime.chatWithSessionId(sessionId, msgs, env)
         // 事件消费 + 控制轮询；AgentStartEvent 到达 ⇔ runtime 已注册 cancelFlag：

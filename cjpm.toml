@@ -19,7 +19,7 @@ repository = "https://atomgit.com/ystyle/atelier"
 "tomlcj" = "1.0.0"
 "opencj::ulid" = "0.1.2"
 "llm_api" = { path = "../llm_api" }
-"acp" = "0.2.0"
+"acp" = { path = "../acp-cj" }
 
 [target.x86_64-unknown-linux-gnu]
 link-option = "-luring"
