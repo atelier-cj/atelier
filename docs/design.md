@@ -1155,3 +1155,55 @@ Atelier 是一个**面向业务集成的 Agent 运行时**，其核心价值在�
 - **挂载什么工具**（业务逻辑接入）
 - **配置什么 Skills**（领域知识注入）
 - **用什么存储**（会话持久化方案）
+
+---
+
+## 十三、库集成扩展点（自定义/替换矩阵，2026-09-05 盘点）
+
+> 组合模型 = 接口/注册表 + 构造注入（无 DI 框架，组合根即宿主代码）。以下为库方式集成时
+> 可替换/可注入的全部扩展面与约束；随实现演进更新本表。
+
+### 接口替换（实现 → 注册/注入）
+
+| 扩展面 | 接口/类型 | 注入方式 | 官方实现 |
+|---|---|---|---|
+| LLM Provider | `llm_api.provider.Provider` | `ProviderRegistry.register` | OpenAI/Anthropic/Ollama/Echo |
+| 工具 | `Tool`（name/schema/execute/模式） | `ToolRegistry.register`（同名覆盖/remove） | 内置 8 + ask_user/send_message/父端调度 |
+| 会话存储 | `SessionStore` | 自写实现 | Memory / Storm(bstorm) |
+| 横切 Hook | `Hook`（6 相位，全默认实现） | AgentRuntime 构造注入 | — |
+| Agent 定义 | `AgentConfig` + `AgentRegistry` | 代码/TOML 注册 | — |
+| Skill | `Skill` + `SkillRegistry` | `loadDirectory` | — |
+| MCP 服务 | `McpServerConfig` | `McpManager.addServer`（运行时） | stdio/http |
+
+### 注入点（函数/回调）
+
+- 用户问答：`AskUserFn`（runtime 构造）；`SessionLoop.run(askUserFn!)`；工具级授权 `toolApprovalFn` / `approvalFn!`
+- 回合控制：`SessionLoop.run(requestStop!/requestCancel!/onEvent!/parentSession!/maxLoad!/toolRegOverride!)`
+- 子 Agent：`SendMessageTool` postFn/waitFn 回调注入；`registerParentSubagentTools` 可自选组合
+- 取消：`AgentRuntime.cancelSession` + 检查点（协作式）
+
+### open class（子类化定制）
+
+- `SubAgentHandle`（send/cancel/close open）→ 官方例子 `RemoteSubAgentHandle`（ACP 跨进程桥）
+- `AgentRuntime`（chat/chatWithEnv/chatWithSessionId/cancelSession open）
+- ⚠️ `SessionLoop.run` **不可覆写**（仓颉「open 函数不可带可选参数」限制）——定制走上述注入参数
+
+### 扩展点（2026-09-05 新增，均默认关/空 = 零行为变化）
+
+- `Message.metadata!: HashMap<String,String>`（llm_api）：宿主业务元数据随消息持久化 roundtrip；
+  不参与语义比较/文本提取/LLM 协议 JSON；空不序列化（旧数据兼容）
+- `PromptSegmentContributor`（atelier.context）：自定义系统提示段（租户/合规/元数据），
+  追加于 [Session Context] 后；AgentRuntime/SessionLoop 构造注入
+- `ProviderMiddleware`（atelier.agent）：请求级中间件链包 Provider（重试/路由/限流/观测），
+  按序 wrap 先注入者最外层；Hook 是 run/turn/tool 粒度，管不到单次模型请求
+- `EventBus`（atelier.agent）：进程级事件发布/订阅（跨会话审计/监控/UI 聚合）；
+  订阅 filter 谓词 + 退订 + 订阅者异常逐个容错；AgentRuntime/SessionLoop 构造挂载
+
+### 约束与边界
+
+- Message/ContentBlock 密封：新消息角色需改 llm_api core（勿扩；metadata 通道已覆盖
+  「随消息携带业务数据」需求）
+- 信任策略内嵌 `TrustManager`/`gate.cj`：策略级替换未抽象——需要时用 `beforeTool` hook
+  整体拦截（Deny/ShortCircuit/Modify）
+- 跨进程子传输绑定 `SubprocessTransport` 具体类：等 ACP v2 稳定后抽象（候选清单挂起项）
+- 审计等横切建议用 EventBus 订阅而非 hook（hook 无跨会话全局视角）
