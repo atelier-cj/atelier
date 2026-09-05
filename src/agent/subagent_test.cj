@@ -370,6 +370,77 @@ public func subagent_sendMessage_replyTimeout() {
     @Expect(waitState(h, SubagentState.Closed), true)
 }
 
+// ========== 演进 C：respond 状态感知分派（dsh 对齐：空闲 respond = follow-up 唤醒，不滞留不串线） ==========
+
+// 空闲子 respond（文章主场景：子跑完汇报 → 父追问）：不滞留 replyQueue，唤醒开新回合
+@Test
+public func subagent_respondIdle_wakesFollowUpTurn() {
+    let provider = SubRecordProvider()
+    let (mgr, providerReg) = makeSubManager(provider)
+    let h = mgr.start(subConfig(), provider, "parent_ri", "初始任务")
+    match (h.recv(timeout: 10 * Duration.second)) {
+        case Some(mail) => @Expect(mail.kind, AgentMailKindDone)
+        case None => @Fail("timeout waiting done")
+    }
+    @Expect(waitState(h, SubagentState.Idle), true)
+    // 空闲 respond = 追问：不滞留，唤醒开新回合
+    h.respond("这块展开说说")
+    match (h.recv(timeout: 10 * Duration.second)) {
+        case Some(mail) =>
+            @Expect(mail.kind, AgentMailKindReply)
+            @Expect(mail.text, "答: 这块展开说说")
+        case None => @Fail("timeout: idle respond stalled")
+    }
+    // 再来一轮：旧消息不滞留错配（若上条滞留被错配消费，此处会乱）
+    h.respond("还有呢？")
+    match (h.recv(timeout: 10 * Duration.second)) {
+        case Some(mail) =>
+            @Expect(mail.kind, AgentMailKindReply)
+            @Expect(mail.text, "答: 还有呢？")
+        case None => @Fail("timeout: second follow-up stalled")
+    }
+    h.close()
+    @Expect(waitState(h, SubagentState.Closed), true)
+}
+
+// 子回合中未等待（progress）时 respond：不打断当前回合，文本经回合边界成为下一回合输入
+@Test
+public func subagent_respondMidTurn_becomesNextTurnInput() {
+    let provider = ScriptMsgProvider(msgArgs("进度 30%", "progress", false, 0))
+    let (mgr, providerReg) = makeSubManager(provider)
+    let h = mgr.start(subConfig(), provider, "parent_rmid", "干活")
+    // 收 progress（子回合内未 waitReply）后立刻 respond
+    var gotProgress = false
+    var i: Int64 = 0
+    while (i < 40 && !gotProgress) {
+        i++
+        match (h.recv(timeout: Duration.second)) {
+            case Some(mail) =>
+                if (mail.kind == "progress") { gotProgress = true }
+                else if (mail.kind == AgentMailKindDone) { @Fail("done 早于 progress") }
+            case None => ()
+        }
+    }
+    @Expect(gotProgress, true)
+    h.respond("收到，继续做")
+    // 首回合照常 done
+    match (h.recv(timeout: 10 * Duration.second)) {
+        case Some(mail) => @Expect(mail.kind, AgentMailKindDone)
+        case None => @Fail("timeout waiting done")
+    }
+    @Expect(waitState(h, SubagentState.Idle), true)
+    // respond 文本经回合边界消费为第二回合输入（follow-up，非 replyQueue 串线）
+    match (h.recv(timeout: 10 * Duration.second)) {
+        case Some(mail) =>
+            @Expect(mail.kind, AgentMailKindReply)
+            @Expect(mail.text, "完成")
+        case None => @Fail("timeout: mid-turn respond not consumed as follow-up")
+    }
+    @Expect(provider.reqTexts.size >= Int64(3), true)
+    @Expect(provider.reqTexts[2].contains("收到，继续做"), true)
+    h.close()
+}
+
 // ========== P2：父端调度工具（start/send/await/watch/close） ==========
 
 func mkObj(pairs: ArrayList<(String, JsonValue)>): JsonValue {
@@ -460,6 +531,99 @@ public func parentTools_fullChain() {
     let r5 = sendTool.execute(ctx, mkObj(ArrayList<(String, JsonValue)>([
         ("id", JsonValue.String("sub_nope")), ("text", JsonValue.String("hi"))])))
     @Expect(r5.isError, true)
+}
+
+// 父端 send_message（dsh 对齐：原 subagent_send 更名；父上下文发往子）：
+@Test
+public func parentTool_sendMessage_nameAndWake() {
+    let provider = SubRecordProvider()
+    let (mgr, providerReg) = makeSubManager(provider)
+    let h = mgr.start(subConfig(), provider, "parent_sm", "初始任务")
+    match (h.recv(timeout: 10 * Duration.second)) {
+        case Some(mail) => @Expect(mail.kind, AgentMailKindDone)
+        case None => @Fail("timeout waiting done")
+    }
+    @Expect(waitState(h, SubagentState.Idle), true)
+    let sendTool = SubagentSendTool(mgr)
+    @Expect(sendTool.name(), "send_message")
+    let ctx = parentCtx()
+    // 未知 id → 错误
+    let r1 = sendTool.execute(ctx, mkObj(ArrayList<(String, JsonValue)>([
+        ("id", JsonValue.String("sub_nope")), ("text", JsonValue.String("hi"))])))
+    @Expect(r1.isError, true)
+    // 唤醒空闲子开新回合（追问已完成子）
+    let r2 = sendTool.execute(ctx, mkObj(ArrayList<(String, JsonValue)>([
+        ("id", JsonValue.String(h.subSessionId)), ("text", JsonValue.String("展开说说"))])))
+    @Expect(r2.isError, false)
+    match (h.recv(timeout: 10 * Duration.second)) {
+        case Some(mail) =>
+            @Expect(mail.kind, AgentMailKindReply)
+            @Expect(mail.text, "答: 展开说说")
+        case None => @Fail("timeout: send_message follow-up not delivered")
+    }
+    h.close()
+}
+
+// subagent_reply 工具：父 LLM 回合内即时应答子 waitReply 提问（respond 状态分派入口）
+@Test
+public func subagent_replyTool_answersWaitingChild() {
+    let provider = ScriptMsgProvider(msgArgs("继续吗？", "reply", true, 10000))
+    let (mgr, providerReg) = makeSubManager(provider)
+    let h = mgr.start(subConfig(), provider, "parent_rpt", "需要确认")
+    // 父收到子提问（子回合阻塞 waitReply 中）
+    var gotQuestion = false
+    var i: Int64 = 0
+    while (i < 40 && !gotQuestion) {
+        i++
+        match (h.recv(timeout: Duration.second)) {
+            case Some(mail) =>
+                if (mail.kind == "reply" && mail.text == "继续吗？") { gotQuestion = true }
+                else if (mail.kind == AgentMailKindDone) { @Fail("done 早于提问到达") }
+            case None => ()
+        }
+    }
+    @Expect(gotQuestion, true)
+    let replyTool = SubagentReplyTool(mgr)
+    @Expect(replyTool.name(), "subagent_reply")
+    // 未知 id → 错误
+    let r1 = replyTool.execute(parentCtx(), mkObj(ArrayList<(String, JsonValue)>([
+        ("id", JsonValue.String("sub_nope")), ("text", JsonValue.String("x"))])))
+    @Expect(r1.isError, true)
+    // 应答 → 子当前回合继续至 done，回复文本进子上下文
+    let r2 = replyTool.execute(parentCtx(), mkObj(ArrayList<(String, JsonValue)>([
+        ("id", JsonValue.String(h.subSessionId)), ("text", JsonValue.String("可以，继续"))])))
+    @Expect(r2.isError, false)
+    match (h.recv(timeout: 10 * Duration.second)) {
+        case Some(mail) => @Expect(mail.kind, AgentMailKindDone)
+        case None => @Fail("timeout waiting done after subagent_reply")
+    }
+    @Expect(provider.reqTexts.size >= Int64(2), true)
+    @Expect(provider.reqTexts[1].contains("父 Agent 回复：可以，继续"), true)
+    h.close()
+}
+
+// 两上下文同名 send_message：父表 = 父版（{id,text} 发往子）；子表复制父表后子版覆盖（发往父）
+@Test
+public func sendMessage_parentAndChildContexts() {
+    let provider = SubRecordProvider()
+    let (mgr, providerReg) = makeSubManager(provider)
+    let parentReg = ToolRegistry()
+    registerParentSubagentTools(parentReg, mgr)
+    @Expect(parentReg.has("send_message"), true)
+    @Expect(parentReg.has("subagent_reply"), true)
+    @Expect(parentReg.has("subagent_send"), false)   // 旧名已更名，不再注册
+    match (parentReg.get("send_message").getOrThrow()) {
+        case v: SubagentSendTool => ()
+        case _ => @Fail("parent send_message is not SubagentSendTool")
+    }
+    // 子上下文 = 父表全量复制 + 子版 send_message 覆盖（runTurn 同款构造顺序）
+    let childReg = ToolRegistry()
+    for (t in parentReg.list()) { childReg.register(t) }
+    childReg.register(SendMessageTool({ body, kind => () }, { ms => None }))
+    match (childReg.get("send_message").getOrThrow()) {
+        case v: SendMessageTool => ()
+        case _ => @Fail("child send_message not overridden by SendMessageTool")
+    }
 }
 
 // 父 agent 完整回合：subagent_start 启动 helper → subagent_watch 收 done → 回合继续收尾
@@ -660,6 +824,14 @@ public func subagent_remoteBridge_e2e() {
             @Expect(mail.kind, AgentMailKindReply)
             @Expect(mail.text.contains("echo: 远程第二问"), true)
         case None => @Fail("timeout waiting remote reply")
+    }
+    // respond 对空闲远程子 = follow-up 追问（新回合，不再滞留本地队列）
+    handle.respond("远程追问")
+    match (handle.recv(timeout: 30 * Duration.second)) {
+        case Some(mail) =>
+            @Expect(mail.kind, AgentMailKindReply)
+            @Expect(mail.text.contains("echo: 远程追问"), true)
+        case None => @Fail("timeout waiting remote respond follow-up")
     }
     handle.close()
     @Expect(waitState(handle, SubagentState.Closed), true)

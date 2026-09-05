@@ -2,16 +2,22 @@
 
 Atelier 的 **Agent-as-Tool** 升级形态：子 Agent 不再是「一次性委派后即弃」，而是**常驻 worker**——
 父、子各自持有邮箱，消息双向传递；子的中间汇报（progress）、提问与最终报告（done）都会送达父，
-父可随时唤醒空闲子开新回合。单向 report 工具被对称的 `send_message` 取代。
+父可随时唤醒空闲子开新回合。单向 report 工具被对称的 `send_message` 取代（对齐 dsh 0.1.2-alpha.4
+语义：**父 Agent 与可继续子 Agent 通过 send_message 交换 follow-up 消息**）。
+
+> `send_message` 在父、子两个工具上下文各有一个同名工具（注册表隔离，schema 不同）：
+> **父上下文** `send_message {id, text}` 发往子（追问/续聊，原 `subagent_send` 更名）；
+> **子上下文** `send_message {text, kind, waitReply}` 发往父（汇报/提问）。父端另有
+> `subagent_reply {id, text}` 即时应答子的 waitReply 提问。
 
 ```
 父 Agent（会话回合驱动）                        子 Agent（SubAgentWorker 常驻线程）
 ┌─────────────────────────────┐   ┌─────────┐  ┌────────────────────────────────┐
-│ subagent_start / send /     │ ⇄ │ 队列/状态 │⇄ │ 首回合(start 消息)             │
-│ await / watch / close（工具）│   │ inbox/   │  │ 来信 → 子会话历史+UserMessage   │
-│ 收到子消息 → 回合继续/收尾    │ ⇄ │ outbox/  │  │  → chatWithSessionId → 落库    │
-└─────────────────────────────┘   │ reply   │  │  → 回信(done/reply) → 挂起等信  │
-                                  └─────────┘  │ send_message（子端工具）         │
+│ send_message / start /      │ ⇄ │ 队列/状态 │⇄ │ 首回合(start 消息)             │
+│ reply / await / watch /     │   │ inbox/   │  │ 来信 → 子会话历史+UserMessage   │
+│ close（父端工具）            │ ⇄ │ outbox/  │  │  → chatWithSessionId → 落库    │
+│ 收到子消息 → 回合继续/收尾    │   │ reply   │  │  → 回信(done/reply) → 挂起等信  │
+└─────────────────────────────┘   └─────────┘  │ send_message（子端工具）         │
                                                └────────────────────────────────┘
 ```
 
@@ -19,8 +25,12 @@ Atelier 的 **Agent-as-Tool** 升级形态：子 Agent 不再是「一次性委�
 
 - **启动**：`start`（库 API）或 `subagent_start`（父回合内工具）立即返回句柄（`sub_*`），
   首回合异步执行，完成后向父投递 `done`（最终报告）。
-- **唤醒**：父 `send` 消息 → 子空闲时开新回合处理并回 `reply`；子 `send_message(waitReply=true)`
-  提问 → 父 `respond` → 子当前回合继续（无需新回合）。
+- **唤醒**：父 `send` 消息 / 父端 `send_message {id, text}` → 子空闲时开新回合处理并回 `reply`；
+  子 `send_message(waitReply=true)` 提问 → 父 `respond`（库 API）或 `subagent_reply`（父端工具）
+  → 子当前回合继续（无需新回合）。
+- **respond 状态感知**：回复按子状态分派——子正阻塞在 waitReply 提问 → 专用通道即时解锁当前回合；
+  子空闲 / 回合中未等待（含跨进程子）→ 转投 follow-up 消息，子在回合边界开新回合消化
+  （不滞留、不错配、不打断当前回合；「子跑完 → 父追问」走 respond 或 send_message 均成立）。
 - **等待（父自决）**：父回合内 `subagent_await(id)` 阻塞收指定子的信；`subagent_watch` 收任一子的信
   （聚合收件箱）——**收到即当前回合继续**，不等待 = 回合结束由宿主决定，子消息保留在收件箱。
 - **终止**：`close`（库 API）/ `subagent_close`（工具）请求停止 worker（幂等）；
@@ -43,8 +53,7 @@ Atelier 的 **Agent-as-Tool** 升级形态：子 Agent 不再是「一次性委�
 | `manager.get / has / closeForParent / awaitChildren(parentId, timeout)` | 查询/级联关闭/聚合收信 |
 | `SubAgentHandle.send(mail)` | 投递（异步，唤醒空闲子） |
 | `SubAgentHandle.recv(timeout)` | 收该子来信（阻塞可超时） |
-| `SubAgentHandle.respond(text)` | 回复子回合内提问（replyQueue） |
-| `SubAgentHandle.recv(timeout)` | 收该子来信（阻塞可超时） |
+| `SubAgentHandle.respond(text)` | 回复子（状态感知：waitReply 阻塞中=解锁当前回合；空闲/未等待=follow-up 唤醒新回合） |
 | `SubAgentHandle.pollOnce()` | 非阻塞尝试取一封（宿主输入循环轮询用） |
 | `manager.pollChildren(parentId)` | 该父全部子的未读来信（非阻塞聚合） |
 | `SubAgentHandle.cancel() / close()` | 中断当前回合 / 请求终止 |
@@ -53,7 +62,7 @@ Atelier 的 **Agent-as-Tool** 升级形态：子 Agent 不再是「一次性委�
 import atelier.agent.*
 // 宿主（父会话）组装一次 manager 并注册父工具
 let mgr = SubAgentManager(toolReg, trustMgr, skillReg, agentReg, providerReg, store, mcpMgr)
-registerParentSubagentTools(toolReg, mgr)   // subagent_start/send/await/watch/close
+registerParentSubagentTools(toolReg, mgr)   // send_message/start/reply/await/watch/close
 // 库方式启动
 let h = mgr.startByName("code_assistant", parentSessionId, "审计 src/ 目录")
 // … 父回合内（或宿主逻辑）收结果：
@@ -65,7 +74,8 @@ match (h.recv(timeout: 5 * Duration.minute)) {
 
 ## 子 Agent 端工具（`send_message`，取代 report）
 
-子回合中调用（工具自动装配进子工具列表，父侧不可见）：
+子回合中调用（工具自动装配进子工具列表；父端同名工具方向相反，见「父 Agent 端工具」）：
+`SendMessageTool` 在子回合工具表构造时覆盖父表复制进来的同名父版（ToolRegistry 同名覆盖）。
 
 | 参数 | 说明 |
 |---|---|
@@ -85,23 +95,26 @@ match (h.recv(timeout: 5 * Duration.minute)) {
 - **回合外消息可见**：宿主输入循环可用 `manager.pollChildren(parentSessionId)` / `handle.pollOnce()`
   非阻塞查看子来信（真正「父被唤醒开新回合」由宿主按自身输入模型决定；`awaitChildren` 提供阻塞原语）。
 - **REPL**（进程内父宿主）：
-  - 回合内工具：`subagent_start / send / await / watch / close`（自动注册）
+  - 回合内工具：`send_message / subagent_start / subagent_reply / subagent_await / subagent_watch / subagent_close`（自动注册）
   - `/subagent list | poll | start <agent> <prompt> | send <id> <text> | respond <id> <text> | close <id>`
   - 每回合收尾自动展示该父子的未读消息（poll 结果）
 - **跨进程子（ACP 桥）在 REPL 的兼容**：`/subagent list/send/close` 对远程句柄同样有效
-  （send=一次远程自主回合）；`respond` 仅本地子支持（远程回合内插话受 ACP v1 限制）。
+  （send=一次远程自主回合）；`respond` 对远程子 = follow-up 追问（新回合）——
+  回合内插话（waitReply 即时解锁）受 ACP v1 限制，跨进程退化为分回合问答。
 
 ## 父 Agent 端工具
 
 | 工具 | 说明 |
 |---|---|
 | `subagent_start {agent, prompt}` | 启动注册的子 agent（异步返回 id） |
-| `subagent_send {id, text}` | 投递消息（唤醒空闲子） |
+| `send_message {id, text}` | （父上下文）向子发 follow-up，唤醒空闲子开新回合——追问已汇报完成的子（dsh 对齐；子端同名工具方向相反） |
+| `subagent_reply {id, text}` | 即时应答子回合内 waitReply 提问；子空闲/未等待时等效 follow-up 唤醒（respond 状态分派） |
 | `subagent_await {id, timeoutMs}` | 阻塞收指定子消息 → 回合继续 |
 | `subagent_watch {timeoutMs}` | 阻塞收任一子消息（done/reply/progress）→ 回合继续 |
 | `subagent_close {id}` | 请求终止子 |
 
 这些工具为 Parallel 执行模式（免信任闸门审批——调度类工具由父自主决定）。
+> 历史名 `subagent_send` 于 2026-09 更名 `send_message`（对齐 dsh 措辞），代码类名 `SubagentSendTool` 未变。
 
 ## 会话与持久化
 
@@ -132,4 +145,6 @@ cjpm test -j 16 --no-progress   # 全量（含 subagent P0-P2 用例）
 ```
 
 覆盖：消息唤醒/多轮、recv 超时、close 幂等与级联、cancel 快速收敛、progress 先于 done 可见、
-waitReply 父回复回流子上下文、超时路径、父回合完整编排（start→watch 收 done）、信任隔离。
+waitReply 父回复回流子上下文、超时路径、respond 状态分派（空闲/回合中 follow-up 不滞留不串线）、
+父端 send_message 更名与两上下文同名覆盖、subagent_reply 即时应答、父回合完整编排
+（start→watch 收 done）、跨进程 respond=follow-up 追问、信任隔离。

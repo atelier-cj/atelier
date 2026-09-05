@@ -5,7 +5,9 @@ import jsonvalue.*
 import atelier.tool.*
 import stdx.log.*
 
-// 子 Agent 主动向父发消息的工具（替代单向 report；由 SubAgentWorker 注入回调）。
+// 子 Agent 主动向父发消息的工具（替代单向 report；由 SubAgentWorker 注入子回合工具表）。
+// —— 子 Agent 上下文工具（发往父）。父 Agent 上下文另有同名 send_message{id,text}（发往子，
+//    parent_tools.cj）与 subagent_reply（即时应答本工具的 waitReply 提问）；两上下文经注册表隔离。
 // - kind=progress（默认）：通知父，不等待；
 // - waitReply=true：先投递（父可见），再阻塞等待父回复后继续本回合（AskUser 同款同步等待链）；
 //   timeoutMs（可选，默认 300000）到期返回超时提示，子可自行决定如何继续。
@@ -25,8 +27,9 @@ public class SendMessageTool <: Tool {
     public func name(): String { "send_message" }
 
     public func description(): String {
-        "向父 Agent 发送消息。kind：progress=进度汇报（父可见但不等待）；" +
-        "reply=请求回复。waitReply=true 时发送后阻塞等待父回复，收到后继续本回合。"
+        "向父 Agent 发送消息（子 Agent 上下文 send_message）。kind：progress=进度汇报（父可见但不等待）；" +
+        "reply=请求父回复。waitReply=true 时发送后阻塞等待父回复（父经 subagent_reply/宿主 respond 即时答复），" +
+        "收到后继续本回合；超时由你自决继续。父端同名 send_message{id,text} 方向相反（父发往子）。"
     }
 
     public func schema(): JsonValue {

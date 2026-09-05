@@ -6,13 +6,15 @@ import jsonvalue.*
 import atelier.tool.*
 
 // ===================== 父端子 Agent 调度工具集 =====================
-// 供父 agent 会话在回合内自主调度可持续子 agent：
-//   subagent_start {agent, prompt}           启动（立即返回 id，子异步跑）
-//   subagent_send {id, text}                 投递消息（唤醒空闲子开新回合）
-//   subagent_await {id, timeoutMs}           阻塞收指定子来信（当前回合继续）
-//   subagent_watch {timeoutMs}               阻塞收任一子来信（父级聚合收件箱）
-//   subagent_close {id}                      请求终止子 worker（历史保留）
+// 供父 agent 会话在回合内自主调度可持续子 agent（对齐 dsh send_message 语义：父端 send_message）：
+//   send_message {id, text}                 投递 follow-up（唤醒空闲子开新回合；追问已完成子）
+//   subagent_start {agent, prompt}          启动（立即返回 id，子异步跑）
+//   subagent_reply {id, text}               回复子回合内 waitReply 提问（即时解锁；空闲=follow-up 唤醒）
+//   subagent_await {id, timeoutMs}          阻塞收指定子来信（当前回合继续）
+//   subagent_watch {timeoutMs}              阻塞收任一子来信（父级聚合收件箱）
+//   subagent_close {id}                     请求终止子 worker（历史保留）
 // 工具需在会话上下文中执行（ToolContext.sessionId 非空：parentSessionId）。
+// 注：send_message 与子端工具同名不同上下文（子回合工具表复制父表后被子版覆盖，见 SubAgentManager.runTurn）。
 
 public class SubagentStartTool <: Tool {
     private let manager: SubAgentManager
@@ -65,8 +67,12 @@ public class SubagentSendTool <: Tool {
     private let manager: SubAgentManager
     public init(manager: SubAgentManager) { this.manager = manager }
 
-    public func name(): String { "subagent_send" }
-    public func description(): String { "向指定子 Agent 投递消息（异步）；子空闲时被唤醒开新回合处理" }
+    // dsh 对齐：父 Agent 上下文（子 Agent 上下文同名工具方向相反——子端发往父）。
+    public func name(): String { "send_message" }
+    public func description(): String {
+        "向子 Agent 发送 follow-up 消息（父 Agent 上下文 send_message，id 指定子；" +
+        "子端同名工具方向相反——发往父）：子空闲时被唤醒开新回合处理，可追问已汇报完成的子；已终止子 no-op"
+    }
     public func schema(): JsonValue {
         let obj = HashMap<String, JsonValue>()
         obj.add("type", JsonValue.String("object"))
@@ -99,6 +105,54 @@ public class SubagentSendTool <: Tool {
             case Some(h) =>
                 h.send(AgentMail(ctx.sessionId, h.subSessionId, AgentMailKindUserText, text))
                 ToolResult("已向子 Agent ${id} 投递消息", None, false, false)
+            case None => ToolResult("未知子 Agent id：${id}", None, true, false)
+        }
+    }
+    public func executionMode(): ToolExecutionMode { ToolExecutionMode.Parallel }
+}
+
+// 父 LLM 回合内应答子 waitReply 提问（等价句柄 respond，状态感知分派见 SubAgentHandle.respond）
+public class SubagentReplyTool <: Tool {
+    private let manager: SubAgentManager
+    public init(manager: SubAgentManager) { this.manager = manager }
+
+    public func name(): String { "subagent_reply" }
+    public func description(): String {
+        "回复子 Agent：若子正阻塞在 send_message(waitReply=true) 提问（其回合内等待），" +
+        "回复即时送达并继续其当前回合；若子空闲或未在等待，等效发送 follow-up 消息唤醒其开新回合"
+    }
+    public func schema(): JsonValue {
+        let obj = HashMap<String, JsonValue>()
+        obj.add("type", JsonValue.String("object"))
+        let props = HashMap<String, JsonValue>()
+        let a = HashMap<String, JsonValue>()
+        a.add("type", JsonValue.String("string"))
+        a.add("description", JsonValue.String("子 Agent id（send_message/subagent_start 返回）"))
+        props.add("id", JsonValue.Map(a))
+        let p = HashMap<String, JsonValue>()
+        p.add("type", JsonValue.String("string"))
+        p.add("description", JsonValue.String("回复内容"))
+        props.add("text", JsonValue.Map(p))
+        obj.add("properties", JsonValue.Map(props))
+        let req = ArrayList<JsonValue>()
+        req.add(JsonValue.String("id"))
+        req.add(JsonValue.String("text"))
+        obj.add("required", JsonValue.Array(req))
+        JsonValue.Map(obj)
+    }
+    public func execute(ctx: ToolContext, args: JsonValue): ToolResult {
+        let id: String = match (args["id"]) {
+            case Some(JsonValue.String(s)) => s
+            case _ => return ToolResult("Missing required parameter: id", None, true, false)
+        }
+        let text: String = match (args["text"]) {
+            case Some(JsonValue.String(s)) => s
+            case _ => return ToolResult("Missing required parameter: text", None, true, false)
+        }
+        match (this.manager.get(id)) {
+            case Some(h) =>
+                h.respond(text)
+                ToolResult("已回复子 Agent ${id}", None, false, false)
             case None => ToolResult("未知子 Agent id：${id}", None, true, false)
         }
     }
@@ -228,6 +282,7 @@ public class SubagentCloseTool <: Tool {
 public func registerParentSubagentTools(reg: ToolRegistry, manager: SubAgentManager): Unit {
     reg.register(SubagentStartTool(manager))
     reg.register(SubagentSendTool(manager))
+    reg.register(SubagentReplyTool(manager))
     reg.register(SubagentAwaitTool(manager))
     reg.register(SubagentWatchTool(manager))
     reg.register(SubagentCloseTool(manager))
