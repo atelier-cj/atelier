@@ -89,6 +89,7 @@ public class AcpBridge {
         this.agent.capabilities.sessionCapabilities.delete = Some(EmptyCapability())
         this.agent.capabilities.sessionCapabilities.resume = Some(EmptyCapability())
         this.agent.capabilities.sessionCapabilities.close = Some(EmptyCapability())
+        this.agent.capabilities.sessionCapabilities.additionalDirectories = Some(EmptyCapability())
         this.registerCallbacks()
     }
 
@@ -120,6 +121,14 @@ public class AcpBridge {
         synchronized(this.hostsLock) {
             this.hosts[sid] = HostState(s, this.buildOptions())
             this.lastNewAcpId = sid
+        }
+        // 附加工作区根 = 会话级预信任目录（副作用工具直接放行，无需逐次审批；cwd 维持现状走审批）
+        match (this.agent.sessionAdditionalDirectories(sid)) {
+            case Some(dirs) =>
+                for (d in dirs) {
+                    this.trustMgr.setSessionTrust(s.atelierId, d, TrustState.Trusted)
+                }
+            case None => ()
         }
     }
 
@@ -294,6 +303,7 @@ public class AcpBridge {
                 onEvent: { ev => this.pushEvent(acpId, host, ev, model) },
                 parentSession: None,
                 approvalFn: { tc, wd => this.requestToolApproval(acpId, tc) },
+                askUserFn: { q => this.elicitationAsk(acpId, q) },
                 maxLoad: MaxAcpLoadMessages)
             this.lastStopReason(outcome.messages)
         } catch (e: Exception) {
@@ -378,6 +388,21 @@ public class AcpBridge {
     }
 
     // ===================== 落库（单落库职责，与 REPL 同构） =====================
+    // ===================== 用户提问（Elicitation 表单桥，ask_user 工具用） =====================
+
+    // 以单字段表单向 Client 询问用户；能力未声明/decline/cancel/失败返回 ""（兼容文本 askUser 拒绝语义）
+    private func elicitationAsk(acpId: String, question: String): String {
+        let propsArr: Array<(String, ElicitationPropertySchema)> = [("answer", ElicitationPropertySchema.string())]
+        let requiredArr = ArrayList<String>()
+        requiredArr.add("answer")
+        let schema = ElicitationSchema.of(propsArr, required: Some(requiredArr))
+        let req = CreateElicitationRequest.form(acpId, question, schema)
+        match (this.agent.createElicitation(req, timeout: 5 * Duration.minute)) {
+            case Result.Ok(resp) => elicitationAnswerOf(resp.action, resp.content)
+            case Result.Err(_) => ""
+        }
+    }
+
     // ===================== 工具授权（request_permission 反向调用） =====================
 
     private func requestToolApproval(acpId: String, tc: ToolCallBlock): String {
@@ -425,5 +450,23 @@ public class AcpBridge {
             this.baseConfig.minToolInterval,
             this.baseConfig.tags, this.baseConfig.createdBy,
             this.baseConfig.createdAt, this.baseConfig.updatedAt)
+    }
+}
+
+// Elicitation 表单响应 → 答案文本（纯函数，单测重点）。
+// 表单模式：accept 时 content 为符合 schema 的对象（{ answer: "..." }）；
+// decline/cancel/缺失返回空串（与 askUserFn 拒绝语义一致，兼容旧行为）。
+public func elicitationAnswerOf(action: String, content: ?JsonValue): String {
+    if (action != ElicitationActionAccept) { return "" }
+    if (content.isNone()) { return "" }
+    match (content.getOrThrow()) {
+        case JsonValue.Map(m) =>
+            let ans = m.get("answer")
+            if (ans.isNone()) { return "" }
+            match (ans.getOrThrow()) {
+                case JsonValue.String(v) => v
+                case _ => ""
+            }
+        case _ => ""
     }
 }

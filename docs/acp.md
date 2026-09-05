@@ -40,6 +40,7 @@ atelier acp [agent]
 | `session/prompt` | ✅ | 文本 prompt → atelier 回合；流式 `agent_message_chunk`（带 messageId）、`tool_call` / `tool_call_update`、`usage_update` |
 | `session/cancel` / `$/cancel_request` | ✅ | 协作式取消：中断回合尽快返回 `cancelled`（正在执行的工具不强杀） |
 | `session/close` | ✅ | 取消在跑回合、清运行态；映射保留供 load/resume |
+| `additionalDirectories`（附加工作区） | ✅ | session/new 附加目录 → 会话级预信任（副作用工具直放行；cwd 维持审批） |
 | `session/list` | ✅ | 列出该 agent 全部已记录会话（含跨进程） |
 | `session/load` | ✅ | 恢复映射并**重放历史**（user/assistant/tool chunks 按序） |
 | `session/resume` | ✅ | 恢复不重放，可直接续聊 |
@@ -49,7 +50,7 @@ atelier acp [agent]
 | `authenticate` / `logout` | ❌（默认关） | 协议级认证未启用（`authRequired=false`） |
 | `session/request_permission`（Agent→Client） | ✅ | 信任闸门 `NeedsApproval` → 授权弹窗（allow once / always / deny）；10 分钟等待 |
 | `terminal/*` `fs/*`（Agent→Client） | ❌ | 未使用（atelier 工具在本地执行，不委托 Client 侧能力） |
-| `elicitation/create` | ❌ | 类型层已支持（acp-cj），Atelier 侧未启用——`ask_user` 工具映射为文本回合 |
+| `elicitation/create`（form） | ✅ | client 声明 form 时 `ask_user` 工具经单字段表单向用户提问（accept 答案回流回合；decline/cancel/未声明 → 拒绝语义）；URL 模式未启用（无敏感采集场景） |
 | prompt 图片/音频/内嵌上下文 | ❌ | 未声明（`promptCapabilities` 默认 false，Client 不会发送） |
 | MCP over ACP 透传 | ❌ | `session/new.mcpServers` 忽略（acp-cj 结论一致） |
 
@@ -103,8 +104,7 @@ python3 scripts/acp_e2e.py
 ## 已知边界
 
 - 取消为协作式：正在执行的工具不强制中断，取消延迟上界 ≈ 当前工具最长执行时间 + 轮询间隔
-- `ask_user`（AI 主动提问）在 ACP 下表现为文本回合：工具提示直接在对话中提问，用户下一条 prompt 作答
-  （Elicitation 已稳定，acp-cj 类型层就绪，后续可升级为结构化表单）
+- `ask_user` 走 Elicitation 表单（单字段）；需要结构化多字段采集可扩展 schema（工具层暂未暴露多字段参数）
 - 会话映射的 config options 覆盖状态不跨进程持久化（重连后恢复 agent 默认）
 - `session/list` 不带 title/updatedAt 元数据（可选字段）
 - 协议层演进：ACP v1 稳定；v2（2026-07 Draft）不追，官方要求 v1/v2 并行期以 v1 为主

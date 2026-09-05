@@ -156,9 +156,10 @@ def main():
     check("session delete cap", "delete" in acaps.get("sessionCapabilities", {}))
     check("session close cap", "close" in acaps.get("sessionCapabilities", {}))
     check("session resume cap", "resume" in acaps.get("sessionCapabilities", {}))
+    check("additionalDirectories cap", "additionalDirectories" in acaps.get("sessionCapabilities", {}))
 
-    # ---- 2. session/new：含初始 configOptions（client 已声明） ----
-    resp = c.rpc("session/new", {"cwd": "/tmp"})
+    # ---- 2. session/new：含初始 configOptions（client 已声明）+ 附加工作区 ----
+    resp = c.rpc("session/new", {"cwd": "/tmp", "additionalDirectories": ["/extra/work"]})
     sid = resp.get("result", {}).get("sessionId", "")
     check("session/new ok", resp.get("error") is None and sid != "", str(resp.get("error")))
     opts = resp.get("result", {}).get("configOptions") or []
