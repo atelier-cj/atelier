@@ -159,7 +159,8 @@ def main():
     check("additionalDirectories cap", "additionalDirectories" in acaps.get("sessionCapabilities", {}))
 
     # ---- 2. session/new：含初始 configOptions（client 已声明）+ 附加工作区 ----
-    resp = c.rpc("session/new", {"cwd": "/tmp", "additionalDirectories": ["/extra/work"]})
+    resp = c.rpc("session/new", {"cwd": "/tmp", "additionalDirectories": ["/extra/work"],
+                                "mcpServers": [{"name": "fakefs", "command": "echo", "args": ["acp-e2e-noop"]}]})
     sid = resp.get("result", {}).get("sessionId", "")
     check("session/new ok", resp.get("error") is None and sid != "", str(resp.get("error")))
     opts = resp.get("result", {}).get("configOptions") or []

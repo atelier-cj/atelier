@@ -130,6 +130,28 @@ public class AcpBridge {
                 }
             case None => ()
         }
+        // 宿主代管 MCP（session/new.mcpServers）：映射并注册进会话共用的 McpManager，
+        // 与本地 [[mcpServer]] 同生命周期与工具门控（on-demand 激活）；同名幂等跳过（本地优先）。
+        // 连接为异步：MCP 握手不阻塞 session/new 响应（对不可用 server 超时隔离）。
+        match (this.agent.sessionMcpServers(sid)) {
+            case Some(servers) =>
+                spawn {
+                    for (ms in servers) {
+                        if (this.mcpMgr.hasServer(ms.name)) {
+                            logErr("[atelier-acp] client mcp '${ms.name}' 已存在（本地配置优先），跳过")
+                            continue
+                        }
+                        match (acpMcpServerToConfig(ms)) {
+                            case Some(cfg) =>
+                                this.mcpMgr.addServer(this.toolReg, cfg)
+                                logErr("[atelier-acp] client mcp '${ms.name}' 注册完成（${cfg.transport}）")
+                            case None =>
+                                logErr("[atelier-acp] client mcp '${ms.name}' 形态不支持或配置无效，跳过（stdio env 暂不支持）")
+                        }
+                    }
+                }
+            case None => ()
+        }
     }
 
     // session/new 响应：下发会话初始配置（client 未声明 session.configOptions 时不带）
@@ -469,4 +491,13 @@ public func elicitationAnswerOf(action: String, content: ?JsonValue): String {
             }
         case _ => ""
     }
+}
+
+// ACP 进程诊断日志：stdout 只允许 ACP 帧，一切日志走 stderr
+func logErr(msg: String): Unit {
+    try {
+        let err = getStdErr()
+        err.write((msg + "\n").toArray())
+        err.flush()
+    } catch (_) { () }
 }
