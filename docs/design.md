@@ -1041,6 +1041,10 @@ public interface Hook {
 
 - [x] 会话导出与 HTML 回放（JSONL 导出 + 自足 HTML 页面，REPL + HTTP 端点）
 - [ ] 包管理器（安装/卸载 Skills/Tools）
+- [x] 可持续子 Agent（常驻 worker + 双向 send_message，取代单向 report）
+  - [x] SubAgentManager/句柄/邮箱/消息唤醒（P0）
+  - [x] 子端 send_message 工具（progress/reply + waitReply 阻塞等待，P1）
+  - [x] 父端调度工具（start/send/await/watch/close）+ 信任 per-session（P2）
 - [x] HTTP 信任管理端点（`/trust` POST，支持 get/set/reset）
 - [x] HTTP 会话管理端点（`/sessions` 列表 + `/session/fork` 克隆）
 - [x] 信任提示/申请流程（TrustDecision 三态 + ask_user 三选）

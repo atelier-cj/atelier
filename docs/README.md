@@ -34,6 +34,7 @@
 | [会话管理](sessions.md) | 树形数据模型 + bstorm 持久化 + 导出 |
 | [信任闸门](trust.md) | 三态权限 + 目录继承 + ask_user 交互 |
 | [Skill](skills.md) | 声明式技能注入（AgentSkills 规范） |
+| [子 Agent](subagents.md) | 可持续子 Agent：双向 send_message、父端调度工具 |
 
 ## 接口参考
 
