@@ -3,6 +3,7 @@ package atelier.acp
 import std.collection.*
 import std.sync.*
 import std.core.Duration
+import std.env.getStdErr
 import jsonvalue.*
 import ystyle::jsonrpc.{Result, JsonRpcError}
 import acp.{AcpAgent, PromptContext, SessionInitialState}
@@ -384,15 +385,22 @@ public class AcpBridge {
         let lastLeaf: Option<String> = try {
             let data = this.sessionStore.loadEntries(atelierId)
             if (data.entries.size > 0) { Some(data.entries[data.entries.size - 1].id) } else { None }
-        } catch (_) { None }
+        } catch (_) {
+            // 首轮（会话尚未落库）正常路径；其它异常一并走 save 分支兜底
+            None
+        }
         match (lastLeaf) {
             case Some(leaf) =>
-                try { this.sessionStore.appendBranch(atelierId, leaf, newMsgs) } catch (_) { () }
+                try { this.sessionStore.appendBranch(atelierId, leaf, newMsgs) } catch (e: Exception) {
+                    logErr("[atelier-acp] appendBranch: ${e.message}")
+                }
             case None =>
                 try {
                     let header = SessionHeader(1, atelierId, 0, 0, "", "", "", None)
                     this.sessionStore.save(atelierId, header, all)
-                } catch (_) { () }
+                } catch (e: Exception) {
+                    logErr("[atelier-acp] save: ${e.message}")
+                }
         }
     }
 
@@ -493,4 +501,13 @@ func truncateMessages(messages: ArrayList<Message>, max: Int64): ArrayList<Messa
     }
     for (i in start..messages.size) { recent.add(messages[Int64(i)]) }
     recent
+}
+
+// ACP 进程诊断日志：stdout 只允许 ACP 帧，一切日志走 stderr
+func logErr(msg: String): Unit {
+    try {
+        let err = getStdErr()
+        err.write((msg + "\n").toArray())
+        err.flush()
+    } catch (_) { () }
 }
