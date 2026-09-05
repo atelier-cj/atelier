@@ -3,6 +3,7 @@ package atelier.agent
 import std.collection.*
 import std.collection.concurrent.*
 import std.core.Duration
+import std.env.getVariable
 import std.sync.*
 import stdx.log.*
 import opencj::ulid.nextId
@@ -135,6 +136,8 @@ public class SubAgentManager {
     private let mcpMgr: McpManager
     private let handles = HashMap<String, SubAgentHandle>()
     private let lock = Mutex()
+    // 父级聚合收件箱（该父全部子的来信副本；子隔离走 handle.outbox，聚合等待走这里）
+    private let parentBoxes = HashMap<String, LinkedBlockingQueue<AgentMail>>()
 
     public init(toolReg: ToolRegistry, trustMgr: TrustManager,
         skillReg: SkillRegistry, agentReg: AgentRegistry,
@@ -165,6 +168,55 @@ public class SubAgentManager {
         this.start(config, provider, parentSessionId, initialPrompt, SessionEnvironment())
     }
 
+    // 按 agent 注册名启动（父端 subagent_start 工具入口）；config/provider 从注册表解析
+    public func startByName(agentName: String, parentSessionId: String, initialPrompt: String): ?SubAgentHandle {
+        match (this.agentReg.get(agentName)) {
+            case Some(cfg) =>
+                match (this.resolveSubProvider(cfg)) {
+                    case Some(p) => Some(this.start(cfg, p, parentSessionId, initialPrompt))
+                    case None => None
+                }
+            case None => None
+        }
+    }
+
+    // 解析子 agent provider：配置指定名 → default → 环境变量 OpenAI 兜底（与 CLI resolveProviderFor 同策略）
+    private func resolveSubProvider(cfg: AgentConfig): ?Provider {
+        let providerName = match (cfg.provider) { case Some(v) => v; case None => "default" }
+        match (this.providerReg.get(providerName)) {
+            case Some(p) => Some(p)
+            case None =>
+                match (this.providerReg.get("default")) {
+                    case Some(p) => Some(p)
+                    case None =>
+                        let baseURL = match (getVariable("OPENAI_BASE_URL")) {
+                            case Some(v) => v; case None => "https://api.openai.com/v1"
+                        }
+                        let apiKey = match (getVariable("OPENAI_API_KEY")) {
+                            case Some(v) => v; case None => ""
+                        }
+                        Some(OpenAIProvider(providerName, baseURL, apiKey))
+                }
+        }
+    }
+
+    // 阻塞等待该父的任一子来信（父端 subagent_watch 工具；parentId 无子/无消息按超时返回 None）
+    public func awaitChildren(parentSessionId: String, timeout!: Duration = 30 * Duration.second): ?AgentMail {
+        this.parentBoxFor(parentSessionId).remove(timeout)
+    }
+
+    private func parentBoxFor(parentSessionId: String): LinkedBlockingQueue<AgentMail> {
+        synchronized(this.lock) {
+            match (this.parentBoxes.get(parentSessionId)) {
+                case Some(q) => q
+                case None =>
+                    let fresh = LinkedBlockingQueue<AgentMail>()
+                    this.parentBoxes[parentSessionId] = fresh
+                    fresh
+            }
+        }
+    }
+
     public func get(subSessionId: String): ?SubAgentHandle {
         synchronized(this.lock) { this.handles.get(subSessionId) }
     }
@@ -184,7 +236,10 @@ public class SubAgentManager {
         for (h in toClose) {
             h.close()
             h.markExited()
-            synchronized(this.lock) { this.handles.remove(h.subSessionId) }
+            synchronized(this.lock) {
+                this.handles.remove(h.subSessionId)
+                this.parentBoxes.remove(parentSessionId)
+            }
         }
     }
 
@@ -236,7 +291,11 @@ public class SubAgentManager {
         let childToolReg = ToolRegistry()
         for (t in this.toolReg.list()) { childToolReg.register(t) }
         let sendTool = SendMessageTool(
-            { body, kind => h.outbox.add(AgentMail(h.subSessionId, h.parentSessionId, kind, body)) },
+            { body, kind =>
+                let mail = AgentMail(h.subSessionId, h.parentSessionId, kind, body)
+                h.outbox.add(mail)
+                this.parentBoxFor(h.parentSessionId).add(mail)
+            },
             { timeoutMs => match (h.replyQueue.remove(Duration.millisecond * timeoutMs)) {
                 case Some(m) => Some(m.text)
                 case None => None
@@ -290,7 +349,9 @@ public class SubAgentManager {
         // 回信：close 打断不回；否则首回合 done、后续 reply（kind 由调用方决定）
         if (!abortedByClose) {
             let body = lastAgentText(all)
-            h.outbox.add(AgentMail(h.subSessionId, h.parentSessionId, replyKind, body))
+            let mail = AgentMail(h.subSessionId, h.parentSessionId, replyKind, body)
+            h.outbox.add(mail)
+            this.parentBoxFor(h.parentSessionId).add(mail)
         }
         h.setState(SubagentState.Idle)
     }

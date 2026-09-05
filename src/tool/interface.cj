@@ -23,23 +23,35 @@ public struct ToolContext {
     public let workDir: String
     public let askUser: AskUserFn
     public let env: HashMap<String, String>
+    // 当前运行会话 id（无会话上下文时为空 ""）；子 agent 父向调度等场景使用
+    public let sessionId: String
 
     public init(workDir: String) {
         this.workDir = workDir
         this.askUser = { q => "" }
         this.env = HashMap()
+        this.sessionId = ""
     }
 
     public init(workDir: String, askUser: AskUserFn) {
         this.workDir = workDir
         this.askUser = askUser
         this.env = HashMap()
+        this.sessionId = ""
     }
 
     public init(workDir: String, askUser: AskUserFn, env: HashMap<String, String>) {
         this.workDir = workDir
         this.askUser = askUser
         this.env = env
+        this.sessionId = ""
+    }
+
+    public init(workDir: String, askUser: AskUserFn, env: HashMap<String, String>, sessionId: String) {
+        this.workDir = workDir
+        this.askUser = askUser
+        this.env = env
+        this.sessionId = sessionId
     }
 }
 

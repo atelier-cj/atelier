@@ -206,7 +206,15 @@ public func subagent_cancel_interruptsRunningTurn() {
     let provider = SubRecordProvider(chunkDelayMs: 300, chunkCount: 10)  // 全程约 3s
     let (mgr, providerReg) = makeSubManager(provider)
     let h = mgr.start(subConfig(), provider, "parent_7", "慢任务")
-    // cancel 立即请求：回合尚未开始则启动即取消；已开始则中断流式，两种路径都快速收敛
+    // 等首回合真正开跑（provider 被调用；大窗口容忍并行调度压力）
+    var started = false
+    var i: Int64 = 0
+    while (i < 200 && !started) {
+        if (provider.streamCalls > 0) { started = true }
+        sleep(Duration.millisecond * 50)
+        i++
+    }
+    @Expect(started, true)
     let t0 = MonoTime.now()
     h.cancel()
     // 取消后回合应快速收敛并回信（远小于 3s）；中断时文本为部分累积内容，仅断言非空
@@ -358,4 +366,145 @@ public func subagent_sendMessage_replyTimeout() {
     @Expect(provider.reqTexts[1].contains("超时"), true)
     h.close()
     @Expect(waitState(h, SubagentState.Closed), true)
+}
+
+// ========== P2：父端调度工具（start/send/await/watch/close） ==========
+
+func mkObj(pairs: ArrayList<(String, JsonValue)>): JsonValue {
+    let m = HashMap<String, JsonValue>()
+    for ((k, v) in pairs) { m[k] = v }
+    JsonValue.Map(m)
+}
+
+// 按步骤返回工具调用（name 空串 = EndTurn 收尾）；记录每次请求全文
+class ScriptToolProvider <: Provider {
+    public var streamCalls: Int64 = 0
+    public var reqTexts = ArrayList<String>()
+    private let steps: ArrayList<(String, JsonValue)>
+    public init(steps: ArrayList<(String, JsonValue)>) { this.steps = steps }
+
+    public func name(): String { "stub-scripttool" }
+
+    private func fullText(req: ChatRequest): String {
+        var out = ""
+        for (m in req.messages) { out = out + " | " + textOfMsg(m) }
+        out
+    }
+
+    public func chat(req: ChatRequest): ChatResponse {
+        let msg = AssistantMessage(ContentList.ofText("完成"), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0)
+        ChatResponse(msg)
+    }
+
+    public func chatStreaming(req: ChatRequest): EventStream<ChatDelta, AssistantMessage> {
+        this.streamCalls++
+        this.reqTexts.add(this.fullText(req))
+        let stream = EventStream<ChatDelta, AssistantMessage>()
+        spawn {
+            let idx = this.streamCalls - 1
+            if (idx < this.steps.size) {
+                let (tname, targs) = this.steps[Int64(idx)]
+                if (tname != "") {
+                    let blocks = ArrayList<ContentBlock>()
+                    blocks.add(ContentBlock.ToolCall(ToolCallBlock("pt_" + idx.toString(), tname, targs)))
+                    let msg = AssistantMessage(ContentList(blocks), "", "", StopReason.ToolUse, TokenUsage(0, 0), 0)
+                    stream.emit(ChatDelta("", "", Some(msg.stopReason)))
+                    stream.setResult(msg)
+                } else {
+                    let msg = AssistantMessage(ContentList.ofText("完成"), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0)
+                    stream.emit(ChatDelta("", "", Some(msg.stopReason)))
+                    stream.setResult(msg)
+                }
+            } else {
+                let msg = AssistantMessage(ContentList.ofText("完成"), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0)
+                stream.emit(ChatDelta("", "", Some(msg.stopReason)))
+                stream.setResult(msg)
+            }
+            ()
+        }
+        stream
+    }
+}
+
+func parentCtx(): ToolContext {
+    ToolContext("/tmp", { q => "" }, HashMap<String, String>(), "parent_session_1")
+}
+
+// 父端五工具直接 execute 链：start → await(done) → send → await(reply) → close
+@Test
+public func parentTools_fullChain() {
+    let childProvider = SubRecordProvider()
+    let (mgr, providerReg) = makeSubManager(childProvider)
+    // startByName 未知 agent → None（safe 路径）
+    @Expect(mgr.startByName("__missing__", "ps1", "x").isNone(), true)
+    // 工具错误路径（agent 未注册/缺参/无会话上下文/未知 id）
+    let ctx = parentCtx()
+    let startTool = SubagentStartTool(mgr)
+    // agent 未注册 → 错误结果
+    let r1 = startTool.execute(ctx, mkObj(ArrayList<(String, JsonValue)>([
+        ("agent", JsonValue.String("helper")), ("prompt", JsonValue.String("x"))])))
+    @Expect(r1.isError, true)
+    // 缺参数
+    let r2 = startTool.execute(ctx, mkObj(ArrayList<(String, JsonValue)>()))
+    @Expect(r2.isError, true)
+    // 无会话上下文拒绝
+    let r3 = startTool.execute(ToolContext("/tmp"), mkObj(ArrayList<(String, JsonValue)>([
+        ("agent", JsonValue.String("helper")), ("prompt", JsonValue.String("x"))])))
+    @Expect(r3.isError, true)
+    let closeTool = SubagentCloseTool(mgr)
+    let r4 = closeTool.execute(ctx, mkObj(ArrayList<(String, JsonValue)>([("id", JsonValue.String("sub_nope"))])))
+    @Expect(r4.isError, true)
+    let sendTool = SubagentSendTool(mgr)
+    let r5 = sendTool.execute(ctx, mkObj(ArrayList<(String, JsonValue)>([
+        ("id", JsonValue.String("sub_nope")), ("text", JsonValue.String("hi"))])))
+    @Expect(r5.isError, true)
+}
+
+// 父 agent 完整回合：subagent_start 启动 helper → subagent_watch 收 done → 回合继续收尾
+@Test
+public func parentTools_startAndWatchInTurn() {
+    let childProvider = SubRecordProvider()
+    // 组件：父 provider（script）注册 "default" 会被子解析——分名注册：
+    // manager 的 providerReg 同时服务父子；子 config(provider=None) 取 "default"，
+    // 父 config 显式 provider="parent"，父 provider 注册 "parent"。
+    // 但 manager 解析子 provider 走 providerReg.get(default)，因此：
+    //  default = childProvider；parent = scriptProvider
+    let steps = ArrayList<(String, JsonValue)>()
+    steps.add(("subagent_start", mkObj(ArrayList<(String, JsonValue)>([
+        ("agent", JsonValue.String("helper")), ("prompt", JsonValue.String("帮我写报告"))]))))
+    steps.add(("subagent_watch", mkObj(ArrayList<(String, JsonValue)>([
+        ("timeoutMs", JsonValue.Number(Float64(10000)))]))))
+    steps.add(("", mkObj(ArrayList<(String, JsonValue)>())))
+    let parentProvider = ScriptToolProvider(steps)
+
+    let toolReg = ToolRegistry()
+    let trustMgr = TrustManager()
+    let skillReg = SkillRegistry()
+    let agentReg = AgentRegistry()
+    agentReg.create("helper", subConfig())
+    let providerReg = ProviderRegistry()
+    providerReg.register("default", childProvider)
+    providerReg.register("parent", parentProvider)
+    let store = MemorySessionStore()
+    let mcpMgr = McpManager()
+    let mgr = SubAgentManager(toolReg, trustMgr, skillReg, agentReg, providerReg, store, mcpMgr)
+    registerParentSubagentTools(toolReg, mgr)
+
+    // 父 config：provider 显式 parent
+    let parentCfg = AgentConfig("p", None, "", None, "m", Some("parent"), ArrayList(), ArrayList(), Int64(0),
+        UInt32(20), Float32(0.7), UInt32(4096), None,
+        false, UInt32(16384), UInt32(20000), None, UInt32(50), UInt32(30), UInt32(0),
+        ArrayList(), None, Int64(0), Int64(0))
+    let runtime = AgentRuntime(parentCfg, parentProvider, toolReg, store, trustMgr,
+        skillReg, agentReg, providerReg, McpManager())
+    let msgs = ArrayList<Message>()
+    msgs.add(UserMessage(ContentList.ofText("分派任务"), 0))
+    let result = runtime.chatWithSessionId("parent_session_1", msgs, SessionEnvironment()).result()
+    // 子结果经 watch 进入父上下文
+    @Expect(parentProvider.streamCalls >= Int64(3), true)
+    let turn3 = parentProvider.reqTexts[2]
+    @Expect(turn3.contains("已启动子 Agent"), true)
+    @Expect(turn3.contains("[done]"), true)
+    @Expect(turn3.contains("答: 帮我写报告"), true)
+    @Expect(result.size >= 1, true)
 }

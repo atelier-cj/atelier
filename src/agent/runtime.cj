@@ -127,7 +127,7 @@ public class AgentRuntime {
         let stream = EventStream<AgentEvent, ArrayList<Message>>()
         let se = sessionEnv
         let workDir = if (se.directory != "") { se.directory } else { "." }
-        let ctx = ToolContext(workDir, this.askUser, se.context)
+        let ctx = ToolContext(workDir, this.askUser, se.context, sessionId)
         let ctxBuilder = ContextBuilder(this.skillRegistry, se)
 
         spawn {
@@ -264,7 +264,7 @@ public class AgentRuntime {
                                 let tc = toolCalls[idx]
                                 match (this.toolRegistry.get(tc.name)) {
                                     case Some(t) =>
-                                        match (shouldAllow(t, ctx.workDir, this.trustManager)) {
+                                        match (shouldAllowFor(t, ctx.workDir, this.trustManager, sessionId)) {
                                             case TrustDecision.Allowed =>
                                                 let (args, skipMsg) = decideToolCall(hookState, turnCount, tc)
                                                 match (args) {
@@ -300,7 +300,7 @@ public class AgentRuntime {
                                                             log.warn("tool ${tc.name} blocked by hook", Array<Attr>())
                                                     }
                                                 } else if (answer == "y" || answer == "once") {
-                                                    this.trustManager.setSessionTrust(ctx.workDir, TrustState.Trusted)
+                                                    this.trustManager.setSessionTrust(sessionId, ctx.workDir, TrustState.Trusted)
                                                     log.info("tool ${tc.name} approved for session", Array<Attr>())
                                                     let (args, skipMsg) = decideToolCall(hookState, turnCount, tc)
                                                     match (args) {
