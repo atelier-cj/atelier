@@ -263,6 +263,29 @@ public class SubAgentManager {
         }
     }
 
+    // 该父的全部子句柄（宿主 /subagent list 等用）
+    public func listForParent(parentSessionId: String): ArrayList<SubAgentHandle> {
+        let out = ArrayList<SubAgentHandle>()
+        synchronized(this.lock) {
+            for ((_, h) in this.handles) {
+                if (h.parentSessionId == parentSessionId) { out.add(h) }
+            }
+        }
+        out
+    }
+
+    // 该父的活跃（未关闭）子数量
+    public func activeCountFor(parentSessionId: String): Int64 {
+        let out = ArrayList<SubAgentHandle>()
+        for (h in this.listForParent(parentSessionId)) {
+            match (h.state()) {
+                case SubagentState.Closed => ()
+                case _ => out.add(h)
+            }
+        }
+        out.size
+    }
+
     // 测试/统计
     public func size(): Int64 {
         synchronized(this.lock) { this.handles.size }

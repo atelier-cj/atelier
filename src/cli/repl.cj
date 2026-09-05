@@ -34,6 +34,7 @@ public class REPL {
     private var messages: ArrayList<Message>
     private var sessionCounter: Int64
     private var modelOverride: String
+    private let subMgr: SubAgentManager
 
     public init(agentName: String, registry: SlashCommandRegistry,
         agentConfig: AgentConfig, provider: Provider,
@@ -54,6 +55,10 @@ public class REPL {
         this.mcpManager = mcpManager
         this.sessionCounter = 1
         this.modelOverride = ""
+        // 可持续子 Agent：REPL 会话内的父端调度（回合内工具 + /subagent 命令）
+        this.subMgr = SubAgentManager(toolRegistry, trustManager, skillRegistry,
+            agentRegistry, providerRegistry, sessionStore, mcpManager)
+        registerParentSubagentTools(toolRegistry, this.subMgr)
         if (resumeSessionId != "") {
             this.sessionId = resumeSessionId
             this.messages = try {
@@ -143,6 +148,10 @@ public class REPL {
                 handleModelCommand(line)
                 return
             }
+            if (line.startsWith("/subagent")) {
+                handleSubagentCommand(line)
+                return
+            }
             match (this.registry.dispatch(line)) {
                 case Some("exit") => this.running = false
                 case Some(msg) => println(msg)
@@ -170,6 +179,10 @@ public class REPL {
         if (lastText != "") {
             println(lastText)
         }
+        let subCount = this.subMgr.activeCountFor(this.sessionId)
+        if (subCount > 0) {
+            println("  [subagent] ${subCount} 个子 Agent 运行中 —— /subagent list 查看")
+        }
     }
 
     // 单落库职责：每轮 run 后把本轮新消息追加到 store（首轮无会话用 save 创建）。
@@ -189,6 +202,73 @@ public class REPL {
                     let header = SessionHeader(1, this.sessionId, 0, 0, "", "", "", None)
                     this.sessionStore.save(this.sessionId, header, this.messages)
                 } catch (_) { () }
+        }
+    }
+
+    // /subagent list|status|send <id> <text>|respond <id> <text>|close <id>
+    private func handleSubagentCommand(line: String): Unit {
+        let parts = line.split(" ")
+        if (parts.size < 2) {
+            println("Usage: /subagent list | send <id> <text> | respond <id> <text> | close <id>")
+            return
+        }
+        let sub = parts[1]
+        if (sub == "list" || sub == "status") {
+            let list = this.subMgr.listForParent(this.sessionId)
+            if (list.size == 0) {
+                println("没有子 Agent（回合内可用 subagent_start 工具启动）")
+                return
+            }
+            for (h in list) {
+                let st = match (h.state()) {
+                    case SubagentState.Idle => "idle"
+                    case SubagentState.Running => "running"
+                    case SubagentState.Closed => "closed"
+                }
+                println("  ${h.subSessionId}  ${st}")
+            }
+            return
+        }
+        if (parts.size < 3) {
+            println("Usage: /subagent send <id> <text> | respond <id> <text> | close <id>")
+            return
+        }
+        let target = parts[2]
+        match (sub) {
+            case "close" =>
+                match (this.subMgr.get(target)) {
+                    case Some(h) =>
+                        h.close()
+                        println("已请求关闭 ${target}")
+                    case None => println("未知子 Agent id：${target}")
+                }
+            case "send" =>
+                if (parts.size < 4) { println("Usage: /subagent send <id> <text>"); return }
+                var text = ""
+                for (i in 3..parts.size) {
+                    if (text != "") { text = text + " " }
+                    text = text + parts[Int64(i)]
+                }
+                match (this.subMgr.get(target)) {
+                    case Some(h) =>
+                        h.send(AgentMail(this.sessionId, h.subSessionId, AgentMailKindUserText, text))
+                        println("已向 ${target} 投递消息")
+                    case None => println("未知子 Agent id：${target}")
+                }
+            case "respond" =>
+                if (parts.size < 4) { println("Usage: /subagent respond <id> <text>"); return }
+                var text = ""
+                for (i in 3..parts.size) {
+                    if (text != "") { text = text + " " }
+                    text = text + parts[Int64(i)]
+                }
+                match (this.subMgr.get(target)) {
+                    case Some(h) =>
+                        h.respond(text)
+                        println("已回复 ${target}")
+                    case None => println("未知子 Agent id：${target}")
+                }
+            case _ => println("未知子命令：${sub}")
         }
     }
 

@@ -590,3 +590,27 @@ public func subagent_resumeSession_unknownOrActiveReturnsNone() {
     @Expect(mgr.resumeSession(subConfig(), provider, "parent_r2", h.subSessionId, SessionEnvironment()).isNone(), true)
     h.close()
 }
+
+// ========== P6：REPL /subagent 的数据源（listForParent/activeCountFor） ==========
+
+@Test
+public func subagent_parentListAndCount() {
+    let provider = SubRecordProvider()
+    let (mgr, providerReg) = makeSubManager(provider)
+    let a = mgr.start(subConfig(), provider, "parent_l1", "任务A")
+    let b = mgr.start(subConfig(), provider, "parent_l1", "任务B")
+    let other = mgr.start(subConfig(), provider, "parent_l2", "任务C")
+    a.recv(timeout: 10 * Duration.second)
+    b.recv(timeout: 10 * Duration.second)
+    other.recv(timeout: 10 * Duration.second)
+    @Expect(mgr.listForParent("parent_l1").size, 2)
+    @Expect(mgr.activeCountFor("parent_l1"), Int64(2))
+    @Expect(mgr.activeCountFor("parent_l2"), Int64(1))
+    // close 一个：仍可列出，但活跃数下降
+    b.close()
+    @Expect(waitState(b, SubagentState.Closed), true)
+    @Expect(mgr.listForParent("parent_l1").size, 2)
+    @Expect(mgr.activeCountFor("parent_l1"), Int64(1))
+    a.close()
+    other.close()
+}
