@@ -1,6 +1,7 @@
 package atelier.cli
 
 import atelier.message.*
+import atelier.session.{extractNewMessages, sameMessage}
 import std.collection.*
 
 func plain(text: String): Message { UserMessage(ContentList.ofText(text), 0) }
