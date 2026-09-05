@@ -10,6 +10,7 @@ import atelier.trust.*
 import atelier.skill.*
 import stdx.log.*
 import atelier.event.EventStream
+import atelier.context.PromptSegmentContributor
 
 // 一次回合的结果：最终消息列表（含历史与新增）与是否被 close 打断
 public class TurnOutcome {
@@ -32,11 +33,19 @@ public class SessionLoop {
     private let providerReg: ProviderRegistry
     private let sessionStore: SessionStore
     private let mcpMgr: McpManager
+    // 自定义系统提示段贡献者（下传给回合内 runtime）
+    private let promptContributors: ArrayList<PromptSegmentContributor>
+    // 请求级中间件链（下传给回合内 runtime，wrap 原 provider）
+    private let middlewares: ArrayList<ProviderMiddleware>
+    private let eventBus: ?EventBus
 
     public init(toolReg: ToolRegistry, trustMgr: TrustManager,
         skillReg: SkillRegistry, agentReg: AgentRegistry,
         providerReg: ProviderRegistry, sessionStore: SessionStore,
-        mcpMgr: McpManager) {
+        mcpMgr: McpManager,
+        promptContributors!: ArrayList<PromptSegmentContributor> = ArrayList(),
+        middlewares!: ArrayList<ProviderMiddleware> = ArrayList(),
+        eventBus!: ?EventBus = None) {
         this.toolReg = toolReg
         this.trustMgr = trustMgr
         this.skillReg = skillReg
@@ -44,6 +53,9 @@ public class SessionLoop {
         this.providerReg = providerReg
         this.sessionStore = sessionStore
         this.mcpMgr = mcpMgr
+        this.promptContributors = promptContributors
+        this.middlewares = middlewares
+        this.eventBus = eventBus
     }
 
     // 执行一次回合。requestStop：close 请求（打断且不回信语义由调用方判定）；
@@ -75,7 +87,10 @@ public class SessionLoop {
         }
         let runtime = AgentRuntime(config, provider, toolRegistry, this.sessionStore,
             this.trustMgr, this.skillReg, this.agentReg, this.providerReg,
-            ArrayList<Hook>(), askUserFn, env, this.mcpMgr)
+            ArrayList<Hook>(), askUserFn, env, this.mcpMgr,
+            promptContributors: this.promptContributors,
+            middlewares: this.middlewares,
+            eventBus: this.eventBus)
         runtime.toolApprovalFn = approvalFn
         let stream = runtime.chatWithSessionId(sessionId, msgs, env)
         // 事件消费 + 控制轮询；AgentStartEvent 到达 ⇔ runtime 已注册 cancelFlag：
