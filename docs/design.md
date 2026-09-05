@@ -1058,7 +1058,7 @@ public interface Hook {
 - [x] Session Config Options（模型选择 `model_config` + 压缩开关）
 - [x] 会话全能力（list/load 重放/resume/delete/close）+ 工具授权（request_permission）
 - [x] e2e 线协议验证（离线 echo provider，35 断言）
-- [ ] 发版衔接：`acp` 依赖发版后切注册表版本（当前 path 依赖）
+- [x] 发版衔接：`acp` 0.2.0 已发布，依赖切注册表版本
 
 ---
 

@@ -142,6 +142,6 @@ cjpm test --show-all-output --filter 'TestName.*'
 | `ystyle::mcp` | MCP 协议层（工具发现/调用/传输） | MIT |
 | `bstorm` | 会话持久化（基于 badger-cj 的 ORM） | MIT |
 | `tomlcj` | TOML 解析 | MIT |
-| `acp`（本地 path，待发版） | ACP v1 协议层（Agent/Client 双端，acp-cj） | MulanPSL-2.0 |
+| `acp` | ACP v1 协议层（Agent/Client 双端） | MulanPSL-2.0 |
 
 核心运行时（Agent Loop、事件流、上下文压缩、Provider、信任闸门）全部自研，零外部依赖。
