@@ -73,7 +73,8 @@ public class SessionLoop {
         parentSession!: ?String = None,
         approvalFn!: ?(ToolCallBlock, String) -> String = None,
         askUserFn!: (String) -> String = { q => "" },
-        maxLoad!: Int64 = 0): TurnOutcome {
+        maxLoad!: Int64 = 0,
+        attachments!: ArrayList<ContentBlock> = ArrayList()): TurnOutcome {
         let toolRegistry = match (toolRegOverride) {
             case Some(r) => r
             case None => this.toolReg
@@ -82,8 +83,11 @@ public class SessionLoop {
         try { oldLoaded = this.sessionStore.load(sessionId) } catch (_) { () }
         let loaded = if (maxLoad > 0) { truncateMessages(oldLoaded, maxLoad) } else { oldLoaded }
         let msgs = ArrayList<Message>(loaded)
-        if (inputText != "") {
-            msgs.add(UserMessage(ContentList.ofText(inputText), 0))
+        if (inputText != "" || attachments.size > 0) {
+            let blocks = ArrayList<ContentBlock>()
+            if (inputText != "") { blocks.add(ContentBlock.TextBlock(inputText)) }
+            for (b in attachments) { blocks.add(b) }
+            msgs.add(UserMessage(ContentList(blocks), 0))
         }
         let runtime = AgentRuntime(config, provider, toolRegistry, this.sessionStore,
             this.trustMgr, this.skillReg, this.agentReg, this.providerReg,

@@ -105,3 +105,104 @@ public func sessionLoop_forwardsPromptContributors() {
     @Expect(provider.reqTexts[0].contains("[Test Seg]"), true)
     @Expect(provider.reqTexts[0].contains("来自宿主"), true)
 }
+
+// ========== 图片输入（ImageBlock attachments） ==========
+
+// 记录请求消息中图片/文本的 provider：验证图片块到达协议层
+class RecordingImageProvider <: Provider {
+    public var seenImages: Int64 = 0
+    public var seenTexts = ArrayList<String>()
+    public func name(): String { "rec" }
+    private func record(req: ChatRequest): Unit {
+        for (m in req.messages) {
+            match (m) {
+                case um: UserMessage =>
+                    for (b in um.content.blocks()) {
+                        match (b) {
+                            case ContentBlock.ImageBlock(_, _) => this.seenImages++
+                            case ContentBlock.TextBlock(t) => this.seenTexts.add(t)
+                            case _ => ()
+                        }
+                    }
+                case _ => ()
+            }
+        }
+    }
+    public func chat(req: ChatRequest): ChatResponse {
+        this.record(req)
+        ChatResponse(AssistantMessage(ContentList.ofText("ok"), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0))
+    }
+    public func chatStreaming(req: ChatRequest): EventStream<ChatDelta, AssistantMessage> {
+        this.record(req)
+        let s = EventStream<ChatDelta, AssistantMessage>()
+        let msg = AssistantMessage(ContentList.ofText("ok"), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0)
+        s.emit(ChatDelta("", "", Some(StopReason.EndTurn)))
+        s.setResult(msg)
+        s
+    }
+}
+
+func makeImageLoop(provider: Provider): (SessionLoop, MemorySessionStore) {
+    let toolReg = ToolRegistry()
+    let trustMgr = TrustManager()
+    let skillReg = SkillRegistry()
+    let agentReg = AgentRegistry()
+    let providerReg = ProviderRegistry()
+    providerReg.register("default", provider)
+    let store = MemorySessionStore()
+    let mcpMgr = McpManager()
+    let loop = SessionLoop(toolReg, trustMgr, skillReg, agentReg, providerReg, store, mcpMgr)
+    (loop, store)
+}
+
+@Test
+public func sessionLoop_imageAttachment_reachesProviderAndPersists() {
+    let provider = RecordingImageProvider()
+    let (loop, store) = makeImageLoop(provider)
+    let att = ArrayList<ContentBlock>()
+    att.add(ContentBlock.ImageBlock("aGVsbG8=", "image/png"))
+    loop.run("sess_img_1", "图里有什么", subConfig(), provider, None, SessionEnvironment(),
+        { => false }, { => false }, attachments: att)
+    // 协议层收到：user 消息含 1 张图 + 文本
+    @Expect(provider.seenImages, 1)
+    @Expect(provider.seenTexts.contains("图里有什么"), true)
+    // 会话持久化 roundtrip：ImageBlock 还原
+    let msgs = store.load("sess_img_1")
+    var foundImage = false
+    for (m in msgs) {
+        match (m) {
+            case um: UserMessage =>
+                for (b in um.content.blocks()) {
+                    match (b) {
+                        case ContentBlock.ImageBlock(d, mm) =>
+                            if (d == "aGVsbG8=" && mm == "image/png") { foundImage = true }
+                        case _ => ()
+                    }
+                }
+            case _ => ()
+        }
+    }
+    @Expect(foundImage, true)
+}
+
+@Test
+public func sessionLoop_imageOnlyAttachment_noText() {
+    let provider = RecordingImageProvider()
+    let (loop, _) = makeImageLoop(provider)
+    let att = ArrayList<ContentBlock>()
+    att.add(ContentBlock.ImageBlock("eA==", "image/jpeg"))
+    loop.run("sess_img_2", "", subConfig(), provider, None, SessionEnvironment(),
+        { => false }, { => false }, attachments: att)
+    @Expect(provider.seenImages, 1)
+    @Expect(provider.seenTexts.size, 0)
+}
+
+@Test
+public func sessionLoop_noAttachment_textOnly() {
+    let provider = RecordingImageProvider()
+    let (loop, _) = makeImageLoop(provider)
+    loop.run("sess_img_3", "hello", subConfig(), provider, None, SessionEnvironment(),
+        { => false }, { => false })
+    @Expect(provider.seenImages, 0)
+    @Expect(provider.seenTexts.contains("hello"), true)
+}
