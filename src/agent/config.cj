@@ -29,6 +29,8 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
     public let createdBy: Option<String>
     public let createdAt: Int64
     public let updatedAt: Int64
+    // 模型能力：是否支持图片输入（多模态）。默认 false；发图前据此检查/路由
+    public let supportsVision: Bool
 
     public init(
         name: String, description: Option<String>,
@@ -42,7 +44,8 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
         compaction: Option<CompactionConfig>,
         maxToolCalls: UInt32, toolTimeout: UInt32, minToolInterval: UInt32,
         tags: ArrayList<String>,
-        createdBy: Option<String>, createdAt: Int64, updatedAt: Int64
+        createdBy: Option<String>, createdAt: Int64, updatedAt: Int64,
+        supportsVision!: Bool = false
     ) {
         this.name = name; this.description = description
         this.systemPrompt = systemPrompt; this.userPromptTemplate = userPromptTemplate
@@ -59,6 +62,7 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
         this.minToolInterval = minToolInterval
         this.tags = tags
         this.createdBy = createdBy; this.createdAt = createdAt; this.updatedAt = updatedAt
+        this.supportsVision = supportsVision
     }
 
     public static func default(): AgentConfig {
@@ -96,6 +100,7 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
         w.writeName("skills").writeValue(this.skills)
         w.writeName("mcpCooldownTurns").writeValue(this.mcpCooldownTurns)
         w.writeName("tags").writeValue(this.tags)
+        w.writeName("supportsVision").writeValue(this.supportsVision)
         w.endObject()
     }
 
@@ -115,6 +120,7 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
         var minToolInterval = UInt32(0)
         var tags = ArrayList<String>()
         var createdBy: Option<String> = None; var createdAt = Int64(0); var updatedAt = Int64(0)
+        var supportsVision = false
 
         r.startObject()
         while (r.peek() != EndObject) {
@@ -143,6 +149,7 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
                 case "createdBy" => createdBy = r.readValue<Option<String>>()
                 case "createdAt" => createdAt = r.readValue<Int64>()
                 case "updatedAt" => updatedAt = r.readValue<Int64>()
+                case "supportsVision" => supportsVision = r.readValue<Bool>()
                 case _ => r.skip()
             }
         }
@@ -153,7 +160,7 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
             maxTurns, temperature, maxOutputTokens, thinkingLevel,
             compactionEnabled, compactionReserveTokens, keepRecentTokens, compaction,
             maxToolCalls, toolTimeout, minToolInterval,
-            tags, createdBy, createdAt, updatedAt)
+            tags, createdBy, createdAt, updatedAt, supportsVision: supportsVision)
     }
 
     public func toString(): String {

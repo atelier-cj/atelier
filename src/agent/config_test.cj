@@ -252,3 +252,50 @@ func config_compactionMissingFieldDefaultsNone() {
     }
     @Expect(back.compactionEnabled, true)
 }
+
+// ========== supportsVision 能力标志 ==========
+
+@Test
+func config_supportsVision_defaultFalse() {
+    let cfg = AgentConfig.default()
+    @Expect(cfg.supportsVision, false)
+}
+
+@Test
+func config_supportsVision_explicitTrue() {
+    let cfg = AgentConfig(
+        "vision-agent", None, "", None,
+        "gpt-4o", None,
+        ArrayList(), ArrayList(), Int64(0),
+        UInt32(20), Float32(0.7), UInt32(4096), None,
+        true, UInt32(16384), UInt32(20000), None, UInt32(50), UInt32(30), UInt32(0),
+        ArrayList(), None, Int64(0), Int64(0),
+        supportsVision: true)
+    @Expect(cfg.supportsVision, true)
+}
+
+@Test
+func config_supportsVision_jsonRoundTrip() {
+    let original = AgentConfig(
+        "vision-agent", None, "", None,
+        "gpt-4o", None,
+        ArrayList(), ArrayList(), Int64(0),
+        UInt32(20), Float32(0.7), UInt32(4096), None,
+        true, UInt32(16384), UInt32(20000), None, UInt32(50), UInt32(30), UInt32(0),
+        ArrayList(), None, Int64(0), Int64(0),
+        supportsVision: true)
+    let json = toJsonString(original)
+    @Expect(json.contains("supportsVision"), true)
+    let back = fromJsonString<AgentConfig>(json)
+    @Expect(back.supportsVision, true)
+}
+
+@Test
+func config_supportsVision_oldJsonDefaultsFalse() {
+    // 不含 supportsVision 键的旧配置 JSON：读回 false（向后兼容）
+    let json = "{\"name\":\"legacy\",\"model\":\"m\",\"maxTurns\":20}"
+    let back = fromJsonString<AgentConfig>(json)
+    @Expect(back.supportsVision, false)
+    @Expect(back.name, "legacy")
+    @Expect(back.model, "m")
+}
