@@ -10,16 +10,16 @@ authors = ["ystyle"]
 repository = "https://atomgit.com/ystyle/atelier"
 
 [dependencies]
-"mcp" = "2.3.9"
+"mcp" = "2.3.10"
 "sonyflake" = "1.0.9"
 "jsonvalue" = "1.1.0"
 "mustache" = "1.2.1"
-"ystyle::jsonrpc" = "0.7.4"
+"ystyle::jsonrpc" = "0.7.5"
 "bstorm" = "1.4.7"
 "tomlcj" = "1.0.0"
 "opencj::ulid" = "0.1.2"
 "llm_api" = { path = "../llm_api" }
-"acp" = "0.2.2"
+"acp" = "0.2.3"
 
 [target.x86_64-unknown-linux-gnu]
 link-option = "-luring"
