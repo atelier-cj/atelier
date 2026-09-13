@@ -100,37 +100,17 @@ public class SessionLoop {
             eventBus: this.eventBus)
         runtime.toolApprovalFn = approvalFn
         let stream = runtime.chatWithSessionId(sessionId, msgs, env)
-        // 事件消费 + 控制轮询；AgentStartEvent 到达 ⇔ runtime 已注册 cancelFlag：
-        // 早到的取消/关闭请求在事件到达后补发（幂等）。
-        var cancelArmed = false
+        // 事件消费 + 控制轮询收敛成一个独立函数（便于用构造出来的流单测：见
+        // session_loop_test 的 consumeTurnStream 用例）
+        let outcome = consumeTurnStream(stream, requestStop, requestCancel, onEvent,
+            { => runtime.cancelSession(sessionId) })
         var stoppedByClose = false
-        var ended = false
-        while (!ended && !stoppedByClose) {
-            if (requestStop()) {
-                runtime.cancelSession(sessionId)
-                stoppedByClose = true
-                break
-            }
-            if (cancelArmed && requestCancel()) {
-                runtime.cancelSession(sessionId)
-            }
-            match (stream.receive(Duration.millisecond * 200)) {
-                case Some(ev: AgentStartEvent) =>
-                    cancelArmed = true
-                    if (requestCancel()) {
-                        runtime.cancelSession(sessionId)
-                    }
-                    if (let Some(cb) <- onEvent) { cb(ev) }
-                case Some(ev: AgentEndEvent) =>
-                    if (let Some(cb) <- onEvent) { cb(ev) }
-                    ended = true
-                case Some(ev) =>
-                    if (requestCancel()) {
-                        runtime.cancelSession(sessionId)
-                    }
-                    if (let Some(cb) <- onEvent) { cb(ev) }
-                case None => ()
-            }
+        match (outcome) {
+            case ConsumeOutcome.Ended => ()
+            case ConsumeOutcome.Stopped => stoppedByClose = true
+            case ConsumeOutcome.ClosedNoEnd =>
+                // 生产端已收尾却没有终止事件：以前这里会永远每 200ms 空转一轮
+                eprintln("[atelier] turn stream closed without AgentEndEvent (sessionId=${sessionId})")
         }
         let all = try { stream.result() } catch (e: Exception) {
             // 回合结果不可得：降级为「仅历史」返回；不留痕则表现为「这一轮回复凭空消失」
@@ -144,4 +124,60 @@ public class SessionLoop {
         }
         TurnOutcome(all, stoppedByClose)
     }
+}
+
+// 回合事件流的收敛结果
+enum ConsumeOutcome {
+    | Ended          // 收到 AgentEndEvent（正常收敛）
+    | Stopped        // 调用方请求 close（打断本回合）
+    | ClosedNoEnd    // 生产端已收尾，但 AgentEndEvent 始终没来
+}
+
+// 消费一个回合的事件流直到收敛。
+//
+// 原先这段内联在 run() 里且只认 AgentEndEvent 与 requestStop：生产端线程一旦被
+// Error 带走（既不发终止事件也不 setError），消费循环就无限空转、result() 永久
+// 阻塞。现在多了流生命周期兜底——生产端收尾时一定 close()，这里在 receive 超时
+// 后用它判定「别再等了」。抽成独立函数是为了能用构造出来的流直接单测。
+// AgentStartEvent 到达 ⇔ runtime 已注册 cancelFlag：早到的取消请求在事件到达后补发（幂等）。
+func consumeTurnStream(stream: EventStream<AgentEvent, ArrayList<Message>>,
+    requestStop: () -> Bool, requestCancel: () -> Bool,
+    onEvent: ?(AgentEvent) -> Unit, cancelTurn: () -> Unit): ConsumeOutcome {
+    var cancelArmed = false
+    var outcome = ConsumeOutcome.ClosedNoEnd
+    var done = false
+    while (!done) {
+        if (requestStop()) {
+            cancelTurn()
+            outcome = ConsumeOutcome.Stopped
+            done = true
+        } else {
+            if (cancelArmed && requestCancel()) {
+                cancelTurn()
+            }
+            match (stream.receive(Duration.millisecond * 200)) {
+                case Some(ev: AgentStartEvent) =>
+                    cancelArmed = true
+                    if (requestCancel()) {
+                        cancelTurn()
+                    }
+                    if (let Some(cb) <- onEvent) { cb(ev) }
+                case Some(ev: AgentEndEvent) =>
+                    if (let Some(cb) <- onEvent) { cb(ev) }
+                    outcome = ConsumeOutcome.Ended
+                    done = true
+                case Some(ev) =>
+                    if (requestCancel()) {
+                        cancelTurn()
+                    }
+                    if (let Some(cb) <- onEvent) { cb(ev) }
+                case None =>
+                    if (stream.isClosed()) {
+                        outcome = ConsumeOutcome.ClosedNoEnd
+                        done = true
+                    }
+            }
+        }
+    }
+    outcome
 }

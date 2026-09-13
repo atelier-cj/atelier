@@ -355,6 +355,27 @@ func runtime_chatWithSessionId_usesProvidedId() {
     stream.result()
 }
 
+// 收尾哨兵：回合结束后 runtime 必须 close() 事件流。消费端（SessionLoop）靠它判断
+// 「生产端已收尾」，否则生产线程万一没能发出 AgentEndEvent，消费循环会永远空转。
+@Test
+func runtime_streamClosedAfterTurn() {
+    let runtime = makeCompactionRuntime(
+        compactionRuntimeConfig(false, UInt32(16384), UInt32(20000), None), StubProvider())
+    let msgs = ArrayList<Message>()
+    msgs.add(UserMessage(ContentList.ofText("hi"), 0))
+    let stream = runtime.chatWithSessionId("sess_sentinel_1", msgs, SessionEnvironment())
+    stream.result()
+    // close() 紧跟 setResult 之后，result() 返回时可能还差几条指令：短轮询等到收尾
+    var closed = stream.isClosed()
+    var i = 0
+    while (!closed && i < 20) {
+        sleep(Duration.millisecond * 50)
+        closed = stream.isClosed()
+        i++
+    }
+    @Expect(closed, true)
+}
+
 // chat() 默认生成 ulid 会话 id（sess_ + ulid），不再使用硬编码 sess_0
 @Test
 func runtime_chat_defaultSessionIdUlid() {
