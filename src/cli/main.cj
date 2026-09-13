@@ -45,7 +45,14 @@ main(): Int64 {
     // Session store
     let sessionDir = if (serverCfg.sessionDir != "") { serverCfg.sessionDir }
         else { configDir + "/.atelier/sessions" }
-    try { Directory.create(Path(sessionDir)) } catch (_) { () }
+    // Directory.create 对「目录已存在」也抛 FSException（见 std.fs 文档），所以先判存在再建：
+    // 否则 catch 里分不清「本来就有」与「权限/磁盘导致建不出来」——后者的假象是
+    // 会话库随后打不开、根因丢失
+    if (!exists(Path(sessionDir))) {
+        try { Directory.create(Path(sessionDir), recursive: true) } catch (e: Exception) {
+            eprintln("[atelier] session dir create failed (${sessionDir}): ${e.toString()}")
+        }
+    }
     let sessionStore: SessionStore = StormSessionStore(sessionDir)
 
     // Apply server config log level if not set by logging section
@@ -186,8 +193,11 @@ func initLogger(cfg: TomlLogging): Unit {
         case Some(h) => h + "/.atelier"
         case None => "/tmp/.atelier"
     }
-    try { Directory.create(Path(logDir)) } catch (e: Exception) {
-        eprintln("[atelier] log dir create failed (${logDir}): ${e.toString()}")
+    // 同上：已存在也会抛，不先判存在就会在每次启动时打一条假的「创建失败」
+    if (!exists(Path(logDir))) {
+        try { Directory.create(Path(logDir), recursive: true) } catch (e: Exception) {
+            eprintln("[atelier] log dir create failed (${logDir}): ${e.toString()}")
+        }
     }
     let logFile = try { File(logDir + "/atelier.log", OpenMode.Append) } catch (e: Exception) {
         // 连日志文件都打不开时，stderr 是最后的可观测通道（否则本轮起全程无日志）

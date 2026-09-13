@@ -408,7 +408,11 @@ public class SubAgentManager {
                         case Some(m) => res = Some(m.text)
                         case None => ()
                     }
-                } catch (_) { () }
+                } catch (e: Exception) {
+                    // 与「等超时」区分开：不留痕的话，队列读失败会被父 Agent
+                    // 当成「子 Agent 没回复」（std 文档未声明该调用会抛，属防御性兜底）
+                    eprintln("[atelier] subagent reply queue read failed: ${e.toString()}")
+                }
                 h.waitingForReply.store(false)
                 res
             })
