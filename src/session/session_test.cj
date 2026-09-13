@@ -22,14 +22,19 @@ func count(store: MemorySessionStore): Int64 {
     store.list().size
 }
 
-func stormStore(): StormSessionStore {
+// 每个用例一个独立临时目录；closeAndClean 只删自己那一个。
+//
+// 旧写法是 `remove(Path("/tmp"), recursive: true)` —— 它删的是**整个 /tmp**：并发跑的
+// 其它用例的数据目录、并发编译的 /tmp/cangjie-tmp-* 都会被连带清掉，表现为「测试随机
+// 失败」（list/load 少数据）与「链接期莫名 undefined reference」（本工作区实测踩到过）。
+func stormStore(): (StormSessionStore, Path) {
     let dir = Directory.createTemp(Path("/tmp"))
-    StormSessionStore(dir.toString())
+    (StormSessionStore(dir.toString()), dir)
 }
 
-func closeAndClean(store: StormSessionStore): Unit {
+func closeAndClean(store: StormSessionStore, dir: Path): Unit {
     try { store.close() } catch (_) { () }
-    try { remove(Path("/tmp"), recursive: true) } catch (_) { () }
+    try { remove(dir, recursive: true) } catch (_) { () }
 }
 
 @Test
@@ -69,37 +74,37 @@ func memory_pathToLeaf() {
 
 @Test
 func storm_saveAndLoad() {
-    let store = stormStore()
+    let (store, dir) = stormStore()
     let msgs = ArrayList<Message>()
     msgs.add(makeMsg("hello"))
     msgs.add(makeMsg("world"))
     store.save("test_s1", makeHeader("test_s1"), msgs)
     let loaded = store.load("test_s1")
     @Expect(loaded.size, 2)
-    closeAndClean(store)
+    closeAndClean(store, dir)
 }
 
 @Test
 func storm_list() {
-    let store = stormStore()
+    let (store, dir) = stormStore()
     store.save("l1", makeHeader("l1"), ArrayList<Message>())
     store.save("l2", makeHeader("l2"), ArrayList<Message>())
     @Expect(store.list().size, 2)
-    closeAndClean(store)
+    closeAndClean(store, dir)
 }
 
 @Test
 func storm_delete() {
-    let store = stormStore()
+    let (store, dir) = stormStore()
     store.save("d1", makeHeader("d1"), ArrayList<Message>())
     store.delete("d1")
     @Expect(store.list().size, 0)
-    closeAndClean(store)
+    closeAndClean(store, dir)
 }
 
 @Test
 func storm_appendBranch() {
-    let store = stormStore()
+    let (store, dir) = stormStore()
     let msgs = ArrayList<Message>()
     msgs.add(makeMsg("first"))
     store.save("ab1", makeHeader("ab1"), msgs)
@@ -109,12 +114,12 @@ func storm_appendBranch() {
     more.add(makeMsg("second"))
     store.appendBranch("ab1", leafId, more)
     @Expect(store.load("ab1").size, 2)
-    closeAndClean(store)
+    closeAndClean(store, dir)
 }
 
 @Test
 func appendBranch_archiveEntryKeepsOriginal() {
-    let store = stormStore()
+    let (store, dir) = stormStore()
     let msgs = ArrayList<Message>()
     msgs.add(makeMsg("m0"))
     msgs.add(makeMsg("m1"))
@@ -134,12 +139,12 @@ func appendBranch_archiveEntryKeepsOriginal() {
             @Expect(am.summary, "摘要")
         case _ => @Fail("expected ArchiveMessage as appended entry")
     }
-    closeAndClean(store)
+    closeAndClean(store, dir)
 }
 
 @Test
 func storm_fork() {
-    let store = stormStore()
+    let (store, dir) = stormStore()
     let msgs = ArrayList<Message>()
     msgs.add(makeMsg("root"))
     msgs.add(makeMsg("child"))
@@ -148,7 +153,7 @@ func storm_fork() {
     let leafId = data.entries[1].id
     let fork = store.fork("fk1", leafId)
     @Expect(fork.entries.size, 2)
-    closeAndClean(store)
+    closeAndClean(store, dir)
 }
 
 // ========== 消息 metadata 通道（宿主业务数据随消息持久化；不参与语义比较） ==========
