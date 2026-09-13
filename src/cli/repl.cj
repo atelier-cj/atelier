@@ -3,6 +3,7 @@ package atelier.cli
 import std.env.*
 import std.collection.*
 import std.fs.*
+import std.io.InputStream
 import stdx.log.*
 import atelier.agent.*
 import atelier.message.*
@@ -154,28 +155,15 @@ public class REPL {
         println("Type /help for available commands")
         while (this.running) {
             print("> ")
-            let line = getLine()
-            if (line == "") { continue }
-            handleInput(line)
+            match (decideLineAction(readLineFrom(getStdIn()))) {
+                case LineAction.Run(line) => handleInput(line)
+                case LineAction.Prompt => ()
+                case LineAction.Quit(reason) =>
+                    eprintln("[atelier] " + reason + "，退出 REPL")
+                    this.running = false
+            }
         }
         // Session persists across restarts
-    }
-
-    private func getLine(): String {
-        try {
-            let input = getStdIn()
-            let buf = Array<Byte>(1, repeat: 0)
-            let chars = ArrayList<Byte>()
-            while (true) {
-                let n = input.read(buf)
-                if (n <= 0) { break }
-                if (buf[0] == 10) { break }
-                chars.add(buf[0])
-            }
-            let raw = Array<Byte>(chars.size, repeat: 0)
-            for (i in 0..chars.size) { raw[i] = chars[i] }
-            String.fromUtf8(raw)
-        } catch (_) { "" }
     }
 
     private func handleInput(line: String): Unit {
@@ -518,19 +506,81 @@ func truncateRecent(messages: ArrayList<Message>, max: Int64): ArrayList<Message
     recent
 }
 
-func readLine(): String {
-    try {
-        let input = getStdIn()
-        let buf = Array<Byte>(1, repeat: 0)
-        let chars = ArrayList<Byte>()
-        while (true) {
-            let n = input.read(buf)
-            if (n <= 0) { break }
-            if (buf[0] == 10) { break }
+// ===================== stdin 行读取（EOF/空行/读错三态，供单测） =====================
+
+// stdin 一行读取的结果。**必须把 EOF 与空行分开**：run() 以前把两者都当成
+// `line == ""` → continue，于是管道喂完 stdin（`echo /help | atelier repl`）
+// 或用户按 Ctrl-D 之后就是死循环：每轮刷一个 "> "，100% CPU 且永不退出。
+enum StdinLine {
+    | Line(String)      // 读到一行（不含换行符；"" = 用户直接回车）
+    | Eof               // 流已关闭且再无内容
+    | Failed(String)    // 读出错（原因交调用方留痕）
+}
+
+// 一轮读取之后 REPL 该做什么。把这条规则从 run() 里抽出来是为了可单测——
+// run() 要构造完整 REPL 才能跑，而「EOF 不得当空行」正是出事的那条判断。
+enum LineAction {
+    | Run(String)       // 交给 handleInput
+    | Prompt            // 空行：只重画提示符
+    | Quit(String)      // 退出并给出原因
+}
+
+func decideLineAction(r: StdinLine): LineAction {
+    match (r) {
+        case StdinLine.Line(l) =>
+            if (l == "") { LineAction.Prompt } else { LineAction.Run(l) }
+        case StdinLine.Eof => LineAction.Quit("stdin 已结束（EOF）")
+        case StdinLine.Failed(msg) => LineAction.Quit("stdin 读取失败: " + msg)
+    }
+}
+
+func readLineFrom(input: InputStream): StdinLine {
+    let buf = Array<Byte>(1, repeat: 0)
+    let chars = ArrayList<Byte>()
+    var done = false
+    var result = StdinLine.Eof
+    while (!done) {
+        let n: Int64
+        try {
+            n = input.read(buf)
+        } catch (e: Exception) {
+            return StdinLine.Failed(e.toString())
+        }
+        if (n <= 0) {
+            // 流结束：已收到的字节是「最后一行没有换行符结尾」的内容，仍算一行
+            // （否则管道喂的最后一条命令会被丢掉）；一个字节都没有才是真 EOF。
+            if (chars.size == 0) {
+                result = StdinLine.Eof
+            } else {
+                result = StdinLine.Line(bytesToString(chars))
+            }
+            done = true
+        } else if (buf[0] == 10) {
+            result = StdinLine.Line(bytesToString(chars))
+            done = true
+        } else {
             chars.add(buf[0])
         }
-        let raw = Array<Byte>(chars.size, repeat: 0)
-        for (i in 0..chars.size) { raw[i] = chars[i] }
-        String.fromUtf8(raw)
-    } catch (_) { "" }
+    }
+    result
+}
+
+func bytesToString(chars: ArrayList<Byte>): String {
+    let raw = Array<Byte>(chars.size, repeat: 0)
+    for (i in 0..chars.size) { raw[i] = chars[i] }
+    String.fromUtf8(raw)
+}
+
+// ask_user 等一次性读取入口：EOF 视作「用户没作答」返回空串（语义不变），
+// 但读失败与 EOF 都要留痕，不再静默返回空串。
+func readLine(): String {
+    match (readLineFrom(getStdIn())) {
+        case StdinLine.Line(l) => l
+        case StdinLine.Eof =>
+            eprintln("[atelier] stdin 已结束（EOF），ask_user 无法取得回答")
+            ""
+        case StdinLine.Failed(msg) =>
+            eprintln("[atelier] stdin 读取失败: " + msg)
+            ""
+    }
 }

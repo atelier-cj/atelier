@@ -3,6 +3,7 @@ package atelier.cli
 import atelier.message.*
 import atelier.session.{extractNewMessages, sameMessage}
 import std.collection.*
+import std.io.{ByteBuffer, InputStream}
 
 func plain(text: String): Message { UserMessage(ContentList.ofText(text), 0) }
 
@@ -224,4 +225,79 @@ func parseSubStartArgs_emptyPromptAllowed() {
 @Test
 func currentExePath_resolvesNonEmpty() {
     @Expect(currentExePath() != "", true)
+}
+
+// ========== stdin 行读取：EOF 与空行必须区分（REPL 空转回归） ==========
+//
+// 出过的故障：run() 把 `readLineFrom` 的 EOF 与「空行」都归到 `line == ""` →
+// continue，于是 stdin 一结束（`echo /help | atelier repl`、Ctrl-D）就变成死循环：
+// 每轮刷一个 "> "、100% CPU、永不退出。下面把这条判断钉死。
+
+// 读取结果的可读文本，便于用 @Expect 直接比较（断言留在用例体内）
+func lineText(r: StdinLine): String {
+    match (r) {
+        case StdinLine.Line(l) => "line:" + l
+        case StdinLine.Eof => "eof"
+        case StdinLine.Failed(m) => "failed:" + m
+    }
+}
+
+// 读即抛异常的流：验证「读错」不会被静默当成 EOF（旧代码是 catch (_) { "" }）
+class FailingInputStream <: InputStream {
+    public func read(buffer: Array<Byte>): Int64 {
+        throw Exception("simulated stdin read failure")
+    }
+}
+
+@Test
+func decideLineAction_eofQuitsInsteadOfPrompting() {
+    match (decideLineAction(StdinLine.Eof)) {
+        case LineAction.Quit(_) => ()
+        case _ => @Fail("EOF 必须退出 REPL，不能当空行继续循环（死循环回归）")
+    }
+}
+
+@Test
+func decideLineAction_emptyLineOnlyReprompts() {
+    match (decideLineAction(StdinLine.Line(""))) {
+        case LineAction.Prompt => ()
+        case _ => @Fail("空行应当只重画提示符")
+    }
+}
+
+@Test
+func decideLineAction_lineRuns() {
+    match (decideLineAction(StdinLine.Line("/help"))) {
+        case LineAction.Run(l) => @Expect(l, "/help")
+        case _ => @Fail("普通行应当交给 handleInput")
+    }
+}
+
+@Test
+func decideLineAction_readFailureQuits() {
+    match (decideLineAction(StdinLine.Failed("boom"))) {
+        case LineAction.Quit(reason) => @Expect(reason.contains("boom"), true)
+        case _ => @Fail("读失败必须退出并说明原因")
+    }
+}
+
+// 复刻 `printf 'a\n\nb' | atelier repl`：两行 + 一个空行 + 末行无换行符
+@Test
+func readLineFrom_pipelineInputKeepsEmptyLineAndFinalLine() {
+    let input = ByteBuffer("a\n\nb".toArray())
+    @Expect(lineText(readLineFrom(input)), "line:a")
+    @Expect(lineText(readLineFrom(input)), "line:")     // 空行 ≠ EOF（回归点）
+    @Expect(lineText(readLineFrom(input)), "line:b")    // 末行无 \n 也不能丢
+    @Expect(lineText(readLineFrom(input)), "eof")       // 真 EOF：REPL 由此退出
+}
+
+@Test
+func readLineFrom_emptyStreamIsEof() {
+    let input = ByteBuffer(Array<Byte>(0, repeat: 0))
+    @Expect(lineText(readLineFrom(input)), "eof")
+}
+
+@Test
+func readLineFrom_readErrorIsFailedNotEof() {
+    @Expect(lineText(readLineFrom(FailingInputStream())).startsWith("failed:"), true)
 }
