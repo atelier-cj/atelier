@@ -1,7 +1,7 @@
 package atelier.cli
 
 import std.env.*
-import std.fs.{Directory, Path}
+import std.fs.{Directory, Path, exists}
 import atelier.agent.*
 import atelier.provider.*
 import atelier.tool.*
@@ -32,7 +32,13 @@ public func runAcp(agentNameArg: String, toolReg: ToolRegistry, trustMgr: TrustM
     let effectiveSessionDir = if (sessionDirOverride != "") { sessionDirOverride } else { sessionDir }
     // 覆盖目录需存在（调用方（远程桥）负责创建）
     if (sessionDirOverride != "") {
-        try { Directory.create(Path(effectiveSessionDir)) } catch (_) { () }
+        // 已存在是常态（create 对已存在目录抛异常）；真失败（权限/磁盘）要留痕，
+        // 否则下游会话库会报一个与根因无关的错
+        if (!exists(Path(effectiveSessionDir))) {
+            try { Directory.create(Path(effectiveSessionDir), recursive: true) } catch (e: Exception) {
+                eprintln("[atelier] acp session dir create failed (${effectiveSessionDir}): ${e.toString()}")
+            }
+        }
     }
     let cfg = match (agentReg.get(agentName)) {
         case Some(c) => c

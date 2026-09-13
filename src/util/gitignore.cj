@@ -29,7 +29,11 @@ public class GitIgnoreMatcher {
                 let pattern = if (negate) { subStr2(line, 1, line.size) } else { line }
                 this.patterns.add((pattern, negate))
             }
-        } catch (_) { () }
+        } catch (e: Exception) {
+            // 读失败若不留痕，表现是「这个项目的 .gitignore 形同不存在」：
+            // 工具会照读本该被忽略的文件（可能含密钥），而用户看不到任何线索
+            eprintln("[atelier] .gitignore load failed (${gitIgnorePath}): ${e.toString()}")
+        }
     }
 
     public func isIgnored(path: String): Bool {

@@ -259,7 +259,11 @@ public class REPL {
         let cwd = try { getWorkingDirectory().toString() } catch (_) { "." }
         // 隔离目录：子进程 bstorm/映射文件不与会话目录争用（同 startRemote 库语义）
         let childDir = this.sessionDir + "/remote-sub/" + nextId()
-        try { Directory.create(Path(childDir), recursive: true) } catch (_) { () }
+        // childDir 是全新 ulid 目录：这里抛异常就是真失败（权限/磁盘），必须留痕——
+        // 否则只会以「远程子 Agent 异常」的形式出现在下游，根因丢失
+        try { Directory.create(Path(childDir), recursive: true) } catch (e: Exception) {
+            eprintln("[atelier] remote sub agent dir create failed (${childDir}): ${e.toString()}")
+        }
         match (this.subMgr.startRemote(exe, agentName, this.sessionId, prompt, cwd, childDir)) {
             case Some(h) =>
                 println("已启动远程子 Agent：${h.subSessionId}（进程 ${exe}，目录 ${childDir}）")
