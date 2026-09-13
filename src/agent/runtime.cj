@@ -479,7 +479,17 @@ public open class AgentRuntime {
                 // 随后 result() 抛错由调用方决定策略
                 this.emit(stream, AgentEndEvent(ArrayList<Message>([UserMessage(ContentList.ofText("[Runtime error: ${e.message}]"), 0)])))
                 stream.setError(e)
+            } catch (e: Error) {
+                // Error（OOM 等）此前会带着 produce 线程一起走掉：既不 emit AgentEndEvent，
+                // 也不 setError —— 消费端（SessionLoop）便永远每 200ms 空转一轮，result()
+                // 也永久阻塞。这里兜住，维持「生产端一定会收尾」这一不变量。
+                eprintln("[atelier] runtime system error: " + e.toString())
+                this.emit(stream, AgentEndEvent(ArrayList<Message>([UserMessage(ContentList.ofText("[Runtime system error: ${e.toString()}]"), 0)])))
+                stream.setError(Exception("runtime system error: " + e.toString()))
             }
+            // 收尾哨兵：无论如何都标记「生产端已结束」。消费端据此判断循环是否该收敛，
+            // 而不是无限等一个可能永远不会到来的 AgentEndEvent（close 不影响已排队事件）。
+            stream.close()
             // 会话结束（正常/取消/异常统一路径）后清理取消标志
             synchronized(this.cancelLock) { this.cancels.remove(sessionId) }
         }

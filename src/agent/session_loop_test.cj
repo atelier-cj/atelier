@@ -206,3 +206,65 @@ public func sessionLoop_noAttachment_textOnly() {
     @Expect(provider.seenImages, 0)
     @Expect(provider.seenTexts.contains("hello"), true)
 }
+
+// ========== 回合消费循环的收尾哨兵（生产端线程没了也不能空转） ==========
+
+func outcomeName(o: ConsumeOutcome): String {
+    match (o) {
+        case ConsumeOutcome.Ended => "ended"
+        case ConsumeOutcome.Stopped => "stopped"
+        case ConsumeOutcome.ClosedNoEnd => "closed-no-end"
+    }
+}
+
+// 构造回合事件流：emitEnd 控制是否发 AgentEndEvent，closeIt 控制是否置收尾哨兵
+func fakeTurnStream(emitEnd: Bool, closeIt: Bool): EventStream<AgentEvent, ArrayList<Message>> {
+    let s = EventStream<AgentEvent, ArrayList<Message>>()
+    let msgs = ArrayList<Message>()
+    msgs.add(UserMessage(ContentList.ofText("hi"), 0))
+    s.emit(AgentStartEvent("s1"))
+    if (emitEnd) { s.emit(AgentEndEvent(msgs)) }
+    s.setResult(msgs)
+    if (closeIt) { s.close() }
+    s
+}
+
+@Test
+public func consumeTurnStream_endsOnAgentEndEvent() {
+    let s = fakeTurnStream(true, true)
+    let seen = ArrayList<String>()
+    let outcome = consumeTurnStream(s, { => false }, { => false },
+        Some({ ev => seen.add(ev.eventType()) }), { => () })
+    @Expect(outcomeName(outcome), "ended")
+    @Expect(seen.size, 2)
+    @Expect(seen[0], "agent_start")
+    @Expect(seen[1], "agent_end")
+}
+
+// 回归：生产端已收尾却没发终止事件（线程被 Error 带走、或收尾路径漏发）时，
+// 消费循环必须收敛——以前这里是 `while (!ended)` 空转，等一个永远不会来的事件。
+@Test
+public func consumeTurnStream_closedWithoutEndStopsSpinning() {
+    let s = fakeTurnStream(false, true)
+    let outcome = consumeTurnStream(s, { => false }, { => false }, None, { => () })
+    @Expect(outcomeName(outcome), "closed-no-end")
+}
+
+@Test
+public func consumeTurnStream_requestStopCancelsTurnAndStops() {
+    let s = fakeTurnStream(false, false)
+    let cancels = ArrayList<String>()
+    let outcome = consumeTurnStream(s, { => true }, { => false }, None, { => cancels.add("cancel") })
+    @Expect(outcomeName(outcome), "stopped")
+    @Expect(cancels.size, 1)
+}
+
+// 早到的取消请求：AgentStartEvent 到达（runtime 已注册 cancelFlag）后补发
+@Test
+public func consumeTurnStream_cancelRequestDeliveredAfterStart() {
+    let s = fakeTurnStream(true, true)
+    let cancels = ArrayList<String>()
+    let outcome = consumeTurnStream(s, { => false }, { => true }, None, { => cancels.add("cancel") })
+    @Expect(outcomeName(outcome), "ended")
+    @Expect(cancels.size >= Int64(1), true)
+}
