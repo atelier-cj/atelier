@@ -71,13 +71,16 @@ public class BashTool <: Tool {
 
             let stdout = try {
                 readAllFromPipe(proc.stdOutPipe)
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                // 读管道失败被降级成空串，与「命令本来没有输出」不可区分（工具执行面）
+                eprintln("[atelier] bash stdout pipe read failed: ${e.toString()}")
                 ""
             }
 
             let stderr = try {
                 readAllFromPipe(proc.stdErrPipe)
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                eprintln("[atelier] bash stderr pipe read failed: ${e.toString()}")
                 ""
             }
 

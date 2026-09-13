@@ -80,7 +80,10 @@ public class SessionLoop {
             case None => this.toolReg
         }
         var oldLoaded = ArrayList<Message>()
-        try { oldLoaded = this.sessionStore.load(sessionId) } catch (_) { () }
+        try { oldLoaded = this.sessionStore.load(sessionId) } catch (e: Exception) {
+            // 历史加载失败若不留痕，表现为「会话凭空变空」——下游只能看到模型失忆
+            eprintln("[atelier] session load failed (sessionId=${sessionId}): ${e.toString()}")
+        }
         let loaded = if (maxLoad > 0) { truncateMessages(oldLoaded, maxLoad) } else { oldLoaded }
         let msgs = ArrayList<Message>(loaded)
         if (inputText != "" || attachments.size > 0) {
@@ -130,6 +133,8 @@ public class SessionLoop {
             }
         }
         let all = try { stream.result() } catch (e: Exception) {
+            // 回合结果不可得：降级为「仅历史」返回；不留痕则表现为「这一轮回复凭空消失」
+            eprintln("[atelier] turn result unavailable (sessionId=${sessionId}): ${e.toString()}")
             ArrayList<Message>(oldLoaded)
         }
         // 落库（错误由调用方按日志策略处理）

@@ -44,7 +44,10 @@ public class SystemPromptBuilder {
                         sb.append("\n\n")
                     }
                 }
-            } catch (_: Exception) {}
+            } catch (e: Exception) {
+                // 项目规则读取失败（文件存在但不可读）：不留痕则表现为「规则莫名不生效」
+                eprintln("[atelier] AGENTS.md load failed (${env.directory}): ${e.toString()}")
+            }
         }
         if (env.context.size > 0) {
             sb.append("[Session Context]\n")

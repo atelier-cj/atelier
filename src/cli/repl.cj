@@ -100,7 +100,11 @@ public class REPL {
             this.messages = try {
                 let loaded = this.sessionStore.load(resumeSessionId)
                 truncateRecent(loaded, MaxLoadMessages)
-            } catch (_) { ArrayList<Message>() }
+            } catch (e: Exception) {
+                // --resume 加载失败若不报，用户看到的是「恢复了一个空会话」
+                eprintln("[atelier] resume session load failed (sessionId=${resumeSessionId}): ${e.toString()}")
+                ArrayList<Message>()
+            }
         } else {
             this.sessionId = "sess_" + nextId()
             this.messages = ArrayList<Message>()
@@ -108,7 +112,11 @@ public class REPL {
     }
 
     private func loadSessionMessages(id: String): ArrayList<Message> {
-        let msgs = try { this.sessionStore.load(id) } catch (_) { return ArrayList<Message>() }
+        // /session switch 与子 Agent 恢复共用：加载失败会伪装成「会话不存在/为空」
+        let msgs = try { this.sessionStore.load(id) } catch (e: Exception) {
+            eprintln("[atelier] session load failed (sessionId=${id}): ${e.toString()}")
+            return ArrayList<Message>()
+        }
         truncateRecent(msgs, MaxLoadMessages)
     }
 
@@ -233,15 +241,24 @@ public class REPL {
         let lastLeaf: Option<String> = try {
             let data = this.sessionStore.loadEntries(this.sessionId)
             if (data.entries.size > 0) { Some(data.entries[data.entries.size - 1].id) } else { None }
-        } catch (_) { None }
+        } catch (e: Exception) {
+            // 取末 entry 失败会走 save 分支覆盖整份会话文件，属潜在数据丢失——必须留痕
+            eprintln("[atelier] loadEntries failed, falling back to save (sessionId=${this.sessionId}): ${e.toString()}")
+            None
+        }
         match (lastLeaf) {
             case Some(leaf) =>
-                try { this.sessionStore.appendBranch(this.sessionId, leaf, newMsgs) } catch (_) { () }
+                try { this.sessionStore.appendBranch(this.sessionId, leaf, newMsgs) } catch (e: Exception) {
+                    // 本轮消息未落库：不回滚内存态，但必须让用户知道这轮不会持久化
+                    eprintln("[atelier] appendBranch failed (sessionId=${this.sessionId}, ${newMsgs.size} msgs not persisted): ${e.toString()}")
+                }
             case None =>
                 try {
                     let header = SessionHeader(1, this.sessionId, 0, 0, "", "", "", None)
                     this.sessionStore.save(this.sessionId, header, this.messages)
-                } catch (_) { () }
+                } catch (e: Exception) {
+                    eprintln("[atelier] session save failed (sessionId=${this.sessionId}): ${e.toString()}")
+                }
         }
     }
 
@@ -372,7 +389,11 @@ public class REPL {
             this.messages = ArrayList<Message>()
             println("New session: " + this.sessionId)
         } else if (cmd == "list") {
-            let sessions = try { this.sessionStore.list() } catch (_) { ArrayList<SessionHeader>() }
+            // 列举失败被降级为空表，会打印「No saved sessions」——与「真没有会话」不可区分
+            let sessions = try { this.sessionStore.list() } catch (e: Exception) {
+                eprintln("[atelier] session list failed: ${e.toString()}")
+                ArrayList<SessionHeader>()
+            }
             if (sessions.size == 0) {
                 println("No saved sessions")
             } else {

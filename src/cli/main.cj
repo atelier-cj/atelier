@@ -59,10 +59,16 @@ main(): Int64 {
     handler.setProviderRegistry(providerReg)
     handler.setMcpManager(mcpMgr)
     toolReg.register(LoadMcpToolsetTool(mcpMgr, toolReg))
-    try { skillReg.loadDirectory(configDir + "/.agents/skills") } catch (_) { () }
+    try { skillReg.loadDirectory(configDir + "/.agents/skills") } catch (e: Exception) {
+        // 技能目录整体加载失败 = 全部技能静默消失，模型只会「不会用」而无任何线索
+        eprintln("[atelier] skills load failed (${configDir}/.agents/skills): ${e.toString()}")
+    }
     toolReg.register(UseSkillsTool(skillReg))
     for (a in config.agent) {
-        try { agentReg.create(a.name, agentConfigFrom(a)) } catch (_) { () }
+        try { agentReg.create(a.name, agentConfigFrom(a)) } catch (e: Exception) {
+            // 配置里的 Agent 建不出来 = 该 Agent 静默不存在，稍后请求只会得到 not found
+            eprintln("[atelier] agent '${a.name}' create failed: ${e.toString()}")
+        }
     }
     for (p in config.provider) {
         let cfg = toProviderConfig(p)
@@ -180,8 +186,14 @@ func initLogger(cfg: TomlLogging): Unit {
         case Some(h) => h + "/.atelier"
         case None => "/tmp/.atelier"
     }
-    try { Directory.create(Path(logDir)) } catch (_) { () }
-    let logFile = try { File(logDir + "/atelier.log", OpenMode.Append) } catch (_) { return }
+    try { Directory.create(Path(logDir)) } catch (e: Exception) {
+        eprintln("[atelier] log dir create failed (${logDir}): ${e.toString()}")
+    }
+    let logFile = try { File(logDir + "/atelier.log", OpenMode.Append) } catch (e: Exception) {
+        // 连日志文件都打不开时，stderr 是最后的可观测通道（否则本轮起全程无日志）
+        eprintln("[atelier] log file open failed (${logDir}/atelier.log), logging disabled: ${e.toString()}")
+        return
+    }
     let logger = SimpleLogger(logFile)
     logger.level = level
     setGlobalLogger(logger)

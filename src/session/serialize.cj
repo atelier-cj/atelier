@@ -9,5 +9,9 @@ public func entriesToJson(entries: ArrayList<Entry>): String {
 }
 
 public func entriesFromJson(json: String): ArrayList<Entry> {
-    try { fromJsonString<ArrayList<Entry>>(json) } catch (_) { ArrayList<Entry>() }
+    // 反序列化失败即「整份会话历史归零」，与「本来就是空会话」不可区分——必须留痕
+    try { fromJsonString<ArrayList<Entry>>(json) } catch (e: Exception) {
+        eprintln("[atelier] session entries deserialize failed (history lost): ${e.toString()}")
+        ArrayList<Entry>()
+    }
 }
