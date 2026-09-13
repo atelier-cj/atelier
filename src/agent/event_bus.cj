@@ -40,7 +40,10 @@ public class EventBus {
             arr
         }
         for (h in targets) {
-            try { h(ev) } catch (_) { () }
+            // 单订阅者异常不连坐（语义不变），但必须留痕：否则事件静默丢失，订阅方无从得知
+            try { h(ev) } catch (e: Exception) {
+                eprintln("[atelier] event subscriber failed: ${e.toString()}")
+            }
         }
     }
 

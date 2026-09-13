@@ -149,7 +149,10 @@ public class AtelierHttpHandler {
         let log = getGlobalLogger([("name", "SSE")])
         let runtime = AgentRuntime(agentCfg, provider, this.toolRegistry, this.sessionStore, this.trustManager, this.skillRegistry, this.agentRegistry, this.providerRegistry, ArrayList<Hook>(), { q =>
             let data = "data: {\"type\":\"user_input_request\",\"question\":\"" + escapeJson(q) + "\"}\n\n"
-            try { writer.write(data.toArray()) } catch (_) { () }
+            // 写失败则客户端永远看不到提问，而本线程随后阻塞在 queue.remove() 上——必须留痕
+            try { writer.write(data.toArray()) } catch (e: Exception) {
+                eprintln("[atelier] SSE user_input_request write failed: ${e.toString()}")
+            }
             let queue = LinkedBlockingQueue<String>(1)
             this.pendingInputs[q] = queue
             log.info("askUser: waiting for input", Array<Attr>())
@@ -401,7 +404,10 @@ public class AtelierHttpHandler {
                     case None => done = true
                 }
             }
-        } catch (_) { () }
+        } catch (e: Exception) {
+            // v1 流式：写帧/消费事件失败被整个吞掉会表现为「响应流莫名中断且无 [DONE]」
+            eprintln("[atelier] v1 chat stream aborted: ${e.toString()}")
+        }
     }
 
     private func handleAgentInput(ctx: HttpContext): Unit {
@@ -413,7 +419,10 @@ public class AtelierHttpHandler {
         }
         // Find matching pending input (any will do for now)
         for ((_, queue) in this.pendingInputs) {
-            try { queue.add(dto.answer) } catch (_) { () }
+            // 投递失败 = 用户答案丢失，而等待方仍阻塞在 queue.remove() 上——必须留痕
+            try { queue.add(dto.answer) } catch (e: Exception) {
+                eprintln("[atelier] pending input enqueue failed (answer dropped): ${e.toString()}")
+            }
             break
         }
         jsonResponse(ctx, 200, toJsonString(StatusResponse("ok")))
@@ -454,7 +463,11 @@ func readBody(ctx: HttpContext): String {
     let input = ctx.request.body
     while (true) {
         let n: Int64
-        try { n = input.read(buf) } catch (_) { break }
+        // 读取失败即中断：请求体被截断后仍按「完整报文」解析，必须留痕
+        try { n = input.read(buf) } catch (e: Exception) {
+            eprintln("[atelier] HTTP request body read failed (body truncated): ${e.toString()}")
+            break
+        }
         if (n <= 0) { break }
         for (i in 0..n) { all.add(buf[Int64(i)]) }
     }

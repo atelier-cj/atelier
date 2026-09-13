@@ -14,7 +14,11 @@ public class SkillLoader {
         for (info in entries) {
             if (info.isDirectory()) {
                 let skillPath = Path(dir + "/" + info.name)
-                let skill = try { loadSkill(skillPath.toString()) } catch (_) { continue }
+                // 单个技能坏掉不连坐（语义不变），但静默 continue 会让「技能莫名不可用」无法排查
+                let skill = try { loadSkill(skillPath.toString()) } catch (e: Exception) {
+                    eprintln("[atelier] skill load failed, skipped (${skillPath.toString()}): ${e.toString()}")
+                    continue
+                }
                 result.add(skill)
             }
         }

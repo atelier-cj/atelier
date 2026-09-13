@@ -329,6 +329,8 @@ public class AcpBridge {
                 maxLoad: MaxAcpLoadMessages)
             this.lastStopReason(outcome.messages)
         } catch (e: Exception) {
+            // 回合异常若不留痕，ACP 端只看到一次无理由的 refusal，无从定位
+            eprintln("[atelier-acp] prompt turn failed (session=${atelierId}): ${e.toString()}")
             if (ctx.isCancelled()) { PromptResponse(StopReasonCancelled) }
             else { PromptResponse(StopReasonRefusal) }
         }
@@ -347,7 +349,10 @@ public class AcpBridge {
     // 加载会话历史并重放为 session/update 通知（session/load 语义）
     private func replayHistory(acpId: String, atelierId: String): Unit {
         var msgs = ArrayList<Message>()
-        try { msgs = this.sessionStore.load(atelierId) } catch (_) { () }
+        // session/load 的历史重放：加载失败会导致「会话打开后一片空白」——必须留痕
+        try { msgs = this.sessionStore.load(atelierId) } catch (e: Exception) {
+            eprintln("[atelier-acp] session history load failed (session=${atelierId}): ${e.toString()}")
+        }
         var msgNo: Int64 = 0
         for (m in msgs) {
             msgNo++
@@ -421,7 +426,10 @@ public class AcpBridge {
         let req = CreateElicitationRequest.form(acpId, question, schema)
         match (this.agent.createElicitation(req, timeout: 5 * Duration.minute)) {
             case Result.Ok(resp) => elicitationAnswerOf(resp.action, resp.content)
-            case Result.Err(_) => ""
+            case Result.Err(e) =>
+                // 通道失败/超时一律降级为「未作答」：不留痕则与「用户拒绝」不可区分
+                eprintln("[atelier-acp] elicitation failed, treated as no answer: ${e.toString()}")
+                ""
         }
     }
 
@@ -448,7 +456,10 @@ public class AcpBridge {
                         else { "" }
                     case None => ""
                 }
-            case Result.Err(_) => ""
+            case Result.Err(e) =>
+                // 授权通道失败按拒绝处理（fail-safe 语义不变），但必须留痕：否则「工具为何被拒」无从排查
+                eprintln("[atelier-acp] permission request failed, treated as denied: ${e.toString()}")
+                ""
         }
     }
 
