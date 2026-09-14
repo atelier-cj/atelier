@@ -1,6 +1,6 @@
-# Atelier - Agent 运行时设计文档
+# Atelier — Agent Harness 设计文档
 
-> 一个面向业务集成的、开箱即用的 Agent 运行时
+> 一个面向业务集成的、可嵌入的 Agent Harness
 
 ---
 
@@ -8,13 +8,13 @@
 
 ### 1.1 一句话定义
 
-**Atelier** 是一个**开箱即用、可组合的 Agent 运行时**——开发者只需挂载业务工具、配置 Skills、选择会话存储方式，即可获得一个完整的、可运行的 Agent 服务，无需从零实现推理循环、上下文管理或模型适配。
+**Atelier** 是一个**开箱即用、可组合的 Agent Harness**——开发者只需挂载业务工具、配置 Skills、选择会话存储方式，即可获得一个完整的、可运行的 Agent 服务，无需从零实现推理循环、上下文管理或模型适配。
 
 ### 1.2 与现有框架的区别
 
 | | LangChain / Eino / ADK | Atelier |
 | :--- | :--- | :--- |
-| **定位** | 编排框架（积木盒） | Agent 运行时（成品工坊） |
+| **定位** | 编排框架（积木盒） | Agent Harness（成品工坊） |
 | **开发者要做的事** | 组装链条、实现循环、管理状态 | 挂载工具、配置 Skills、选择存储 |
 | **交付形态** | 库，需二次开发 | 库 + HTTP 服务 + CLI，开箱即用 |
 | **Agent 定义** | 代码中构建 | 运行时动态创建（JSON/YAML 配置） |
@@ -308,7 +308,7 @@ class EventStream<T, R> {
 
 ### 3.6 自研优先
 
-- 核心运行时（Agent Loop、事件流、上下文压缩）全部自研
+- 核心 Harness（Agent Loop、事件流、上下文压缩）全部自研
 - Tool 接口与内置工具自研，MCP 工具通过 `ystyle::mcp` 接入
 - Provider 层直接对接 LLM REST API，不引入额外抽象层
 - 外部依赖最小化，`mcp-cj` 为 MCP 协议层依赖，`bstorm` 为会话存储后端
@@ -1133,7 +1133,7 @@ mcp-cj（`/home/ystyle/Projects/Cangjie/mcp-cj`）是仓颉原生的 MCP 完整�
 | :--- | :--- | :--- |
 | MCP 协议 | `ystyle::mcp` | 仓颉原生、功能完备、无替代品 |
 | 会话持久化 | `bstorm` | 嵌入式 JSON 文档库，`@Model` 宏自动序列化，支持索引与查询 |
-| Agent 运行时 | 自研 | 无符合运行时动态路线的现成运行时 |
+| Agent Harness | 自研 | 无符合运行时动态路线的现成 Harness |
 | LLM 客户端 | 自研 | 避免外部依赖，直接对接 REST API |
 | 工具系统 | 自研 | 核心业务逻辑，需信任闸门等定制 |
 | 配置 | 自研 | 与 Agent 动态管理深度绑定 |
@@ -1142,7 +1142,7 @@ mcp-cj（`/home/ystyle/Projects/Cangjie/mcp-cj`）是仓颉原生的 MCP 完整�
 
 ## 十三、总结
 
-Atelier 是一个**面向业务集成的 Agent 运行时**，其核心价值在于：
+Atelier 是一个**面向业务集成的 Agent Harness**，其核心价值在于：
 
 1. **开箱即用**：无需从零实现 Agent 循环，运行即可用
 2. **动态可配**：Agent 定义运行时创建，像 Cherry Studio 一样灵活

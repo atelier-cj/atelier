@@ -1,6 +1,6 @@
-# Atelier — 开箱即用的 Agent 应用引擎
+# Atelier — 可嵌入的 Agent Harness
 
-Atelier 是一个纯仓颉实现的 Agent 应用引擎。
+Atelier 是一个纯仓颉实现的 Agent Harness —— 把模型变成 Agent 的那层脚手架。
 
 定位为**成品工坊**而非**编排框架**——挂载工具、配置 Skills、选择存储，即可获得完整的可运行 Agent，无需从零实现推理循环、上下文管理或模型适配。
 
@@ -145,4 +145,4 @@ cjpm test --show-all-output --filter 'TestName.*'
 | `tomlcj` | TOML 解析 | MIT |
 | `acp` | ACP v1 协议层（Agent/Client 双端） | MulanPSL-2.0 |
 
-核心运行时（Agent Loop、事件流、上下文压缩、Provider、信任闸门）全部自研，零外部依赖。
+核心 Harness（Agent Loop、事件流、上下文压缩、Provider、信任闸门）全部自研，零外部依赖。

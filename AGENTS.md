@@ -1,4 +1,4 @@
-# Atelier — 开箱即用的 Agent 运行时
+# Atelier — 可嵌入的 Agent Harness
 
 ## 仓颉语言
 
