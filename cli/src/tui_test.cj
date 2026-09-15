@@ -603,3 +603,47 @@ func markdown_wrapsAtWidth() {
 }
 
 
+
+@Test
+func markdown_boldDoesNotLeak() {
+    // **a** 后跟普通文本：粗体段后必须复位，普通文本不带粗体
+    let lines = markdownToLines("**a** b", 40, 0)
+    @Expect(lines[0].contains(M_BOLD + "a"), true)
+    // 粗体段结束后复位，普通 " b" 前有 RESET
+    @Expect(lines[0].contains(M_RESET + " b"), true)
+    // 行尾有复位（下一行不会被继承）
+    @Expect(lines[0].endsWith(M_RESET), true)
+}
+
+@Test
+func markdown_noStyleLeakAcrossTypes() {
+    let lines = markdownToLines("*斜* x **粗** y `码` z ~~删~~ w", 80, 0)
+    let l = lines[0]
+    @Expect(l.contains(M_ITALIC + "斜" + M_RESET), true)
+    @Expect(l.contains(M_BOLD + "粗" + M_RESET), true)
+    @Expect(l.contains(M_CODE + "码" + M_RESET), true)
+    @Expect(l.contains(M_STRIKE + "删" + M_RESET), true)
+}
+
+@Test
+func markdown_headingLineEndsWithReset() {
+    let lines = markdownToLines("# 标题", 40, 0)
+    @Expect(lines[0].endsWith(M_RESET), true)
+}
+
+@Test
+func markdown_quoteLineEndsWithReset() {
+    let lines = markdownToLines("> 引用", 40, 0)
+    @Expect(lines[0].endsWith(M_RESET), true)
+}
+
+@Test
+func markdown_listMarkerNotRepeatedOnWrap() {
+    // 长条目续行只出现一次 "1. " 前缀，序号不递增
+    let lines = markdownToLines("1. 一二三四五六七八九十 甲乙丙丁戊己庚辛壬癸子丑寅卯", 16, 0)
+    var markerCount: Int64 = 0
+    for (l in lines) {
+        if (l.contains("1. ")) { markerCount = markerCount + 1 }
+    }
+    @Expect(markerCount, 1)
+}

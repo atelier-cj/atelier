@@ -35,6 +35,7 @@ class MdRender {
     var inCodeBlock: Bool = false
     var linkUrl: String = ""
     var pendingStyle: String = ""
+    var listMarkerEmitted: Bool = false
 
     public init(width: Int64, prefixWidth: Int64) {
         this.width = width
@@ -55,11 +56,14 @@ class MdRender {
         if (this.quoteDepth > 0) { style = style + M_QUOTE }
         if (this.listDepth > 0) {
             for (i in 0..(this.listDepth - 1)) { text = text + "  " }
-            if (this.listNumber > 0) {
-                text = text + this.listNumber.toString() + ". "
-                this.listNumber = this.listNumber + 1
-            } else {
-                text = text + "• "
+            if (!this.listMarkerEmitted) {
+                if (this.listNumber > 0) {
+                    text = text + this.listNumber.toString() + ". "
+                    this.listNumber = this.listNumber + 1
+                } else {
+                    text = text + "• "
+                }
+                this.listMarkerEmitted = true
             }
         }
         if (this.headingLevel > 0) {
@@ -158,7 +162,16 @@ class MdRender {
 
     func emitLine(segs: ArrayList<(String, String)>): Unit {
         let sb = StringBuilder()
-        for ((t, st) in segs) { sb.append(st + t) }
+        var lastSt = ""
+        for ((t, st) in segs) {
+            // 样式变化：先复位再应用，防止粗体等泄漏到后续段/下一行
+            if (st != lastSt) {
+                sb.append(M_RESET + st)
+                lastSt = st
+            }
+            sb.append(t)
+        }
+        sb.append(M_RESET)
         this.out.add(trimTrailing(sb.toString()))
     }
 
@@ -197,7 +210,9 @@ func trimTrailing(s: String): String {
 // 把 markdown 渲染为含 ANSI 的行；prefixWidth 为首行保留前缀（如 "you: "）
 public func markdownToLines(md: String, width: Int64, prefixWidth: Int64): ArrayList<String> {
     let r = MdRender(width, prefixWidth)
-    let p = Parser(md)
+    // GFM 扩展：表格 / 删除线 / 脚注
+    let opts = Options(Options.ENABLE_TABLES | Options.ENABLE_STRIKETHROUGH | Options.ENABLE_FOOTNOTES)
+    let p = Parser(md, opts)
     while (let Some(ev) <- p.next()) {
         match (ev) {
             case Event.Start(tag) =>
@@ -212,6 +227,7 @@ public func markdownToLines(md: String, width: Int64, prefixWidth: Int64): Array
                         r.listNumber = match (n) { case Some(v) => Int64(v); case None => 0 }
                     case Tag.BlockQuote(_) => r.quoteDepth = r.quoteDepth + 1
                     case Tag.Link(_, url, _, _) => r.linkUrl = url.toString()
+                    case Tag.ItemMarker => r.listMarkerEmitted = false
                     case _ => ()
                 }
             case Event.End(end) =>
