@@ -76,6 +76,34 @@ public func runeWidthSum(runes: Array<Rune>): Int64 {
     w
 }
 
+// 按显示宽度截断为单行，超出补 "..."（工具调用结果摘要用）
+public func truncateLine(s: String, width: Int64): String {
+    if (width <= 0) { return "" }
+    let runes = s.toRuneArray()
+    var out = ArrayList<Rune>()
+    var w: Int64 = 0
+    for (r in runes) {
+        let dw = runeDisplayWidth(r)
+        if (w + dw > width) {
+            for (i in 0..3) { out.add(Rune(UInt32(0x2E))) }   // "..."
+            return String(out)
+        }
+        out.add(r)
+        w = w + dw
+    }
+    s
+}
+
+// 工具调用显示行：`tool: <名称>[ ⚠][  <结果摘要>]`
+public func toolLineText(tr: ToolResultMessage, width: Int64): String {
+    let head = if (tr.isError) { "tool: " + tr.toolName + " ⚠" } else { "tool: " + tr.toolName }
+    let resultText = contentText(tr.content)
+    if (resultText == "") { return head }
+    let maxResult = width - 8
+    if (maxResult <= 0) { return head }
+    head + "  " + truncateLine(resultText, maxResult)
+}
+
 // ═══════ 聊天 TUI ══════════════════════════════════════════
 
 // raw mode + ANSI。输入侧复用 xisp 的 terminal（POSIX 已实测；Windows 实现存在但未验证）；
@@ -225,8 +253,16 @@ public class ChatTui {
     private func messageLines(c: Int64): ArrayList<String> {
         let out = ArrayList<String>()
         for (m in this.messages) {
-            let lines = wrapText(chatLinePrefix(m.role()) + messageText(m), c)
-            for (l in lines) { out.add(l) }
+            match (m) {
+                case um: UserMessage =>
+                    let lines = wrapText("you: " + contentText(um.content), c)
+                    for (l in lines) { out.add(l) }
+                case am: AssistantMessage =>
+                    let lines = wrapText("ai:  " + contentText(am.content), c)
+                    for (l in lines) { out.add(l) }
+                case tr: ToolResultMessage => out.add(toolLineText(tr, c))
+                case _ => ()
+            }
         }
         out
     }

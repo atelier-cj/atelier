@@ -200,3 +200,49 @@ func chatTui_systemPromptExcludedFromConversation() {
         case _ => @Fail("expected assistant reply last")
     }
 }
+
+@Test
+func truncateLine_ascii() {
+    @Expect(truncateLine("hello world", 5), "hello...")
+}
+
+@Test
+func truncateLine_fits() {
+    @Expect(truncateLine("ab", 5), "ab")
+}
+
+@Test
+func truncateLine_cjk() {
+    // "你好" 宽 4 恰好；"世" 超宽 → 截断补 "..."
+    @Expect(truncateLine("你好世界", 4), "你好...")
+}
+
+@Test
+func truncateLine_zeroWidth() {
+    @Expect(truncateLine("ab", 0), "")
+}
+
+@Test
+func toolLineText_basic() {
+    let tr = ToolResultMessage("call_1", "bash", ContentList.ofText("ok"), false, 0)
+    @Expect(toolLineText(tr, 40), "tool: bash  ok")
+}
+
+@Test
+func toolLineText_errorMark() {
+    let tr = ToolResultMessage("call_1", "bash", ContentList.ofText("cmd not found"), true, 0)
+    @Expect(toolLineText(tr, 40), "tool: bash ⚠  cmd not found")
+}
+
+@Test
+func toolLineText_emptyResult() {
+    let tr = ToolResultMessage("call_1", "bash", ContentList.ofText(""), false, 0)
+    @Expect(toolLineText(tr, 40), "tool: bash")
+}
+
+@Test
+func toolLineText_truncatesResult() {
+    let tr = ToolResultMessage("call_1", "read_file", ContentList.ofText("abcdefghijklmnop"), false, 0)
+    // 宽 20 → 结果区 12：abcdefghijkl 后截断补 ...
+    @Expect(toolLineText(tr, 20), "tool: read_file  abcdefghijkl...")
+}
