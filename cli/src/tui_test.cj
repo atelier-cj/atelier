@@ -451,11 +451,23 @@ func contextChars_sumOfText() {
 
 @Test
 func sessionInfoText_format() {
-    let text = sessionInfoText("assistant", "gpt-4o", 3, 1234)
+    let text = sessionInfoText("assistant", "gpt-4o", 3, 1234, 100, 25)
     @Expect(text.contains("Agent: assistant"), true)
     @Expect(text.contains("Model: gpt-4o"), true)
     @Expect(text.contains("Turns: 3"), true)
     @Expect(text.contains("Ctx: 1234"), true)
+    @Expect(text.contains("Tokens: 100/25"), true)
+}
+
+@Test
+func sessionTokens_sumsAssistantUsage() {
+    let msgs = ArrayList<Message>()
+    msgs.add(plainMsg("hi"))
+    msgs.add(AssistantMessage(ContentList.ofText("r1"), "", "", StopReason.EndTurn, TokenUsage(10, 5), 0))
+    msgs.add(AssistantMessage(ContentList.ofText("r2"), "", "", StopReason.EndTurn, TokenUsage(30, 8), 0))
+    let (inp, out) = sessionTokens(msgs)
+    @Expect(inp, 40)
+    @Expect(out, 13)
 }
 
 @Test

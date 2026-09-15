@@ -10,7 +10,7 @@ authors = ["ystyle"]
 repository = "https://atomgit.com/ystyle/atelier"
 
 [dependencies]
-"mcp" = "2.3.10"
+"mcp" = "2.3.11"
 "sonyflake" = "1.0.9"
 "jsonvalue" = "1.1.0"
 "mustache" = "1.2.1"

@@ -248,9 +248,26 @@ public func contextChars(messages: ArrayList<Message>): Int64 {
     n
 }
 
-public func sessionInfoText(agentName: String, model: String, turns: Int64, ctxChars: Int64): String {
+// LLM 上报的真实上下文消耗：累加各条 AssistantMessage 的 token 用量（llm_api 返回）
+public func sessionTokens(messages: ArrayList<Message>): (Int64, Int64) {
+    var input: Int64 = 0
+    var output: Int64 = 0
+    for (m in messages) {
+        match (m) {
+            case am: AssistantMessage =>
+                input = input + am.usage.inputTokens
+                output = output + am.usage.outputTokens
+            case _ => ()
+        }
+    }
+    (input, output)
+}
+
+public func sessionInfoText(agentName: String, model: String, turns: Int64,
+    ctxChars: Int64, inputTokens: Int64, outputTokens: Int64): String {
     "Agent: " + agentName + "  |  Model: " + model + "  |  Turns: " + turns.toString() +
-        "  |  Ctx: " + ctxChars.toString() + " chars"
+        "  |  Ctx: " + ctxChars.toString() + " chars" +
+        "  |  Tokens: " + inputTokens.toString() + "/" + outputTokens.toString()
 }
 
 // 状态行净化：换行拍平 + 按宽度截断（多行文本不会炸布局）
@@ -419,8 +436,9 @@ public class ChatTui {
         }
         // 会话信息条（Agent / 模型 / 轮次 / 上下文长度）
         let model = if (this.modelOverride != "") { this.modelOverride } else { this.agentConfig.model }
+        let (tokIn, tokOut) = sessionTokens(this.messages)
         let info = sessionInfoText(this.agentName, model,
-            countUserTurns(this.messages), contextChars(this.messages))
+            countUserTurns(this.messages), contextChars(this.messages), tokIn, tokOut)
         sb.append(csiMove(0, r - 3))
         sb.append("\u{1b}[2K")
         sb.append(colorize(truncateLine(info, c - 2), C_DIM))
