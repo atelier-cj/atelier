@@ -246,3 +246,43 @@ func toolLineText_truncatesResult() {
     // 宽 20 → 结果区 12：abcdefghijkl 后截断补 ...
     @Expect(toolLineText(tr, 20), "tool: read_file  abcdefghijkl...")
 }
+
+@Test
+func colorize_wrapsAnsi() {
+    let out = colorize("abc", C_USER)
+    @Expect(out, C_USER + "abc" + C_RESET)
+}
+
+@Test
+func decorateMessageLines_userColored() {
+    let lines = decorateMessageLines(plainMsg("你好"), 40)
+    @Expect(lines.size, 1)
+    // 前缀着色 + 前缀后立即 RESET（正文默认色）
+    @Expect(lines[0].startsWith(C_USER + "you: "), true)
+    @Expect(lines[0].contains(C_USER + "you: " + C_RESET), true)
+    @Expect(lines[0].contains("你好"), true)
+}
+
+@Test
+func decorateMessageLines_assistantColored() {
+    let lines = decorateMessageLines(asstMsg("回复"), 40)
+    @Expect(lines.size, 1)
+    @Expect(lines[0].startsWith(C_AI + "ai:  "), true)
+    @Expect(lines[0].contains("回复"), true)
+}
+
+@Test
+func decorateMessageLines_toolColored() {
+    let tr = ToolResultMessage("call_1", "bash", ContentList.ofText("ok"), false, 0)
+    let lines = decorateMessageLines(tr, 40)
+    @Expect(lines.size, 1)
+    @Expect(lines[0].startsWith(C_TOOL + "tool: bash"), true)
+    @Expect(lines[0].endsWith(C_RESET), true)
+}
+
+@Test
+func decorateMessageLines_wrapContinuationIndented() {
+    let lines = decorateMessageLines(plainMsg("abcdefghij"), 10)
+    @Expect(lines.size, 2)
+    @Expect(lines[1].startsWith("     "), true)   // 续行缩进 5 格
+}

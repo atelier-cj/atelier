@@ -12,6 +12,8 @@ import atelier.agent.*
 import atelier.provider.*
 import atelier.tool.*
 import atelier.session.*
+import atelier.session.exportToJsonl
+import atelier.session.exportToHtml
 import atelier.trust.*
 import atelier.skill.*
 
@@ -104,6 +106,52 @@ public func toolLineText(tr: ToolResultMessage, width: Int64): String {
     head + "  " + truncateLine(resultText, maxResult)
 }
 
+// ═══════ 暗色主题颜色与消息装饰 ═══════════════════════════════
+
+public let C_RESET: String = "\u{1b}[0m"
+public let C_BOLD: String = "\u{1b}[1m"
+public let C_DIM: String = "\u{1b}[2m"
+public let C_USER: String = "\u{1b}[36m"      // 用户：青
+public let C_AI: String = "\u{1b}[97m"        // AI：亮白
+public let C_TOOL: String = "\u{1b}[33m"      // 工具：黄
+public let C_HEADER: String = "\u{1b}[1;36m"  // 头部：粗青
+public let C_STATUS: String = "\u{1b}[2;90m"  // 状态：暗灰
+public let C_ERROR: String = "\u{1b}[1;31m"   // 错误：亮红
+public let C_PROMPT: String = "\u{1b}[32m"    // 输入提示：绿
+
+public func colorize(text: String, color: String): String {
+    color + text + C_RESET
+}
+
+// 消息装饰：前缀着色 + 正文按宽度换行（先 wrap 再着色，避免 ANSI 码干扰宽度计算）
+public func decorateMessageLines(m: Message, width: Int64): ArrayList<String> {
+    let out = ArrayList<String>()
+    match (m) {
+        case um: UserMessage =>
+            let content = contentText(um.content)
+            if (content != "") {
+                let lines = wrapText(content, width - 5)
+                for (i in 0..lines.size) {
+                    if (i == 0) { out.add(colorize("you: ", C_USER) + lines[Int64(i)]) }
+                    else { out.add("     " + lines[Int64(i)]) }
+                }
+            }
+        case am: AssistantMessage =>
+            let content = contentText(am.content)
+            if (content != "") {
+                let lines = wrapText(content, width - 5)
+                for (i in 0..lines.size) {
+                    if (i == 0) { out.add(colorize("ai:  ", C_AI) + lines[Int64(i)]) }
+                    else { out.add("     " + lines[Int64(i)]) }
+                }
+            }
+        case tr: ToolResultMessage =>
+            out.add(colorize(toolLineText(tr, width), C_TOOL))
+        case _ => ()
+    }
+    out
+}
+
 // ═══════ 聊天 TUI ══════════════════════════════════════════
 
 // raw mode + ANSI。输入侧复用 xisp 的 terminal（POSIX 已实测；Windows 实现存在但未验证）；
@@ -128,6 +176,8 @@ public class ChatTui {
     private var scroll: Int64
     private var status: String
     private var running: Bool
+    private var modelOverride: String
+    private let subMgr: SubAgentManager
     private var out: AutoStream
 
     public init(agentName: String, registry: SlashCommandRegistry, agentConfig: AgentConfig,
@@ -151,7 +201,12 @@ public class ChatTui {
         this.scroll = 0
         this.status = ""
         this.running = true
+        this.modelOverride = ""
         this.out = AutoStream.stdout()
+        // 可持续子 Agent：回合内工具 + /subagent 命令（与 REPL 同装配）
+        this.subMgr = SubAgentManager(toolRegistry, trustManager, skillRegistry,
+            agentRegistry, providerRegistry, sessionStore, mcpManager)
+        registerParentSubagentTools(toolRegistry, this.subMgr)
         if (resumeSessionId != "") {
             this.sessionId = resumeSessionId
             this.messages = try {
@@ -253,16 +308,8 @@ public class ChatTui {
     private func messageLines(c: Int64): ArrayList<String> {
         let out = ArrayList<String>()
         for (m in this.messages) {
-            match (m) {
-                case um: UserMessage =>
-                    let lines = wrapText("you: " + contentText(um.content), c)
-                    for (l in lines) { out.add(l) }
-                case am: AssistantMessage =>
-                    let lines = wrapText("ai:  " + contentText(am.content), c)
-                    for (l in lines) { out.add(l) }
-                case tr: ToolResultMessage => out.add(toolLineText(tr, c))
-                case _ => ()
-            }
+            let lines = decorateMessageLines(m, c)
+            for (l in lines) { out.add(l) }
         }
         out
     }
@@ -340,15 +387,33 @@ public class ChatTui {
         for (m in oldMsgs) { this.messages.add(m) }
         for (m in turnNew) { this.messages.add(m) }
         this.persistTurn(oldMsgs)
-        this.status = ""
+        // 子 Agent 状态回报（与 REPL 同语义）
+        let pending = this.subMgr.pollChildren(this.sessionId)
+        if (pending.size > 0) {
+            let sb = StringBuilder()
+            for (i in 0..pending.size) {
+                if (i > 0) { sb.append("  ") }
+                let m = pending[Int64(i)]
+                sb.append("[subagent:${m.from}] ${m.kind}: ${m.text}")
+            }
+            this.status = sb.toString()
+        } else {
+            let subCount = this.subMgr.activeCountFor(this.sessionId)
+            if (subCount > 0) {
+                this.status = "[subagent] " + subCount.toString() + " 个子 Agent 运行中 —— /subagent list 查看"
+            } else {
+                this.status = ""
+            }
+        }
         this.render(t)
     }
 
     private func makeRuntime(t: Terminal): AgentRuntime {
+        let model = if (this.modelOverride != "") { this.modelOverride } else { this.agentConfig.model }
         let cfg = AgentConfig(
             this.agentConfig.name, this.agentConfig.description,
             this.agentConfig.systemPrompt, this.agentConfig.userPromptTemplate,
-            this.agentConfig.model, this.agentConfig.provider,
+            model, this.agentConfig.provider,
             this.agentConfig.tools, this.agentConfig.skills,
             this.agentConfig.mcpCooldownTurns,
             this.agentConfig.maxTurns, this.agentConfig.temperature,
@@ -405,19 +470,232 @@ public class ChatTui {
         }
     }
 
+    // ═══ 斜杠命令（与 REPL 同命令面；输出统一进状态行）═══
+
     private func runCommand(line: String): Unit {
-        if (line == "/clear") {
+        if (line.startsWith("/session")) { this.handleSessionCommand(line); return }
+        if (line == "/tools") { this.handleToolsCommand(); return }
+        if (line.startsWith("/model")) { this.handleModelCommand(line); return }
+        if (line.startsWith("/subagent")) { this.handleSubagentCommand(line); return }
+        match (this.registry.dispatch(line)) {
+            case Some("exit") => this.running = false
+            case Some(msg) => this.status = msg
+            case None => ()
+        }
+    }
+
+    private func handleSessionCommand(line: String): Unit {
+        let parts = line.split(" ")
+        if (parts.size == 1) {
+            this.status = "Session: " + this.sessionId + "  Messages: " + this.messages.size.toString()
+            return
+        }
+        let cmd = parts[1]
+        if (cmd == "new") {
+            // 当前会话消息已逐轮落库；此处不重复（extractNewMessages 为空）
+            this.persistTurn(this.messages)
+            this.sessionId = "sess_" + nextId()
             this.messages = ArrayList<Message>()
             this.scroll = 0
-            this.status = ""
-        } else if (line == "/exit") {
-            this.running = false
-        } else if (line == "/help") {
-            this.status = "/clear 清屏 · /exit 退出 · 方向键上下滚动 · Ctrl+C 退出；resume 会话用 cli.app repl <agent> <sid>"
-        } else if (line.startsWith("/session")) {
-            this.status = "TUI v1 只服务当前会话；切换会话请退出后用 cli.app repl <agent> <sid>"
+            this.status = "New session: " + this.sessionId
+        } else if (cmd == "list") {
+            let sessions = try { this.sessionStore.list() } catch (e: Exception) {
+                this.status = "[atelier] session list failed: " + e.message
+                ArrayList<SessionHeader>()
+            }
+            if (sessions.size == 0) {
+                this.status = "No saved sessions"
+            } else {
+                let sb = StringBuilder()
+                sb.append("Saved sessions (" + sessions.size.toString() + "): ")
+                for (i in 0..sessions.size) {
+                    let s = sessions[Int64(i)]
+                    if (i > 0) { sb.append("  ") }
+                    sb.append(s.id + (if (s.id == this.sessionId) { " (current)" } else { "" }))
+                }
+                this.status = sb.toString()
+            }
+        } else if (cmd == "switch" && parts.size > 2) {
+            let targetId = parts[2]
+            this.persistTurn(this.messages)
+            this.messages = try { this.sessionStore.load(targetId) } catch (e: Exception) {
+                this.status = "[atelier] session load failed (sessionId=" + targetId + "): " + e.message
+                ArrayList<Message>()
+            }
+            if (this.messages.size == 0) {
+                this.status = "Session not found: " + targetId
+                return
+            }
+            this.sessionId = targetId
+            this.scroll = 0
+            this.status = "Switched to session: " + targetId + "  Messages: " + this.messages.size.toString()
+        } else if (cmd == "export" && parts.size > 2) {
+            let targetId = parts[2]
+            let fmt = if (parts.size > 3) { parts[3] } else { "jsonl" }
+            let msgs = try { this.sessionStore.load(targetId) } catch (e: Exception) {
+                this.status = "Session not found: " + targetId
+                ArrayList<Message>()
+            }
+            if (msgs.size == 0) {
+                this.status = "Session not found: " + targetId
+                return
+            }
+            if (fmt == "jsonl") {
+                let text = exportToJsonl(msgs)
+                try {
+                    let path = this.sessionId + "_" + targetId + ".jsonl"
+                    File.writeTo(Path(path), text.toArray())
+                    this.status = "Exported to: " + path
+                } catch (e: Exception) {
+                    this.status = "Export failed: " + e.message
+                }
+            } else if (fmt == "html") {
+                let text = exportToHtml(msgs)
+                try {
+                    let path = this.sessionId + "_" + targetId + ".html"
+                    File.writeTo(Path(path), text.toArray())
+                    this.status = "Exported to: " + path
+                } catch (e: Exception) {
+                    this.status = "Export failed: " + e.message
+                }
+            } else {
+                this.status = "Unknown format: " + fmt + " (use jsonl or html)"
+            }
         } else {
-            this.status = "未知命令: " + line + "（/help 查看）"
+            this.status = "/session [new|list|switch <id>|export <id> <jsonl|html>]"
+        }
+    }
+
+    private func handleToolsCommand(): Unit {
+        let tools = this.agentConfig.tools
+        if (tools.size == 0) {
+            this.status = "No tools configured for agent: " + this.agentName
+        } else {
+            let sb = StringBuilder()
+            sb.append("Tools (" + tools.size.toString() + "): ")
+            for (i in 0..tools.size) {
+                if (i > 0) { sb.append("  ") }
+                sb.append(tools[Int64(i)])
+            }
+            this.status = sb.toString()
+        }
+    }
+
+    private func handleModelCommand(line: String): Unit {
+        let parts = line.split(" ")
+        let currentModel = if (this.modelOverride != "") { this.modelOverride } else { this.agentConfig.model }
+        if (parts.size == 1) {
+            this.status = "Current model: " + currentModel + "  （/model <name> 切换）"
+        } else {
+            this.modelOverride = parts[1]
+            this.status = "Model switched to: " + parts[1]
+        }
+    }
+
+    private func handleSubagentCommand(line: String): Unit {
+        let parts = line.split(" ")
+        if (parts.size < 2) {
+            this.status = "Usage: /subagent list | poll | start [--remote] <agent> <prompt> | send <id> <text> | respond <id> <text> | close <id>"
+            return
+        }
+        let sub = parts[1]
+        if (sub == "list" || sub == "status") {
+            let list = this.subMgr.listForParent(this.sessionId)
+            if (list.size == 0) {
+                this.status = "没有子 Agent（回合内可用 subagent_start 工具启动；远程子经 /subagent start --remote）"
+                return
+            }
+            let sb = StringBuilder()
+            for (i in 0..list.size) {
+                let h = list[Int64(i)]
+                if (i > 0) { sb.append("  ") }
+                let st = match (h.state()) {
+                    case SubagentState.Idle => "idle"
+                    case SubagentState.Running => "running"
+                    case SubagentState.Closed => "closed"
+                }
+                sb.append(h.subSessionId + "  " + st)
+            }
+            this.status = sb.toString()
+            return
+        }
+        if (sub == "poll") {
+            let got = this.subMgr.pollChildren(this.sessionId)
+            if (got.size == 0) {
+                this.status = "没有未读子消息"
+                return
+            }
+            let sb = StringBuilder()
+            for (i in 0..got.size) {
+                let m = got[Int64(i)]
+                if (i > 0) { sb.append("  ") }
+                sb.append("[" + m.from + "] " + m.kind.toString() + ": " + m.text)
+            }
+            this.status = sb.toString()
+            return
+        }
+        if (sub == "start") {
+            let (remote, agent, promptText) = parseSubStartArgs(parts)
+            if (agent == "") {
+                this.status = "Usage: /subagent start [--remote] <agent> <prompt>"
+                return
+            }
+            if (remote) {
+                this.startRemoteByName(agent, promptText)
+            } else {
+                match (this.subMgr.startByName(agent, this.sessionId, promptText)) {
+                    case Some(h) => this.status = "已启动子 Agent：" + h.subSessionId
+                    case None => this.status = "子 agent '" + agent + "' 未注册或 provider 不可用"
+                }
+            }
+            return
+        }
+        if (parts.size < 3) {
+            this.status = "Usage: /subagent send <id> <text> | respond <id> <text> | close <id>"
+            return
+        }
+        let target = parts[2]
+        match (sub) {
+            case "close" =>
+                match (this.subMgr.get(target)) {
+                    case Some(h) =>
+                        h.close()
+                        this.status = "已请求关闭 " + target
+                    case None => this.status = "未知子 Agent id：" + target
+                }
+            case "send" =>
+                if (parts.size < 4) { this.status = "Usage: /subagent send <id> <text>"; return }
+                let text = joinWords(parts, 3)
+                match (this.subMgr.get(target)) {
+                    case Some(h) =>
+                        h.send(AgentMail(this.sessionId, h.subSessionId, AgentMailKindUserText, text))
+                        this.status = "已向 " + target + " 投递消息"
+                    case None => this.status = "未知子 Agent id：" + target
+                }
+            case "respond" =>
+                if (parts.size < 4) { this.status = "Usage: /subagent respond <id> <text>"; return }
+                let text = joinWords(parts, 3)
+                match (this.subMgr.get(target)) {
+                    case Some(h) =>
+                        h.respond(text)
+                        this.status = "已回复 " + target
+                    case None => this.status = "未知子 Agent id：" + target
+                }
+            case _ => this.status = "未知子命令：" + sub
+        }
+    }
+
+    // /subagent start --remote：独立 `cli.app acp` 进程承载（数据隔离于 <sessionDir>/remote-sub/<childId>）
+    private func startRemoteByName(agentName: String, prompt: String): Unit {
+        let exe = currentExePath()
+        let cwd = try { getWorkingDirectory().toString() } catch (_) { "." }
+        let childDir = this.sessionDir + "/remote-sub/" + nextId()
+        try { Directory.create(Path(childDir), recursive: true) } catch (e: Exception) {
+            this.status = "[atelier] remote sub agent dir create failed (" + childDir + "): " + e.message
+        }
+        match (this.subMgr.startRemote(exe, agentName, this.sessionId, prompt, cwd, childDir)) {
+            case Some(h) => this.status = "已启动远程子 Agent：" + h.subSessionId + "（进程 " + exe + "）"
+            case None => this.status = "远程子启动失败：agent '" + agentName + "' 未注册或进程不可用"
         }
     }
 }
