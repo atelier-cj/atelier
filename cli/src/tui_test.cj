@@ -286,3 +286,47 @@ func decorateMessageLines_wrapContinuationIndented() {
     @Expect(lines.size, 2)
     @Expect(lines[1].startsWith("     "), true)   // 续行缩进 5 格
 }
+
+@Test
+func chatHistory_pushDedupesAdjacent() {
+    let h = ChatHistory()
+    h.push("a")
+    h.push("a")
+    h.push("b")
+    let first = h.up("")
+    @Expect(first, Some("b"))
+    let second = h.up("b")
+    @Expect(second, Some("a"))
+    // 越过最旧一条后不再上移
+    let third = h.up("a")
+    @Expect(third, Some("a"))
+}
+
+@Test
+func chatHistory_downRestoresDraft() {
+    let h = ChatHistory()
+    h.push("a")
+    h.push("b")
+    let up1 = h.up("草稿")
+    @Expect(up1, Some("b"))
+    let up2 = h.up("b")
+    @Expect(up2, Some("a"))
+    let down1 = h.down()
+    @Expect(down1, Some("b"))
+    let down2 = h.down()
+    @Expect(down2, Some("草稿"))
+}
+
+@Test
+func chatHistory_empty() {
+    let h = ChatHistory()
+    @Expect(h.up(""), None)
+    @Expect(h.down(), None)
+    h.push("")
+    @Expect(h.up(""), None)
+}
+
+@Test
+func toRunes_roundtrip() {
+    @Expect(String(toRunes("你好abc")), "你好abc")
+}
