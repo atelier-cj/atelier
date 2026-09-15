@@ -3,6 +3,7 @@ package cli
 import ystyle::xisp.terminal.*
 import cjterm_stream.*
 import opencj::ulid.nextId
+import std.core.Duration
 import std.env.*
 import std.collection.*
 import std.fs.*
@@ -147,6 +148,11 @@ public class ChatTui {
         this.out = AutoStream.stdout()
         this.writeRaw("\u{1b}[?1049h")   // alternate screen
         this.writeRaw("\u{1b}[?25l")     // cursor hide
+        this.runWith(t)
+    }
+
+    // 事件循环（拆出便于测试注入 FakeTerminal）
+    func runWith(t: Terminal): Unit {
         try {
             this.render(t)
             while (this.running) {
@@ -255,13 +261,34 @@ public class ChatTui {
         let line = String(this.input)
         this.input = ArrayList<Rune>()
         if (line == "") { return }
-        if (line.startsWith("/")) { this.runCommand(line); return }
+        if (line.startsWith("/")) {
+            this.runCommand(line)
+            this.render(t)
+            return
+        }
 
         this.messages.add(UserMessage(ContentList.ofText(line), 0))
         this.status = "生成中…"
         this.render(t)
         let runtime = this.makeRuntime(t)
         let stream = runtime.chatWithSessionId(this.sessionId, this.messages, SessionEnvironment())
+        // 带超时轮询：每 500ms 显示一次生成秒数（"生成中… (Ns)"），避免阻塞无反馈
+        // 像"回车没效果"；收尾哨兵（isClosed）收敛循环，也为后续流式渲染留位。
+        var waited: Int64 = 0
+        var done = false
+        while (!done) {
+            match (stream.receive(500 * Duration.millisecond)) {
+                case Some(_) => ()
+                case None =>
+                    if (stream.isClosed()) {
+                        done = true
+                    } else {
+                        waited = waited + 1
+                        this.status = "生成中… (" + Int64(waited / 2).toString() + "s)"
+                        this.render(t)
+                    }
+            }
+        }
         let allMsgs = try {
             stream.result()
         } catch (e: Exception) {
