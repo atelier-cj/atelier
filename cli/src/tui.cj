@@ -296,8 +296,13 @@ public class ChatTui {
             this.render(t)
             return
         }
+        // 分层：运行时会把系统提示（UserMessage）注入工作列表头部——显示与落库都不该
+        // 包含它。会话 = 旧消息 + 本轮新增（复用存储层 extractNewMessages 语义）。
         let oldMsgs = this.messages
-        this.messages = allMsgs
+        let turnNew = extractNewMessages(oldMsgs, allMsgs)
+        this.messages = ArrayList<Message>()
+        for (m in oldMsgs) { this.messages.add(m) }
+        for (m in turnNew) { this.messages.add(m) }
         this.persistTurn(oldMsgs)
         this.status = ""
         this.render(t)
