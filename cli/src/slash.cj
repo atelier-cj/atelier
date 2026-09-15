@@ -1,4 +1,4 @@
-package atelier.cli
+package cli
 
 import std.collection.*
 import atelier.trust.*

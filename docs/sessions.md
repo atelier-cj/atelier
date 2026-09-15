@@ -127,7 +127,7 @@ struct SessionEnvironment {
 
 ```bash
 # REPL 指定工作目录
-atelier repl --workdir /home/user/project
+cli.app repl --workdir /home/user/project
 
 # HTTP API
 POST /session/new

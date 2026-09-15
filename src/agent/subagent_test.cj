@@ -794,7 +794,7 @@ public func subagent_remoteBridge_e2e() {
     if (!echoMode) { return }
     // 由 scripts/remote_subagent_e2e.sh 保证 release 已构建（本用例随脚本运行）
     let base = match (getVariable("PWD")) { case Some(v) => v; case None => "." }
-    let exe = base + "/target/release/bin/atelier.cli"
+    let exe = base + "/cli/target/release/bin/cli.app"
     let provider = SubRecordProvider()   // 本地父 provider 仅占位（父无回合也可）
     let toolReg = ToolRegistry()
     let trustMgr = TrustManager()

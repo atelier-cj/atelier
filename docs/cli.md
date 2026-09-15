@@ -16,10 +16,10 @@ atelier <command> [args...]
 
 ```bash
 # 默认端口 8080
-atelier serve
+cli.app serve
 
 # 指定端口
-atelier serve 9000
+cli.app serve 9000
 ```
 
 读取 `~/.atelier.toml` 的 `[server]` 配置（host/port/sessionDir/logLevel 等）。
@@ -28,13 +28,13 @@ atelier serve 9000
 
 ```bash
 # 默认 agent（需配置了 default 或走环境变量）
-atelier repl
+cli.app repl
 
 # 指定 agent
-atelier repl code-assistant
+cli.app repl code-assistant
 
 # 恢复之前会话
-atelier repl code-assistant sess_abc123
+cli.app repl code-assistant sess_abc123
 ```
 
 读取 `~/.atelier.toml` 配置的 agent 和 provider。
@@ -62,10 +62,10 @@ atelier repl code-assistant sess_abc123
 
 ```bash
 # 使用默认 agent
-atelier run "你好，介绍一下你自己"
+cli.app run "你好，介绍一下你自己"
 
 # 指定 agent
-atelier run code-assistant "审查 src/main.cj"
+cli.app run code-assistant "审查 src/main.cj"
 ```
 
 如果第一个参数匹配已注册的 agent 名称，则作为 agent 名；否则作为 prompt 并使用 default agent。

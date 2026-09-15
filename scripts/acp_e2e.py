@@ -6,7 +6,7 @@ close / list / load 历史重放（跨进程）/ delete / set_config_option 校�
 
 用法：
   python3 scripts/acp_e2e.py [--atelier <bin路径>] [--delay-ms <N>]
-默认查找 target/release/bin/atelier.cli；隔离 HOME 自动创建于 /tmp。
+默认查找 cli/target/release/bin/cli.app；隔离 HOME 自动创建于 /tmp。
 """
 import json
 import os
@@ -17,7 +17,7 @@ import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ATELIER = sys.argv[sys.argv.index("--atelier") + 1] if "--atelier" in sys.argv else os.path.join(
-    ROOT, "target", "release", "bin", "atelier.cli")
+    ROOT, "cli", "target", "release", "bin", "cli.app")
 
 passed = 0
 failed = 0

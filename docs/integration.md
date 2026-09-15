@@ -183,10 +183,10 @@ main() {
 
 ```bash
 # 使用默认端口 8080
-atelier serve
+cli.app serve
 
 # 指定端口
-atelier serve 9000
+cli.app serve 9000
 
 # 配置 ~/.atelier.toml 控制服务行为
 ```
@@ -223,13 +223,13 @@ tools = ["bash", "read_file", "grep", "glob"]
 
 ```bash
 # 启动 REPL（默认 agent）
-atelier repl
+cli.app repl
 
 # 指定 agent
-atelier repl my-assistant
+cli.app repl my-assistant
 
 # 恢复之前会话
-atelier repl my-assistant sess_abc123
+cli.app repl my-assistant sess_abc123
 ```
 
 REPL 内支持斜杠命令：
@@ -252,10 +252,10 @@ REPL 内支持斜杠命令：
 
 ```bash
 # 使用默认 agent
-atelier run "分析这个日志文件"
+cli.app run "分析这个日志文件"
 
 # 指定 agent
-atelier run code-assistant "给这个函数加注释"
+cli.app run code-assistant "给这个函数加注释"
 ```
 
 ---

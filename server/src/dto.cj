@@ -1,4 +1,4 @@
-package atelier.server
+package server
 
 import atelier.message.*
 import stdx.encoding.json.stream.*

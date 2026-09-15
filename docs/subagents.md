@@ -101,7 +101,7 @@ match (h.recv(timeout: 5 * Duration.minute)) {
 - **REPL**（进程内父宿主）：
   - 回合内工具：`send_message / subagent_start / subagent_reply / subagent_await / subagent_watch / subagent_close`（自动注册）
   - `/subagent list | poll | start [--remote] <agent> <prompt> | send <id> <text> | respond <id> <text> | close <id>`
-  - `start` 默认本地子；`start --remote` 以当前进程（`/proc/self/exe`）启动独立 `atelier acp`
+  - `start` 默认本地子；`start --remote` 以当前进程（`/proc/self/exe`）启动独立 `cli.app acp`
     子进程，数据隔离于 `<sessionDir>/remote-sub/<childId>`（不与父会话共享 bstorm/映射）
   - 每回合收尾自动展示该父子的未读消息（poll 结果）
 - **跨进程子（ACP 桥）在 REPL 的兼容**：`/subagent list/send/close` 对远程句柄同样有效
@@ -137,7 +137,7 @@ match (h.recv(timeout: 5 * Duration.minute)) {
 ## 跨进程子 Agent（ACP 桥）
 
 `manager.startRemote(executable, agentName, parentSessionId, prompt, cwd, sessionDir)`：
-子 Agent 运行在独立 `atelier acp <agent> <sessionDir>` 进程（同一可执行文件），协议经 acp-cj
+子 Agent 运行在独立 `cli.app acp <agent> <sessionDir>` 进程（同一可执行文件），协议经 acp-cj
 `AcpClient` 桥接——句柄语义与本地子一致（done/reply/recv/close），**send = 一次子自主回合**。
 
 - sessionDir：子进程独立会话/映射目录（勿与父共享，父若为 REPL/HTTP/ACP 会同目录争用 bstorm）
