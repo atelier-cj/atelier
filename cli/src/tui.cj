@@ -1,6 +1,7 @@
 package cli
 
 import ystyle::xisp.terminal.*
+import cjterm_stream.*
 import opencj::ulid.nextId
 import std.env.*
 import std.collection.*
@@ -67,9 +68,17 @@ public func chatLinePrefix(role: MessageRole): String {
     }
 }
 
+// 输入缓冲区的显示宽度（光标定位用）
+public func runeWidthSum(runes: Array<Rune>): Int64 {
+    var w: Int64 = 0
+    for (r in runes) { w = w + runeDisplayWidth(r) }
+    w
+}
+
 // ═══════ 聊天 TUI ══════════════════════════════════════════
 
-// raw mode + ANSI 全量重绘。输入侧复用 xisp 的 terminal（POSIX 已实测；Windows 实现存在但未验证）。
+// raw mode + ANSI。输入侧复用 xisp 的 terminal（POSIX 已实测；Windows 实现存在但未验证）；
+// 输出侧走 cjterm_stream（整帧缓冲一次写，避免逐行 print 在真终端/慢控制台上的卡顿）。
 // v1 约束：readKey 无超时 + chat 阻塞 → 生成期间界面冻结（显示状态行），流式渲染留待后续。
 public class ChatTui {
     private let agentName: String
@@ -90,6 +99,7 @@ public class ChatTui {
     private var scroll: Int64
     private var status: String
     private var running: Bool
+    private var out: AutoStream
 
     public init(agentName: String, registry: SlashCommandRegistry, agentConfig: AgentConfig,
         provider: Provider, toolRegistry: ToolRegistry, sessionStore: SessionStore,
@@ -112,6 +122,7 @@ public class ChatTui {
         this.scroll = 0
         this.status = ""
         this.running = true
+        this.out = AutoStream.stdout()
         if (resumeSessionId != "") {
             this.sessionId = resumeSessionId
             this.messages = try {
@@ -133,47 +144,76 @@ public class ChatTui {
             return
         }
         t.enableRawMode()
-        print("\u{1b}[?1049h")   // alternate screen（xisp 未提供，手动 ANSI）
-        cursorHide()
+        this.out = AutoStream.stdout()
+        this.writeRaw("\u{1b}[?1049h")   // alternate screen
+        this.writeRaw("\u{1b}[?25l")     // cursor hide
         try {
+            this.render(t)
             while (this.running) {
-                this.render(t)
                 match (t.readKey()) {
                     case Some(ke) => this.handleKey(ke, t)
                     case None => ()
                 }
             }
         } finally {
-            cursorShow()
-            print("\u{1b}[?1049l")
+            this.writeRaw("\u{1b}[?25h")
+            this.writeRaw("\u{1b}[?1049l")
             t.disableRawMode()
         }
     }
 
-    // ── 渲染 ──────────────────────────────────────────────
+    // ── 输出（整帧缓冲一次写）──────────────────────────────
 
+    private func writeRaw(s: String): Unit {
+        this.out.write(s.toArray())
+        this.out.flush()
+    }
+
+    // 0 基坐标 → ANSI 定位（与 xisp moveTo 同语义：+1 转 1 基）
+    private func csiMove(col: Int64, row: Int64): String {
+        "\u{1b}[${row + 1};${col + 1}H"
+    }
+
+    // 全量重绘（消息区/状态/输入行），用于：初始、提交后、滚动、恢复
     private func render(t: Terminal): Unit {
         let (cols, rows) = t.getTerminalSize()
         let c = if (cols > 0) { cols } else { 80 }
         let r = if (rows > 0) { rows } else { 24 }
-        moveTo(0, 0)
-        clearLine()
-        print("Atelier TUI — Agent: " + this.agentName + "  Session: " + this.sessionId + "   /help")
+        let sb = StringBuilder()
+        sb.append(csiMove(0, 0))
+        sb.append("\u{1b}[2K")
+        sb.append("Atelier TUI — Agent: " + this.agentName + "  Session: " + this.sessionId + "   /help")
         let lines = this.messageLines(c)
         let msgRows = r - 3
         let start = if (lines.size > msgRows) { lines.size - msgRows - this.scroll } else { 0 }
         for (i in 0..msgRows) {
-            moveTo(0, i + 1)
-            clearLine()
+            sb.append(csiMove(0, i + 1))
+            sb.append("\u{1b}[2K")
             let idx = start + i
-            if (idx >= 0 && idx < lines.size) { print(lines[Int64(idx)]) }
+            if (idx >= 0 && idx < lines.size) { sb.append(lines[Int64(idx)]) }
         }
-        moveTo(0, r - 2)
-        clearLine()
-        print(this.status)
-        moveTo(0, r - 1)
-        clearLine()
-        print("> " + String(this.input))
+        sb.append(csiMove(0, r - 2))
+        sb.append("\u{1b}[2K")
+        sb.append(this.status)
+        sb.append(csiMove(0, r - 1))
+        sb.append("\u{1b}[2K")
+        sb.append("> " + String(this.input))
+        sb.append(csiMove(runeWidthSum(this.input.toArray()) + 2, r - 1))
+        this.out.write(sb.toString().toArray())
+        this.out.flush()
+    }
+
+    // 输入行增量更新（打字时只重写输入行 + 光标，不动消息区 → 不卡）
+    private func renderInputOnly(t: Terminal): Unit {
+        let (cols, rows) = t.getTerminalSize()
+        let r = if (rows > 0) { rows } else { 24 }
+        let sb = StringBuilder()
+        sb.append(csiMove(0, r - 1))
+        sb.append("\u{1b}[2K")
+        sb.append("> " + String(this.input))
+        sb.append(csiMove(runeWidthSum(this.input.toArray()) + 2, r - 1))
+        this.out.write(sb.toString().toArray())
+        this.out.flush()
     }
 
     private func messageLines(c: Int64): ArrayList<String> {
@@ -194,12 +234,18 @@ public class ChatTui {
                     if (r == Rune(UInt32(99))) { this.running = false }   // Ctrl+C
                 } else {
                     this.input.add(r)
+                    this.renderInputOnly(t)
                 }
             case KeyCode.Backspace =>
-                if (this.input.size > 0) { this.input.remove(this.input.size - 1..this.input.size) }
+                if (this.input.size > 0) {
+                    this.input.remove(this.input.size - 1..this.input.size)
+                    this.renderInputOnly(t)
+                }
             case KeyCode.Enter => this.submit(t)
-            case KeyCode.Up => this.scroll = this.scroll + 1
-            case KeyCode.Down => if (this.scroll > 0) { this.scroll = this.scroll - 1 }
+            case KeyCode.Up => this.scroll = this.scroll + 1; this.render(t)
+            case KeyCode.Down =>
+                if (this.scroll > 0) { this.scroll = this.scroll - 1 }
+                this.render(t)
             case KeyCode.Esc => this.running = false
             case _ => ()
         }
@@ -220,12 +266,14 @@ public class ChatTui {
             stream.result()
         } catch (e: Exception) {
             this.status = "Error: " + e.message
+            this.render(t)
             return
         }
         let oldMsgs = this.messages
         this.messages = allMsgs
         this.persistTurn(oldMsgs)
         this.status = ""
+        this.render(t)
     }
 
     private func makeRuntime(t: Terminal): AgentRuntime {
@@ -250,16 +298,16 @@ public class ChatTui {
             this.trustManager, this.skillRegistry, this.agentRegistry, this.providerRegistry,
             ArrayList<Hook>(), { q =>
                 // 信任闸门提问：退 raw、显示问题、读一行、恢复 raw（在运行时子线程内执行）
-                cursorShow()
-                moveTo(0, 0)
-                clearLine()
-                print("[Ask User] " + q)
+                this.writeRaw("\u{1b}[?25h")
+                this.writeRaw(csiMove(0, 0))
+                this.writeRaw("\u{1b}[2K")
+                this.writeRaw("[Ask User] " + q)
                 this.status = "等待确认: " + q
                 this.render(t)
                 t.disableRawMode()
                 let answer = readLine()
                 t.enableRawMode()
-                cursorHide()
+                this.writeRaw("\u{1b}[?25l")
                 answer
             }, this.mcpManager)
     }

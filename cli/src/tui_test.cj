@@ -80,3 +80,15 @@ func chatLinePrefix_others() {
     @Expect(chatLinePrefix(MessageRole.ToolResult), "ai:  ")
     @Expect(chatLinePrefix(MessageRole.Compaction), "ai:  ")
 }
+
+@Test
+func runeWidthSum_ascii() {
+    let runes = "abc".toRuneArray()
+    @Expect(runeWidthSum(runes), 3)
+}
+
+@Test
+func runeWidthSum_cjk() {
+    let runes = "你好a".toRuneArray()
+    @Expect(runeWidthSum(runes), 5)
+}
