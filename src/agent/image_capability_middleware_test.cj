@@ -170,3 +170,18 @@ public func runtime_imageCapability_routesViaMiddleware() {
         case None => @Fail("provider never called")
     }
 }
+
+@Test
+public func imageCapability_routes_keepsSystemPrompt() {
+    let inner = CaptureRequestProvider()
+    let mw = ImageCapabilityMiddleware(false, visionModel: Some("qwen-vl"))
+    let wrapped = mw.wrap(inner)
+    let base = imageChatReq("text-model")
+    let req = ChatRequest(base.model, base.messages, base.temperature, base.maxTokens,
+        base.reasoningEffort, base.tools, systemPrompt: "系统提示")
+    wrapped.chat(req)
+    match (inner.lastReq) {
+        case Some(r) => @Expect(r.systemPrompt, "系统提示")
+        case None => @Fail("no request forwarded")
+    }
+}

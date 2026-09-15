@@ -33,10 +33,8 @@ public class ContextBuilder {
         this.contributors = contributors
     }
 
-    // run 一次：系统提示（若有）作为首条 UserMessage，再追加历史
-    public func initMessages(systemPrompt: String, skillNames: ArrayList<String>,
-        history: ArrayList<Message>): ArrayList<Message> {
-        let result = ArrayList<Message>()
+    // run 一次：生成系统提示词文本（独立通道，不再注入为消息；含技能目录/MCP 目录）
+    public func buildSystemText(systemPrompt: String, skillNames: ArrayList<String>): String {
         var text = this.promptBuilder.build(systemPrompt, skillNames, this.skills, this.env,
             contributors: this.contributors)
         match (this.mcpManager) {
@@ -47,33 +45,15 @@ public class ContextBuilder {
         }
         let skillCatalog = this.promptBuilder.buildSkillCatalog(this.skills)
         if (skillCatalog != "") { text = text + skillCatalog }
-        if (text != "") {
-            // 幂等：history 首条已是相同系统提示则不重复注入（REPL 每轮复用 messages）
-            var alreadyInjected = false
-            if (history.size > 0) {
-                match (history[0]) {
-                    case um: UserMessage =>
-                        var firstText = ""
-                        for (b in um.content.blocks()) {
-                            match (b) { case ContentBlock.TextBlock(t) => firstText = firstText + t; case _ => () }
-                        }
-                        if (firstText == text) { alreadyInjected = true }
-                    case _ => ()
-                }
-            }
-            if (!alreadyInjected) {
-                result.add(UserMessage(ContentList.ofText(text), 0))
-            }
-        }
-        for (m in history) { result.add(m) }
-        result
+        text
     }
 
-    // 每轮：组装 ChatRequest
-    public func buildChatRequest(model: String, messages: ArrayList<Message>,
+    // 每轮：组装 ChatRequest（系统提示走独立通道，各 provider 自行映射）
+    public func buildChatRequest(model: String, systemPrompt: String, messages: ArrayList<Message>,
         temperature: Float64, maxOutputTokens: Int64,
         thinkingLevel: Option<String>, tools: ArrayList<OpenAITool>): ChatRequest {
-        ChatRequest(model, messages, temperature, maxOutputTokens, thinkingLevel, tools)
+        ChatRequest(model, messages, temperature, maxOutputTokens, thinkingLevel, tools,
+            systemPrompt: systemPrompt)
     }
 
     // 应用 archive_history 调用对：钳制范围后替换为 ArchiveMessage，调用对自身移除（天然幂等）。

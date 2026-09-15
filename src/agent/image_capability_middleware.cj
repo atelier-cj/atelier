@@ -33,7 +33,8 @@ public class ImageCapabilityMiddleware <: ProviderMiddleware {
             case Some(v) =>
                 if (v != req.model) {
                     ChatRequest(v, req.messages, req.temperature, req.maxTokens,
-                        req.reasoningEffort, req.tools, req.extra)
+                        req.reasoningEffort, req.tools, req.extra,
+                        systemPrompt: req.systemPrompt)
                 } else {
                     throw Exception("model '" + req.model +
                         "' does not support image input (supportsVision=false)")

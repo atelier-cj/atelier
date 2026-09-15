@@ -119,125 +119,45 @@ func sysPrompt_sectionOrder() {
 }
 
 @Test
-func ctxBuilder_initMessages_injectsSystemMessage() {
+func ctxBuilder_buildSystemText_returnsSystem() {
     let b = ContextBuilder(SkillRegistry(), SessionEnvironment())
-    let history = ArrayList<Message>([UserMessage(ContentList.ofText("hi"), 0)])
-    let msgs = b.initMessages("sys", ArrayList(), history)
-    @Expect(msgs.size, 2)
-    match (msgs[0]) {
-        case um: UserMessage =>
-            match (um.content.blocks()[0]) {
-                case ContentBlock.TextBlock(t) => @Expect(t, "sys\n\n")
-                case _ => @Expect(false, true)
-            }
-        case _ => @Expect(false, true)
-    }
-}
-
-// 幂等：history 首条已是相同系统提示则不重复注入（REPL 每轮复用 messages 防累积）
-@Test
-func ctxBuilder_initMessages_idempotent() {
-    let b = ContextBuilder(SkillRegistry(), SessionEnvironment())
-    let first = b.initMessages("sys", ArrayList(), ArrayList())
-    @Expect(first.size, 1)
-    let second = b.initMessages("sys", ArrayList(), first)
-    @Expect(second.size, 1)
-    match (second[0]) {
-        case um: UserMessage =>
-            match (um.content.blocks()[0]) {
-                case ContentBlock.TextBlock(t) => @Expect(t, "sys\n\n")
-                case _ => @Expect(false, true)
-            }
-        case _ => @Expect(false, true)
-    }
+    @Expect(b.buildSystemText("sys", ArrayList()), "sys\n\n")
 }
 
 @Test
-func ctxBuilder_initMessages_emptySystemNoInjection() {
+func ctxBuilder_buildSystemText_empty() {
     let b = ContextBuilder(SkillRegistry(), SessionEnvironment())
-    let history = ArrayList<Message>([UserMessage(ContentList.ofText("hi"), 0)])
-    let msgs = b.initMessages("", ArrayList(), history)
-    @Expect(msgs.size, 1)
-    match (msgs[0]) {
-        case um: UserMessage =>
-            match (um.content.blocks()[0]) {
-                case ContentBlock.TextBlock(t) => @Expect(t, "hi")
-                case _ => @Expect(false, true)
-            }
-        case _ => @Expect(false, true)
-    }
+    @Expect(b.buildSystemText("", ArrayList()), "")
 }
 
 @Test
-func ctxBuilder_initMessages_appendsHistory() {
-    let b = ContextBuilder(SkillRegistry(), SessionEnvironment())
-    let history = ArrayList<Message>()
-    history.add(UserMessage(ContentList.ofText("a"), 0))
-    history.add(UserMessage(ContentList.ofText("b"), 0))
-    let msgs = b.initMessages("sys", ArrayList(), history)
-    @Expect(msgs.size, 3)
-    match (msgs[1]) {
-        case um: UserMessage =>
-            match (um.content.blocks()[0]) {
-                case ContentBlock.TextBlock(t) => @Expect(t, "a")
-                case _ => @Expect(false, true)
-            }
-        case _ => @Expect(false, true)
-    }
-    match (msgs[2]) {
-        case um: UserMessage =>
-            match (um.content.blocks()[0]) {
-                case ContentBlock.TextBlock(t) => @Expect(t, "b")
-                case _ => @Expect(false, true)
-            }
-        case _ => @Expect(false, true)
-    }
-}
-
-@Test
-func ctxBuilder_initMessages_withSkillAndContext() {
+func ctxBuilder_buildSystemText_withSkillAndContext() {
     let reg = SkillRegistry()
     reg.register(fakeSkill("code-review", "## 审查流程\n1. 读文件"))
     let ctx = HashMap<String, String>()
     ctx["workDir"] = "/home/x"
     let env = SessionEnvironment("", ctx)
     let b = ContextBuilder(reg, env)
-    let history = ArrayList<Message>([UserMessage(ContentList.ofText("hi"), 0)])
     let names = ArrayList<String>(["code-review"])
-    let msgs = b.initMessages("sys", names, history)
-    @Expect(msgs.size, 2)
-    match (msgs[0]) {
-        case um: UserMessage =>
-            match (um.content.blocks()[0]) {
-                case ContentBlock.TextBlock(t) =>
-                    @Expect(t.contains("## 审查流程"), true)
-                    @Expect(t.contains("[Session Context]"), true)
-                    @Expect(t.contains("workDir = /home/x"), true)
-                case _ => @Expect(false, true)
-            }
-        case _ => @Expect(false, true)
-    }
-    match (msgs[1]) {
-        case um: UserMessage =>
-            match (um.content.blocks()[0]) {
-                case ContentBlock.TextBlock(t) => @Expect(t, "hi")
-                case _ => @Expect(false, true)
-            }
-        case _ => @Expect(false, true)
-    }
+    let text = b.buildSystemText("sys", names)
+    @Expect(text.contains("sys"), true)
+    @Expect(text.contains("## 审查流程"), true)
+    @Expect(text.contains("[Session Context]"), true)
+    @Expect(text.contains("workDir = /home/x"), true)
 }
 
 @Test
 func ctxBuilder_buildChatRequest_fields() {
     let b = ContextBuilder(SkillRegistry(), SessionEnvironment())
     let msgs = ArrayList<Message>([UserMessage(ContentList.ofText("hi"), 0)])
-    let req = b.buildChatRequest("deepseek-chat", msgs, 0.3, 4096, Some("low"), ArrayList())
+    let req = b.buildChatRequest("deepseek-chat", "你是助手", msgs, 0.3, 4096, Some("low"), ArrayList())
     @Expect(req.model, "deepseek-chat")
     @Expect(req.messages.size, 1)
     @Expect(req.temperature, 0.3)
     @Expect(req.maxTokens, 4096)
     @Expect(req.reasoningEffort, Some("low"))
     @Expect(req.tools.size, 0)
+    @Expect(req.systemPrompt, "你是助手")
 }
 
 func mcpManagerWithTools(name: String): McpManager {
@@ -289,35 +209,20 @@ func sysPrompt_mcpCatalogEmptyWithoutServers() {
 }
 
 @Test
-func ctxBuilder_mcpCatalogInSystemMessage() {
+func ctxBuilder_mcpCatalogInSystemText() {
     let b = ContextBuilder(SkillRegistry(), SessionEnvironment(), mcpManagerWithTools("github"))
-    let msgs = b.initMessages("sys", ArrayList(), ArrayList())
-    @Expect(msgs.size, 1)
-    match (msgs[0]) {
-        case um: UserMessage =>
-            match (um.content.blocks()[0]) {
-                case ContentBlock.TextBlock(t) =>
-                    @Expect(t.contains("load_mcp_toolset"), true)
-                    @Expect(t.contains("github"), true)
-                case _ => @Expect(false, true)
-            }
-        case _ => @Expect(false, true)
-    }
+    let text = b.buildSystemText("sys", ArrayList())
+    @Expect(text.contains("load_mcp_toolset"), true)
+    @Expect(text.contains("github"), true)
+    @Expect(text.contains("sys"), true)
 }
 
 @Test
 func ctxBuilder_noMcpNoCatalog() {
     let b = ContextBuilder(SkillRegistry(), SessionEnvironment())
-    let msgs = b.initMessages("sys", ArrayList(), ArrayList())
-    @Expect(msgs.size, 1)
-    match (msgs[0]) {
-        case um: UserMessage =>
-            match (um.content.blocks()[0]) {
-                case ContentBlock.TextBlock(t) => @Expect(t.contains("load_mcp_toolset"), false)
-                case _ => @Expect(false, true)
-            }
-        case _ => @Expect(false, true)
-    }
+    let text = b.buildSystemText("sys", ArrayList())
+    @Expect(text.contains("load_mcp_toolset"), false)
+    @Expect(text.contains("sys"), true)
 }
 
 func skillRegWith(name: String, desc: String): SkillRegistry {
@@ -342,36 +247,12 @@ func sysPrompt_skillCatalogEmptyWithoutSkills() {
 }
 
 @Test
-func ctxBuilder_skillCatalogInSystemMessage() {
+func ctxBuilder_skillCatalogInSystemText() {
     let b = ContextBuilder(skillRegWith("code-review", "代码审查技能"), SessionEnvironment())
-    let msgs = b.initMessages("sys", ArrayList(), ArrayList())
-    @Expect(msgs.size, 1)
-    match (msgs[0]) {
-        case um: UserMessage =>
-            match (um.content.blocks()[0]) {
-                case ContentBlock.TextBlock(t) =>
-                    @Expect(t.contains("use_skills"), true)
-                    @Expect(t.contains("code-review"), true)
-                case _ => @Expect(false, true)
-            }
-        case _ => @Expect(false, true)
-    }
-}
-
-func archivedPair(msgs: ArrayList<Message>, start: Int64, end: Int64, summary: String): Unit {
-    let args = HashMap<String, JsonValue>()
-    args["start_index"] = JsonValue.Number(Float64(start))
-    args["end_index"] = JsonValue.Number(Float64(end))
-    args["summary"] = JsonValue.String(summary)
-    let tc = ToolCallBlock("call_1", "archive_history", JsonValue.Map(args))
-    let blocks = ArrayList<ContentBlock>()
-    blocks.add(ContentBlock.ToolCall(tc))
-    msgs.add(AssistantMessage(ContentList(blocks), "", "", StopReason.ToolUse, TokenUsage(0, 0), 0))
-    msgs.add(ToolResultMessage("call_1", "archive_history", ContentList.ofText("已归档..."), false, 0))
-}
-
-func plainMsg(text: String): Message {
-    UserMessage(ContentList.ofText(text), 0)
+    let text = b.buildSystemText("sys", ArrayList())
+    @Expect(text.contains("use_skills"), true)
+    @Expect(text.contains("code-review"), true)
+    @Expect(text.contains("sys"), true)
 }
 
 @Test
@@ -592,3 +473,19 @@ func sysPrompt_multipleContributorsInOrder() {
     @Expect(pos(out, "[段一]") >= Int64(0), true)
     @Expect(pos(out, "[段二]") > pos(out, "[段一]"), true)
 }
+func archivedPair(msgs: ArrayList<Message>, start: Int64, end: Int64, summary: String): Unit {
+    let args = HashMap<String, JsonValue>()
+    args["start_index"] = JsonValue.Number(Float64(start))
+    args["end_index"] = JsonValue.Number(Float64(end))
+    args["summary"] = JsonValue.String(summary)
+    let tc = ToolCallBlock("call_1", "archive_history", JsonValue.Map(args))
+    let blocks = ArrayList<ContentBlock>()
+    blocks.add(ContentBlock.ToolCall(tc))
+    msgs.add(AssistantMessage(ContentList(blocks), "", "", StopReason.ToolUse, TokenUsage(0, 0), 0))
+    msgs.add(ToolResultMessage("call_1", "archive_history", ContentList.ofText("已归档..."), false, 0))
+}
+
+func plainMsg(text: String): Message {
+    UserMessage(ContentList.ofText(text), 0)
+}
+

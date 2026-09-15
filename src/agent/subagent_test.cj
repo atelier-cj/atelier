@@ -247,6 +247,7 @@ class ScriptMsgProvider <: Provider {
 
     private func fullText(req: ChatRequest): String {
         var out = ""
+        if (req.systemPrompt != "") { out = out + "[sys] " + req.systemPrompt }
         for (m in req.messages) { out = out + " | " + textOfMsg(m) }
         out
     }
@@ -461,6 +462,7 @@ class ScriptToolProvider <: Provider {
 
     private func fullText(req: ChatRequest): String {
         var out = ""
+        if (req.systemPrompt != "") { out = out + "[sys] " + req.systemPrompt }
         for (m in req.messages) { out = out + " | " + textOfMsg(m) }
         out
     }

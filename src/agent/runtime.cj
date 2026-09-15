@@ -163,9 +163,11 @@ public open class AgentRuntime {
                 let hookState = HookState()
                 callHooks("beforeRun", 0, hookState)
 
-                // Build system prompt + assemble initial messages (L2)
-                var currentMessages = ctxBuilder.initMessages(
-                    this.config.systemPrompt, this.config.skills, messages)
+                // 系统提示词独立通道（不再注入为消息）；初始消息 = 历史
+                let systemText = ctxBuilder.buildSystemText(
+                    this.config.systemPrompt, this.config.skills)
+                var currentMessages = ArrayList<Message>()
+                for (m in messages) { currentMessages.add(m) }
                 var turnCount: Int64 = 0
                 var toolCallCount: Int64 = 0
                 var lastToolTime: MonoTime = MonoTime.now()
@@ -184,7 +186,7 @@ public open class AgentRuntime {
                     this.emit(stream, MessageStartEvent(currentMessages[0]))
                     let actualModel = this.pickModel(this.config.model)
                     let tools = this.resolveTools()
-                    var chatReq = ctxBuilder.buildChatRequest(actualModel, currentMessages,
+                    var chatReq = ctxBuilder.buildChatRequest(actualModel, systemText, currentMessages,
                         Float64(this.config.temperature), Int64(this.config.maxOutputTokens),
                         this.config.thinkingLevel, tools)
                     match (runBeforeTurnHooks(hookState, turnCount, chatReq)) {
