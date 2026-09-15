@@ -229,6 +229,35 @@ public class SessionPicker {
     public func index(): Int64 { this.idx }
 }
 
+// ═══════ 会话信息条与状态净化（纯逻辑，可单测）═══════════════════
+
+public func countUserTurns(messages: ArrayList<Message>): Int64 {
+    var n: Int64 = 0
+    for (m in messages) {
+        match (m) {
+            case um: UserMessage => n++
+            case _ => ()
+        }
+    }
+    n
+}
+
+public func contextChars(messages: ArrayList<Message>): Int64 {
+    var n: Int64 = 0
+    for (m in messages) { n = n + messageText(m).toRuneArray().size }
+    n
+}
+
+public func sessionInfoText(agentName: String, model: String, turns: Int64, ctxChars: Int64): String {
+    "Agent: " + agentName + "  |  Model: " + model + "  |  Turns: " + turns.toString() +
+        "  |  Ctx: " + ctxChars.toString() + " chars"
+}
+
+// 状态行净化：换行拍平 + 按宽度截断（多行文本不会炸布局）
+public func flattenStatus(s: String, width: Int64): String {
+    truncateLine(s.replace("\n", " | "), width)
+}
+
 // ═══════ 聊天 TUI ══════════════════════════════════════════
 
 // raw mode + ANSI。输入侧复用 xisp 的 terminal（POSIX 已实测；Windows 实现存在但未验证）；
@@ -354,8 +383,8 @@ public class ChatTui {
         let sb = StringBuilder()
         sb.append(csiMove(0, 0))
         sb.append("\u{1b}[2K")
-        sb.append("Atelier TUI — Agent: " + this.agentName + "  Session: " + this.sessionId + "   /help")
-        let msgRows = r - 3
+        sb.append(colorize("Atelier TUI — Agent: " + this.agentName + "  Session: " + this.sessionId + "   /help", C_HEADER))
+        let msgRows = r - 4
         match (this.picker) {
             case Some(p) =>
                 // 会话选择列表：窗口跟随选择行
@@ -388,12 +417,24 @@ public class ChatTui {
                     if (idx >= 0 && idx < lines.size) { sb.append(lines[Int64(idx)]) }
                 }
         }
+        // 会话信息条（Agent / 模型 / 轮次 / 上下文长度）
+        let model = if (this.modelOverride != "") { this.modelOverride } else { this.agentConfig.model }
+        let info = sessionInfoText(this.agentName, model,
+            countUserTurns(this.messages), contextChars(this.messages))
+        sb.append(csiMove(0, r - 3))
+        sb.append("\u{1b}[2K")
+        sb.append(colorize(truncateLine(info, c - 2), C_DIM))
+        // 状态行（净化：换行拍平 + 截断）
         sb.append(csiMove(0, r - 2))
         sb.append("\u{1b}[2K")
-        sb.append(this.status)
+        if (this.status.startsWith("Error") || this.status.startsWith("[atelier]")) {
+            sb.append(colorize(flattenStatus(this.status, c - 2), C_ERROR))
+        } else {
+            sb.append(colorize(flattenStatus(this.status, c - 2), C_STATUS))
+        }
         sb.append(csiMove(0, r - 1))
         sb.append("\u{1b}[2K")
-        sb.append("> " + String(this.input))
+        sb.append(colorize("> ", C_PROMPT) + String(this.input))
         sb.append(csiMove(runeWidthSum(this.input.toArray()) + 2, r - 1))
         this.out.write(sb.toString().toArray())
         this.out.flush()
@@ -406,7 +447,7 @@ public class ChatTui {
         let sb = StringBuilder()
         sb.append(csiMove(0, r - 1))
         sb.append("\u{1b}[2K")
-        sb.append("> " + String(this.input))
+        sb.append(colorize("> ", C_PROMPT) + String(this.input))
         sb.append(csiMove(runeWidthSum(this.input.toArray()) + 2, r - 1))
         this.out.write(sb.toString().toArray())
         this.out.flush()
@@ -667,6 +708,10 @@ public class ChatTui {
     // ═══ 斜杠命令（与 REPL 同命令面；输出统一进状态行）═══
 
     private func runCommand(line: String): Unit {
+        if (line == "/help" || line == "help") {
+            this.status = "/session [new|list|switch|export] · /agent [name] · /model <name> · /tools · /subagent [list|start|send|respond|close] · /trust <path> · /untrust <path> · /clear · /exit"
+            return
+        }
         if (line.startsWith("/agent")) { this.handleAgentCommand(line); return }
         if (line.startsWith("/session")) { this.handleSessionCommand(line); return }
         if (line == "/tools") { this.handleToolsCommand(); return }

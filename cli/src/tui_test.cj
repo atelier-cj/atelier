@@ -428,3 +428,42 @@ func chatTui_switchAgentStartsNewSession() {
         case _ => @Fail("expected ok in original session")
     }
 }
+
+// ═══════ 会话信息条 / 状态净化 ═══════
+
+@Test
+func countUserTurns_onlyUser() {
+    let msgs = ArrayList<Message>()
+    msgs.add(plainMsg("a"))
+    msgs.add(asstMsg("b"))
+    msgs.add(plainMsg("c"))
+    msgs.add(ToolResultMessage("c1", "bash", ContentList.ofText("ok"), false, 0))
+    @Expect(countUserTurns(msgs), 2)
+}
+
+@Test
+func contextChars_sumOfText() {
+    let msgs = ArrayList<Message>()
+    msgs.add(plainMsg("你好"))
+    msgs.add(asstMsg("回复"))
+    @Expect(contextChars(msgs), 4)
+}
+
+@Test
+func sessionInfoText_format() {
+    let text = sessionInfoText("assistant", "gpt-4o", 3, 1234)
+    @Expect(text.contains("Agent: assistant"), true)
+    @Expect(text.contains("Model: gpt-4o"), true)
+    @Expect(text.contains("Turns: 3"), true)
+    @Expect(text.contains("Ctx: 1234"), true)
+}
+
+@Test
+func flattenStatus_flattensAndTruncates() {
+    // 宽 16 恰好容 "line1 | line2"（13 列）+ "..."；更宽的正文被截断
+    let flat = flattenStatus("line1\nline2 with long text", 16)
+    @Expect(flat.contains("line1"), true)
+    @Expect(flat.contains("line2"), true)
+    @Expect(flat.contains("\n"), false)
+    @Expect(flat.toRuneArray().size <= 19, true)
+}
