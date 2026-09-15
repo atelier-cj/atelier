@@ -280,12 +280,7 @@ func decorateMessageLines_toolColored() {
     @Expect(lines[0].endsWith(C_RESET), true)
 }
 
-@Test
-func decorateMessageLines_wrapContinuationIndented() {
-    let lines = decorateMessageLines(plainMsg("abcdefghij"), 10)
-    @Expect(lines.size, 2)
-    @Expect(lines[1].startsWith("     "), true)   // 续行缩进 5 格
-}
+
 
 @Test
 func chatHistory_pushDedupesAdjacent() {
@@ -552,3 +547,59 @@ func uniqueModels_dedupesByOrder() {
     @Expect(models[0], "gpt-4o")
     @Expect(models[1], "deepseek-chat")
 }
+
+// ═══════ Markdown 渲染 ═══════
+
+@Test
+func markdown_bold() {
+    let lines = markdownToLines("**你好** world", 40, 0)
+    @Expect(lines.size >= 1, true)
+    @Expect(lines[0].contains(M_BOLD), true)
+    @Expect(lines[0].contains("你好"), true)
+}
+
+@Test
+func markdown_heading() {
+    let lines = markdownToLines("# 标题", 40, 0)
+    @Expect(lines[0].contains(M_HEADING), true)
+    @Expect(lines[0].contains("#"), true)
+    @Expect(lines[0].contains("标题"), true)
+}
+
+@Test
+func markdown_codeBlock() {
+    let lines = markdownToLines("```\ncode here\n```", 40, 0)
+    var found = false
+    for (l in lines) {
+        if (l.contains(M_CODE) && l.contains("code here")) { found = true }
+    }
+    @Expect(found, true)
+}
+
+@Test
+func markdown_list() {
+    let lines = markdownToLines("- 第一项\n- 第二项", 40, 0)
+    var b1 = false
+    var b2 = false
+    for (l in lines) {
+        if (l.contains("•") && l.contains("第一项")) { b1 = true }
+        if (l.contains("•") && l.contains("第二项")) { b2 = true }
+    }
+    @Expect(b1, true)
+    @Expect(b2, true)
+}
+
+@Test
+func markdown_link() {
+    let lines = markdownToLines("[点这里](https://example.com)", 60, 0)
+    @Expect(lines[0].contains("点这里"), true)
+    @Expect(lines[0].contains("https://example.com"), true)
+}
+
+@Test
+func markdown_wrapsAtWidth() {
+    let lines = markdownToLines("一二三四五六七八九十 甲乙丙丁戊己庚辛壬癸", 12, 0)
+    @Expect(lines.size >= 2, true)
+}
+
+

@@ -130,19 +130,19 @@ public func decorateMessageLines(m: Message, width: Int64): ArrayList<String> {
         case um: UserMessage =>
             let content = contentText(um.content)
             if (content != "") {
-                let lines = wrapText(content, width - 5)
+                let lines = markdownToLines(content, width, 5)
                 for (i in 0..lines.size) {
                     if (i == 0) { out.add(colorize("you: ", C_USER) + lines[Int64(i)]) }
-                    else { out.add("     " + lines[Int64(i)]) }
+                    else { out.add(lines[Int64(i)]) }
                 }
             }
         case am: AssistantMessage =>
             let content = contentText(am.content)
             if (content != "") {
-                let lines = wrapText(content, width - 5)
+                let lines = markdownToLines(content, width, 5)
                 for (i in 0..lines.size) {
                     if (i == 0) { out.add(colorize("ai:  ", C_AI) + lines[Int64(i)]) }
-                    else { out.add("     " + lines[Int64(i)]) }
+                    else { out.add(lines[Int64(i)]) }
                 }
             }
         case tr: ToolResultMessage =>

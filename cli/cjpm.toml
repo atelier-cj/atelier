@@ -15,6 +15,7 @@ server = { path = "../server" }
 "opencj::ulid" = "0.1.2"
 "ystyle::xisp" = "0.4.0"
 "cjterm_stream" = "0.1.0"
+"pulldown4cj" = "0.1.0"
 
 [package.package-configuration."cli.app"]
 output-type = "executable"
