@@ -14,11 +14,11 @@ repository = "https://atomgit.com/ystyle/atelier"
 "sonyflake" = "1.0.9"
 "jsonvalue" = "1.1.0"
 "mustache" = "1.2.1"
-"ystyle::jsonrpc" = "0.7.5"
+"ystyle::jsonrpc" = "0.7.6"
 "bstorm" = "1.4.7"
 "opencj::ulid" = "0.1.2"
 "llm_api" = "1.2.1"
-"acp" = "0.2.3"
+"acp" = "0.2.4"
 
 [target.x86_64-unknown-linux-gnu]
 link-option = "-luring"
