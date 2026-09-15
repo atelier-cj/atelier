@@ -286,6 +286,7 @@ public func helpLines(): ArrayList<String> {
     out.add("/subagent [list|poll|start [--remote] <agent> <prompt>|send <id> <text>|respond <id> <text>|close <id>]")
     out.add("/trust <path>         信任目录（平行工具免审）")
     out.add("/untrust <path>       撤销信任")
+    out.add("/new                  新建会话（= /session new）")
     out.add("/clear                清空会话")
     out.add("/exit /quit           退出")
     out
@@ -761,6 +762,11 @@ public class ChatTui {
     // ═══ 斜杠命令（与 REPL 同命令面；输出统一进状态行）═══
 
     private func runCommand(line: String): Unit {
+        // /new 别名：新建会话
+        if (line == "/new") {
+            this.handleSessionCommand("/session new")
+            return
+        }
         if (line == "/help" || line == "help") {
             this.helpMode = true
             this.status = "任意键返回对话"

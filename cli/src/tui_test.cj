@@ -495,3 +495,32 @@ func helpLines_eachEntryOnOwnLine() {
         @Expect(l.contains("\n"), false)
     }
 }
+
+@Test
+func chatTui_newAliasStartsNewSession() {
+    let store = MemorySessionStore()
+    let trustMgr = TrustManager()
+    let tui = ChatTui("default", SlashCommandRegistry(trustMgr), AgentConfig.default(), StubProvider(),
+        ToolRegistry(), store, trustMgr, SkillRegistry(), AgentRegistry(), ProviderRegistry(),
+        "sess_test_new", McpManager(), "/tmp/atelier-tui-test")
+
+    // m1 聊天 → sess_test_new；/new 开新会话；m2 聊天 → 新会话
+    let keys = textKeys("m1")
+    keys.add(KeyEvent(KeyCode.Enter, KeyModifiers()))
+    let cmd = textKeys("/new")
+    for (k in cmd) { keys.add(k) }
+    keys.add(KeyEvent(KeyCode.Enter, KeyModifiers()))
+    let m2 = textKeys("m2")
+    for (k in m2) { keys.add(k) }
+    keys.add(KeyEvent(KeyCode.Enter, KeyModifiers()))
+    keys.add(KeyEvent(KeyCode.Esc, KeyModifiers()))
+    tui.runWith(FakeTerminal(keys))
+
+    // 原会话只有 m1 + ok1（/new 后的聊天去了新会话）
+    let a = store.load("sess_test_new")
+    @Expect(a.size, 2)
+    match (a[a.size - 1]) {
+        case am: AssistantMessage => @Expect(contentText(am.content), "ok")
+        case _ => @Fail("expected ok in original session")
+    }
+}
