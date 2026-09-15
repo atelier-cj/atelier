@@ -235,10 +235,10 @@ public class SessionPicker {
 // 输出侧走 cjterm_stream（整帧缓冲一次写，避免逐行 print 在真终端/慢控制台上的卡顿）。
 // v1 约束：readKey 无超时 + chat 阻塞 → 生成期间界面冻结（显示状态行），流式渲染留待后续。
 public class ChatTui {
-    private let agentName: String
+    private var agentName: String
     private let registry: SlashCommandRegistry
-    private let agentConfig: AgentConfig
-    private let provider: Provider
+    private var agentConfig: AgentConfig
+    private var provider: Provider
     private let toolRegistry: ToolRegistry
     private let sessionStore: SessionStore
     private let trustManager: TrustManager
@@ -257,6 +257,7 @@ public class ChatTui {
     private let subMgr: SubAgentManager
     private var hist: ChatHistory
     private var picker: Option<SessionPicker>
+    private var pickerKind: String
     private var out: AutoStream
 
     public init(agentName: String, registry: SlashCommandRegistry, agentConfig: AgentConfig,
@@ -283,6 +284,7 @@ public class ChatTui {
         this.modelOverride = ""
         this.hist = ChatHistory()
         this.picker = None
+        this.pickerKind = ""
         this.out = AutoStream.stdout()
         // 可持续子 Agent：回合内工具 + /subagent 命令（与 REPL 同装配）
         this.subMgr = SubAgentManager(toolRegistry, trustManager, skillRegistry,
@@ -364,7 +366,11 @@ public class ChatTui {
                     sb.append("\u{1b}[2K")
                     let idx = wStart + i
                     if (idx >= 0 && idx < p.size()) {
-                        let cur = if (p.idAt(idx) == this.sessionId) { " (current)" } else { "" }
+                        let cur = if (this.pickerKind == "agent") {
+                            if (p.idAt(idx) == this.agentName) { " (current)" } else { "" }
+                        } else {
+                            if (p.idAt(idx) == this.sessionId) { " (current)" } else { "" }
+                        }
                         if (idx == p.index()) {
                             sb.append("\u{1b}[7m" + "→ " + p.idAt(idx) + cur + C_RESET)
                         } else {
@@ -427,10 +433,16 @@ public class ChatTui {
                     case KeyCode.Enter =>
                         let target = p.selected()
                         this.picker = None
-                        this.switchToSession(target)
+                        if (this.pickerKind == "agent") {
+                            this.switchAgent(target)
+                        } else {
+                            this.switchToSession(target)
+                        }
+                        this.pickerKind = ""
                         this.render(t)
                     case KeyCode.Esc =>
                         this.picker = None
+                        this.pickerKind = ""
                         this.status = ""
                         this.render(t)
                     case _ => ()
@@ -602,6 +614,41 @@ public class ChatTui {
         }
     }
 
+    private func handleAgentCommand(line: String): Unit {
+        let parts = line.split(" ")
+        if (parts.size > 1) {
+            this.switchAgent(parts[1])
+            return
+        }
+        // 无参：交互选择
+        let agents = this.agentRegistry.list()
+        if (agents.size <= 1) {
+            this.status = "Agent: " + this.agentName + "（只有一个 agent 可切换）"
+            return
+        }
+        let names = ArrayList<String>()
+        for ((n, _) in agents) { names.add(n) }
+        this.picker = Some(SessionPicker(names))
+        this.pickerKind = "agent"
+        this.status = "↑/↓ 选择 Agent · Enter 切换 · Esc 取消"
+    }
+
+    // 切换 Agent：换配置 + 重解析 provider + 开新会话（新上下文）
+    private func switchAgent(name: String): Unit {
+        match (this.agentRegistry.get(name)) {
+            case Some(cfg) =>
+                this.agentName = name
+                this.agentConfig = cfg
+                this.provider = resolveProviderFor(cfg, this.providerRegistry)
+                this.sessionId = "sess_" + nextId()
+                this.messages = ArrayList<Message>()
+                this.scroll = 0
+                this.status = "Switched to agent: " + name + "（新会话 " + this.sessionId + "）"
+            case None =>
+                this.status = "Agent not found: " + name
+        }
+    }
+
     private func switchToSession(targetId: String): Unit {
         this.persistTurn(this.messages)
         this.messages = try { this.sessionStore.load(targetId) } catch (e: Exception) {
@@ -620,6 +667,7 @@ public class ChatTui {
     // ═══ 斜杠命令（与 REPL 同命令面；输出统一进状态行）═══
 
     private func runCommand(line: String): Unit {
+        if (line.startsWith("/agent")) { this.handleAgentCommand(line); return }
         if (line.startsWith("/session")) { this.handleSessionCommand(line); return }
         if (line == "/tools") { this.handleToolsCommand(); return }
         if (line.startsWith("/model")) { this.handleModelCommand(line); return }
@@ -657,6 +705,7 @@ public class ChatTui {
                 let ids = ArrayList<String>()
                 for (i in 0..sessions.size) { ids.add(sessions[Int64(i)].id) }
                 this.picker = Some(SessionPicker(ids))
+                this.pickerKind = "session"
                 this.status = "↑/↓ 选择 · Enter 切换 · Esc 取消"
             }
         } else if (cmd == "switch" && parts.size > 2) {

@@ -396,3 +396,35 @@ func chatTui_sessionPickerInteractiveSwitch() {
     let a = store.load("sess_a")
     @Expect(a.size, 1)
 }
+
+@Test
+func chatTui_switchAgentStartsNewSession() {
+    let store = MemorySessionStore()
+    let trustMgr = TrustManager()
+    let agentReg = AgentRegistry()
+    agentReg.create("a1", AgentConfig.default())
+    agentReg.create("a2", AgentConfig.default())
+    let tui = ChatTui("a1", SlashCommandRegistry(trustMgr), AgentConfig.default(), StubProvider(),
+        ToolRegistry(), store, trustMgr, SkillRegistry(), agentReg, ProviderRegistry(),
+        "sess_test_agent", McpManager(), "/tmp/atelier-tui-test")
+
+    // m1 聊天 → 落在 sess_test_agent；/agent a2 切换（新会话）；m2 聊天 → 新会话
+    let keys = textKeys("m1")
+    keys.add(KeyEvent(KeyCode.Enter, KeyModifiers()))
+    let agentCmd = textKeys("/agent a2")
+    for (k in agentCmd) { keys.add(k) }
+    keys.add(KeyEvent(KeyCode.Enter, KeyModifiers()))
+    let m2 = textKeys("m2")
+    for (k in m2) { keys.add(k) }
+    keys.add(KeyEvent(KeyCode.Enter, KeyModifiers()))
+    keys.add(KeyEvent(KeyCode.Esc, KeyModifiers()))
+    tui.runWith(FakeTerminal(keys))
+
+    // 原会话只有 m1 + ok1（切换后的聊天去了新会话）
+    let a = store.load("sess_test_agent")
+    @Expect(a.size, 2)
+    match (a[a.size - 1]) {
+        case am: AssistantMessage => @Expect(contentText(am.content), "ok")
+        case _ => @Fail("expected ok in original session")
+    }
+}
