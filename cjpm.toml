@@ -16,7 +16,6 @@ repository = "https://atomgit.com/ystyle/atelier"
 "mustache" = "1.2.1"
 "ystyle::jsonrpc" = "0.7.5"
 "bstorm" = "1.4.7"
-"tomlcj" = "1.0.0"
 "opencj::ulid" = "0.1.2"
 "llm_api" = { path = "../llm_api" }
 "acp" = "0.2.3"
@@ -59,10 +58,6 @@ path-option = [
   "${X86_64_OHOS_KIT_LIBS}",
   "${X86_64_OHOS_CANGJIE_STDX_PATH}",
 ]
-
-[package.package-configuration."atelier.cli"]
-output-type = "executable"
-compile-option = "--static -Woff unused"
 
 [profile.test]
 filter = "-ProviderIntegrationTest.*"

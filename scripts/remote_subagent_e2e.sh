@@ -4,6 +4,7 @@ set -e
 cd "$(dirname "$0")/.."
 eval "$(cjvs env bash)" && eval "$(cjvs stdx-env bash)"
 cjpm build -j 16
+(cd cli && cjpm build -j 16)          # 子进程可执行 = cli 项目的 cli.app
 export HOME=$(mktemp -d /tmp/atelier-rm-XXXXXX)
 export ATELIER_PROVIDER=echo
 trap 'rm -rf "$HOME"' EXIT

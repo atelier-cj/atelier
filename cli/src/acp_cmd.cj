@@ -1,4 +1,4 @@
-package atelier.cli
+package cli
 
 import std.env.*
 import std.fs.{Directory, Path, exists}

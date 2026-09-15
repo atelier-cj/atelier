@@ -1,4 +1,4 @@
-package atelier.cli
+package cli.app
 
 import std.env.*
 import std.collection.*
@@ -16,7 +16,8 @@ import atelier.trust.*
 import atelier.skill.*
 import atelier.tool.McpManager
 import atelier.tool.McpServerConfig
-import atelier.server.*
+import cli.*
+import server.*
 
 main(): Int64 {
     let args = getCommandLine()
@@ -162,10 +163,10 @@ main(): Int64 {
         case _ =>
             println("Atelier Agent Runtime")
             println("Usage:")
-            println("  atelier serve [port]          Start HTTP server")
-            println("  atelier acp [agent]           Serve as ACP v1 agent over stdio (agent picked at startup)")
-            println("  atelier repl [agent] [sid]    Start interactive REPL (resume session if sid given)")
-            println("  atelier run [agent] <prompt>  Run single prompt")
+            println("  cli.app serve [port]          Start HTTP server")
+            println("  cli.app acp [agent]           Serve as ACP v1 agent over stdio (agent picked at startup)")
+            println("  cli.app repl [agent] [sid]    Start interactive REPL (resume session if sid given)")
+            println("  cli.app run [agent] <prompt>  Run single prompt")
             println("")
             println("REPL slash commands: /help, /trust, /untrust, /session (new/list/switch), /clear, /exit")
             println("Config: ~/.atelier.toml  — agent, provider, server, mcpServer, logging")
@@ -220,40 +221,7 @@ func registerBuiltins(reg: ToolRegistry): Unit {
     reg.register(AskUserTool())
 }
 
-func resolveProviderFor(cfg: AgentConfig, reg: ProviderRegistry): Provider {
-    let providerName = match (cfg.provider) { case Some(v) => v; case None => "default" }
-    match (reg.get(providerName)) {
-        case Some(p) => p
-        case None =>
-            // Fallback: create from env
-            let baseURL = match (getVariable("OPENAI_BASE_URL")) {
-                case Some(v) => v; case None => "https://api.openai.com/v1"
-            }
-            let apiKey = match (getVariable("OPENAI_API_KEY")) {
-                case Some(v) => v; case None => ""
-            }
-            OpenAIProvider(providerName, baseURL, apiKey)
-    }
-}
-
-func serve(handler: AtelierHttpHandler, host: String, port: String): Unit {
-    let server = ServerBuilder()
-        .addr(host)
-        .port(UInt16(parseInt(port)))
-        .build()
-    handler.registerRoutes(server.distributor)
-    println("Atelier HTTP server listening on ${host}:${port}")
-    server.serve()
-}
-
-func parseInt(s: String): Int64 {
-    var r: Int64 = 0
-    for (c in s.toArray()) {
-        if (c >= 48 && c <= 57) { r = r * 10 + Int64(c - 48) }
-        else { break }
-    }
-    r
-}
+// 共享装配助手（resolveProviderFor / serve / parseInt）已移至 cli/src/shared.cj
 
 func lastTextFrom(msgs: ArrayList<Message>): String {
     var i = msgs.size - 1

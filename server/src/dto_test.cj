@@ -1,4 +1,4 @@
-package atelier.server
+package server
 
 import std.collection.*
 import atelier.util.{toJsonString, fromJsonString}

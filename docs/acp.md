@@ -13,7 +13,7 @@ eval "$(cjvs env zsh)" && eval "$(cjvs stdx-env zsh)"
 cjpm build -j 16
 
 # 2. 启动（stdio 服务，阻塞；agent 在启动时选择，默认 default）
-atelier acp [agent]
+cli.app acp [agent]
 ```
 
 **Zed 配置示例**（`settings.json`）：
@@ -28,7 +28,7 @@ atelier acp [agent]
 }
 ```
 
-**opencode / 其它宿主**：把 agent 命令配置为 `atelier acp` 即可。stdout 只输出 ACP 帧，
+**opencode / 其它宿主**：把 agent 命令配置为 `cli.app acp` 即可。stdout 只输出 ACP 帧，
 日志/诊断一律走 stderr（stdout 污染会导致协议错乱）。
 
 ## 能力矩阵
@@ -83,8 +83,8 @@ atelier acp [agent]
 
 | 配置来源 | 说明 |
 |---|---|
-| `~/.atelier.toml` | agent/provider/mcpServer 与各形态一致（`atelier acp` 走同一加载） |
-| `atelier acp [agent]` | **多 agent：启动时选择**（默认 `default`），运行期一个进程服务一个 agent，不做跨会话动态切换 |
+| `~/.atelier.toml` | agent/provider/mcpServer 与各形态一致（`cli.app acp` 走同一加载） |
+| `cli.app acp [agent]` | **多 agent：启动时选择**（默认 `default`），运行期一个进程服务一个 agent，不做跨会话动态切换 |
 | `ATELIER_PROVIDER=echo` | 离线调试/e2e：`EchoProvider` 直接回显最后一条用户消息（不连真实 LLM） |
 | `ATELIER_ECHO_DELAY_MS` | echo 延时（毫秒），用于 cancel 路径验证 |
 | 会话数据 | `~/.atelier/sessions/`（atelier 会话 + `acp-sessions.json` 映射） |

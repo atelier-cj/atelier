@@ -1,4 +1,4 @@
-package atelier.cli
+package cli
 
 import atelier.message.*
 import atelier.session.{extractNewMessages, sameMessage}

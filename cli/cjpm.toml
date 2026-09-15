@@ -1,0 +1,36 @@
+[package]
+name = "cli"
+version = "0.1.0"
+cjc-version = "1.1.0"
+output-type = "static"
+compile-option = "-Woff unused"
+link-option = "-lstdx.crypto.digest"
+license = ["MIT"]
+authors = ["ystyle"]
+repository = "https://atomgit.com/ystyle/atelier"
+
+[dependencies]
+atelier = { path = ".." }
+server = { path = "../server" }
+"opencj::ulid" = "0.1.2"
+
+[package.package-configuration."cli.app"]
+output-type = "executable"
+compile-option = "--static -Woff unused"
+
+[target.x86_64-unknown-linux-gnu]
+link-option = "-luring"
+
+[target.x86_64-w64-mingw32]
+link-option = "-lcrypt32"
+
+[target.x86_64-unknown-linux-gnu.bin-dependencies]
+path-option = ["${CANGJIE_STDX_PATH}"]
+[target.aarch64-unknown-linux-gnu.bin-dependencies]
+path-option = ["${CANGJIE_STDX_PATH}"]
+[target.x86_64-apple-darwin.bin-dependencies]
+path-option = ["${CANGJIE_STDX_PATH}"]
+[target.aarch64-apple-darwin.bin-dependencies]
+path-option = ["${CANGJIE_STDX_PATH}"]
+[target.x86_64-w64-mingw32.bin-dependencies]
+path-option = ["${CANGJIE_STDX_PATH}"]

@@ -297,7 +297,7 @@ class EventStream<T, R> {
 
 - **库形态**：`import atelier`，在应用内直接调用 Agent Runtime
 - **挂载形态**：`atelier.registerRoutes(server.distributor)`，将 Atelier 路由挂载到既有 HTTP 服务上，不占独立端口
-- **服务形态**：`atelier serve --port 8080`，一键启动独立 HTTP 服务
+- **服务形态**：`cli.app serve --port 8080`，一键启动独立 HTTP 服务
 - **CLI 形态**：命令行交互（后期完善）
 
 ### 3.5 安全优先
@@ -431,7 +431,7 @@ HTTP 服务支持两种启动方式：
 **方式一：独立服务**——一键启动，自带 HTTP Server：
 
 ```bash
-atelier serve --port 8080
+cli.app serve --port 8080
 ```
 
 **方式二：挂载模式**——通过 `registerRoutes` 接入既有 HTTP 服务，不占端口：
@@ -484,10 +484,10 @@ curl -X POST http://localhost:8080/agent/run \
 
 ```bash
 # 单次对话
-atelier run -a data-assistant "分析上个月销售"
+cli.app run -a data-assistant "分析上个月销售"
 
 # 交互式 REPL
-atelier repl -a data-assistant
+cli.app repl -a data-assistant
 
 # 列表 Agent
 atelier agent list
@@ -1059,7 +1059,7 @@ public interface Hook {
 - [x] AgentRuntime 会话级取消（cancelSession + 检查点，供 session/cancel）
 - [x] 工具执行开始/结束事件发射（修复事件无 producer 缺口）
 - [x] ACP 适配层 `src/acp/`（translator / session_map / config options / bridge）
-- [x] CLI `atelier acp`（ACP v1 stdio Agent，被 Zed/opencode 等宿主拉起）
+- [x] CLI `cli.app acp`（ACP v1 stdio Agent，被 Zed/opencode 等宿主拉起）
 - [x] Session Config Options（模型选择 `model_config` + 压缩开关）
 - [x] 会话全能力（list/load 重放/resume/delete/close）+ 工具授权（request_permission）
 - [x] e2e 线协议验证（离线 echo provider，38 断言）

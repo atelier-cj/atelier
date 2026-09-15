@@ -21,10 +21,18 @@ Atelier 是一个纯仓颉实现的 Agent Harness —— 把模型变成 Agent �
 
 ## 安装
 
+仓库为 **monorepo**：`src/`（核心库 `atelier`）+ `cli/`（终端 agent 产品，产物 `cli.app`）+ `server/`（HTTP 服务库 `server`）。
+
 ```bash
 git clone https://atomgit.com/ystyle/atelier
 cd atelier
+
+# 核心库
 cjpm build -j 16
+
+# 终端 agent 产品（cli.app）与 HTTP 服务库
+(cd cli && cjpm build -j 16)
+(cd server && cjpm build -j 16)
 ```
 
 ## 集成方式
@@ -48,31 +56,34 @@ atelier.registerRoutes(server.distributor)
 **独立服务** — 一键启动：
 
 ```bash
-atelier serve 8080
+cli.app serve 8080
 ```
 
 **CLI** — 交互式或单次运行：
 
 ```bash
-atelier repl
-atelier run "你好"
+cli.app repl
+cli.app run "你好"
 ```
 
 ## 快速开始
 
 ```bash
+# 构建终端 agent（cli.app；产物在 cli/target/release/bin/）
+(cd cli && cjpm build -j 16)
+
 # 写入环境变量
 export OPENAI_API_KEY="sk-xxx"
 export OPENAI_BASE_URL="https://api.openai.com/v1"
 
 # 交互式 REPL
-atelier repl
+./cli/target/release/bin/cli.app repl
 
 # 单次对话
-atelier run "你好，介绍一下你自己"
+./cli/target/release/bin/cli.app run "你好，介绍一下你自己"
 
 # 启动 HTTP 服务
-atelier serve 8080
+./cli/target/release/bin/cli.app serve 8080
 
 # 调用 API
 curl http://localhost:8080/agent/run \
@@ -126,11 +137,13 @@ command = "npx @playwright/mcp"
 ## 开发
 
 ```bash
-# 编译
+# 核心库：编译 + 测试
 cjpm build -j 16
-
-# 运行所有测试
 cjpm test -j 16 --no-progress
+
+# cli / server：各自独立构建与测试
+(cd cli && cjpm build -j 16 && cjpm test -j 16 --no-progress)
+(cd server && cjpm build -j 16 && cjpm test -j 16 --no-progress)
 
 # 运行单个测试
 cjpm test --show-all-output --filter 'TestName.*'
@@ -142,7 +155,7 @@ cjpm test --show-all-output --filter 'TestName.*'
 |------|------|------|
 | `ystyle::mcp` | MCP 协议层（工具发现/调用/传输） | MIT |
 | `bstorm` | 会话持久化（基于 badger-cj 的 ORM） | MIT |
-| `tomlcj` | TOML 解析 | MIT |
+| `tomlcj` | TOML 解析（`server` 项目使用） | MIT |
 | `acp` | ACP v1 协议层（Agent/Client 双端） | MulanPSL-2.0 |
 
 核心 Harness（Agent Loop、事件流、上下文压缩、Provider、信任闸门）全部自研，零外部依赖。

@@ -1,4 +1,4 @@
-package atelier.server
+package server
 
 import atelier.agent.*
 import atelier.context.CompactionConfig

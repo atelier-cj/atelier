@@ -267,7 +267,7 @@ public class SubAgentManager {
     }
 
     // 跨进程启动：子 agent 跑独立 `atelier acp <agent> [sessionDir]` 进程（ACP 桥）。
-    // executable：子进程可执行文件（父二进制同款，如 /path/to/atelier.cli）；
+    // executable：子进程可执行文件（父二进制同款，如 /path/to/cli.app）；
     // sessionDir：子进程隔离会话目录（勿与父共享）；cwd：子会话工作目录。
     // 返回句柄；握手/建会话失败以 done 错误回信（异步可见于 recv）。
     public func startRemote(executable: String, agentName: String, parentSessionId: String,
