@@ -275,6 +275,22 @@ public func flattenStatus(s: String, width: Int64): String {
     truncateLine(s.replace("\n", " | "), width)
 }
 
+// ═══════ /help 命令清单（包级，可单测）═══════════════════════════
+public func helpLines(): ArrayList<String> {
+    let out = ArrayList<String>()
+    out.add("/help                 本清单（任意键返回）")
+    out.add("/agent [name]         切换 Agent（无参=交互选择）")
+    out.add("/session [new|list|switch <id>|export <id> <jsonl|html>]")
+    out.add("/model <name>         切换模型")
+    out.add("/tools                列出当前 agent 工具")
+    out.add("/subagent [list|poll|start [--remote] <agent> <prompt>|send <id> <text>|respond <id> <text>|close <id>]")
+    out.add("/trust <path>         信任目录（平行工具免审）")
+    out.add("/untrust <path>       撤销信任")
+    out.add("/clear                清空会话")
+    out.add("/exit /quit           退出")
+    out
+}
+
 // ═══════ 聊天 TUI ══════════════════════════════════════════
 
 // raw mode + ANSI。输入侧复用 xisp 的 terminal（POSIX 已实测；Windows 实现存在但未验证）；
@@ -304,6 +320,7 @@ public class ChatTui {
     private var hist: ChatHistory
     private var picker: Option<SessionPicker>
     private var pickerKind: String
+    private var helpMode: Bool
     private var out: AutoStream
 
     public init(agentName: String, registry: SlashCommandRegistry, agentConfig: AgentConfig,
@@ -331,6 +348,7 @@ public class ChatTui {
         this.hist = ChatHistory()
         this.picker = None
         this.pickerKind = ""
+        this.helpMode = false
         this.out = AutoStream.stdout()
         // 可持续子 Agent：回合内工具 + /subagent 命令（与 REPL 同装配）
         this.subMgr = SubAgentManager(toolRegistry, trustManager, skillRegistry,
@@ -402,7 +420,16 @@ public class ChatTui {
         sb.append("\u{1b}[2K")
         sb.append(colorize("Atelier TUI — Agent: " + this.agentName + "  Session: " + this.sessionId + "   /help", C_HEADER))
         let msgRows = r - 4
-        match (this.picker) {
+        if (this.helpMode) {
+            // 帮助清单逐行显示
+            let lines = helpLines()
+            for (i in 0..msgRows) {
+                sb.append(csiMove(0, i + 1))
+                sb.append("\u{1b}[2K")
+                if (i < lines.size) { sb.append(lines[Int64(i)]) }
+            }
+        } else {
+            match (this.picker) {
             case Some(p) =>
                 // 会话选择列表：窗口跟随选择行
                 let start = p.index() - msgRows / 2
@@ -433,6 +460,7 @@ public class ChatTui {
                     let idx = start + i
                     if (idx >= 0 && idx < lines.size) { sb.append(lines[Int64(idx)]) }
                 }
+            }
         }
         // 会话信息条（Agent / 模型 / 轮次 / 上下文长度）
         let model = if (this.modelOverride != "") { this.modelOverride } else { this.agentConfig.model }
@@ -483,6 +511,13 @@ public class ChatTui {
     // ── 按键 ──────────────────────────────────────────────
 
     private func handleKey(ke: KeyEvent, t: Terminal): Unit {
+        // 帮助面板：任意键返回
+        if (this.helpMode) {
+            this.helpMode = false
+            this.status = ""
+            this.render(t)
+            return
+        }
         // 会话选择模式优先：↑/↓ 选择、Enter 切换、Esc 取消
         match (this.picker) {
             case Some(p) =>
@@ -727,7 +762,8 @@ public class ChatTui {
 
     private func runCommand(line: String): Unit {
         if (line == "/help" || line == "help") {
-            this.status = "/session [new|list|switch|export] · /agent [name] · /model <name> · /tools · /subagent [list|start|send|respond|close] · /trust <path> · /untrust <path> · /clear · /exit"
+            this.helpMode = true
+            this.status = "任意键返回对话"
             return
         }
         if (line.startsWith("/agent")) { this.handleAgentCommand(line); return }

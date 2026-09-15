@@ -479,3 +479,19 @@ func flattenStatus_flattensAndTruncates() {
     @Expect(flat.contains("\n"), false)
     @Expect(flat.toRuneArray().size <= 19, true)
 }
+
+@Test
+func helpLines_eachEntryOnOwnLine() {
+    let lines = helpLines()
+    @Expect(lines.size >= 9, true)
+    @Expect(lines[0].contains("/help"), true)
+    @Expect(lines[1].contains("/agent"), true)
+    @Expect(lines[2].contains("/session"), true)
+    @Expect(lines[3].contains("/model"), true)
+    @Expect(lines[4].contains("/tools"), true)
+    @Expect(lines[5].contains("/subagent"), true)
+    // 每条目独立一行（不含换行符）
+    for (l in lines) {
+        @Expect(l.contains("\n"), false)
+    }
+}
