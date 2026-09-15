@@ -1,6 +1,15 @@
 package cli
 
+import std.collection.*
 import atelier.message.*
+import atelier.agent.*
+import atelier.provider.*
+import atelier.session.*
+import atelier.tool.*
+import atelier.trust.*
+import atelier.skill.*
+import atelier.event.EventStream
+import ystyle::xisp.terminal.*
 
 func plainMsg(text: String): Message { UserMessage(ContentList.ofText(text), 0) }
 
@@ -91,4 +100,71 @@ func runeWidthSum_ascii() {
 func runeWidthSum_cjk() {
     let runes = "你好a".toRuneArray()
     @Expect(runeWidthSum(runes), 5)
+}
+
+// ═══════ 无头事件循环 e2e：验证「打字 → 回车 → 聊天 → 落库」全链路 ═══════
+
+
+// 脚本化按键终端：队列读完自动回 Esc（安全退出，避免死循环）
+class FakeTerminal <: Terminal {
+    private var keys: ArrayList<KeyEvent>
+
+    public init(keys: ArrayList<KeyEvent>) { this.keys = keys }
+
+    public func enableRawMode(): Bool { true }
+    public func disableRawMode(): Bool { true }
+    public func isRawModeEnabled(): Bool { true }
+    public func readKey(): Option<KeyEvent> {
+        if (this.keys.size == 0) { return Some(KeyEvent(KeyCode.Esc, KeyModifiers())) }
+        let k = this.keys[0]
+        this.keys.remove(0..1)
+        Some(k)
+    }
+    public func getTerminalSize(): (Int64, Int64) { (80, 24) }
+    public func isTTY(): Bool { true }
+}
+
+// 固定回复的 Provider（不连网络，复刻核心 runtime_test 的 StubProvider）
+class StubProvider <: Provider {
+    public func name(): String { "stub" }
+
+    public func chat(req: ChatRequest): ChatResponse {
+        let msg = AssistantMessage(ContentList.ofText("ok"), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0)
+        ChatResponse(msg)
+    }
+
+    public func chatStreaming(req: ChatRequest): EventStream<ChatDelta, AssistantMessage> {
+        let stream = EventStream<ChatDelta, AssistantMessage>()
+        let msg = AssistantMessage(ContentList.ofText("ok"), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0)
+        stream.emit(ChatDelta("", "", Some(msg.stopReason)))
+        stream.setResult(msg)
+        stream
+    }
+}
+
+@Test
+func chatTui_enterSubmitsAndPersists() {
+    let keys = ArrayList<KeyEvent>()
+    keys.add(KeyEvent(KeyCode.Char(Rune(UInt32(104))), KeyModifiers()))  // h
+    keys.add(KeyEvent(KeyCode.Char(Rune(UInt32(105))), KeyModifiers()))  // i
+    keys.add(KeyEvent(KeyCode.Enter, KeyModifiers()))
+    keys.add(KeyEvent(KeyCode.Esc, KeyModifiers()))
+    let fake = FakeTerminal(keys)
+    let store = MemorySessionStore()
+    let trustMgr = TrustManager()
+    let tui = ChatTui("default", SlashCommandRegistry(trustMgr), AgentConfig.default(), StubProvider(),
+        ToolRegistry(), store, trustMgr, SkillRegistry(), AgentRegistry(), ProviderRegistry(),
+        "sess_test_enter", McpManager(), "/tmp/atelier-tui-test")
+    tui.runWith(fake)
+    // 回车后消息应落库：首条用户 hi，末条助手 ok
+    let msgs = store.load("sess_test_enter")
+    @Expect(msgs.size >= 2, true)
+    match (msgs[0]) {
+        case um: UserMessage => @Expect(contentText(um.content), "hi")
+        case _ => @Fail("expected user message first")
+    }
+    match (msgs[msgs.size - 1]) {
+        case am: AssistantMessage => @Expect(contentText(am.content), "ok")
+        case _ => @Fail("expected assistant reply last")
+    }
 }
