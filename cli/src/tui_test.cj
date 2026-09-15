@@ -330,3 +330,69 @@ func chatHistory_empty() {
 func toRunes_roundtrip() {
     @Expect(String(toRunes("你好abc")), "你好abc")
 }
+
+// ═══════ 会话选择器 ═══════
+
+@Test
+func sessionPicker_navigation() {
+    let ids = ArrayList<String>()
+    ids.add("sess_a")
+    ids.add("sess_b")
+    ids.add("sess_c")
+    let p = SessionPicker(ids)
+    @Expect(p.index(), 0)
+    @Expect(p.selected(), "sess_a")
+    p.moveUp()          // 顶部不再上移
+    @Expect(p.index(), 0)
+    p.moveDown()
+    @Expect(p.index(), 1)
+    @Expect(p.selected(), "sess_b")
+    p.moveDown()
+    p.moveDown()        // 底部不再下移
+    @Expect(p.index(), 2)
+    @Expect(p.idAt(1), "sess_b")
+    @Expect(p.size(), 3)
+}
+
+func textKeys(text: String): ArrayList<KeyEvent> {
+    let keys = ArrayList<KeyEvent>()
+    for (r in text.toRuneArray()) {
+        keys.add(KeyEvent(KeyCode.Char(r), KeyModifiers()))
+    }
+    keys
+}
+
+@Test
+func chatTui_sessionPickerInteractiveSwitch() {
+    let store = MemorySessionStore()
+    store.save("sess_a", SessionHeader(1, "sess_a", 0, 0, "", "", "", None),
+        ArrayList<Message>([UserMessage(ContentList.ofText("msgA"), 0)]))
+    store.save("sess_b", SessionHeader(1, "sess_b", 0, 0, "", "", "", None),
+        ArrayList<Message>([UserMessage(ContentList.ofText("msgB"), 0)]))
+    let trustMgr = TrustManager()
+    let tui = ChatTui("default", SlashCommandRegistry(trustMgr), AgentConfig.default(), StubProvider(),
+        ToolRegistry(), store, trustMgr, SkillRegistry(), AgentRegistry(), ProviderRegistry(),
+        "sess_test_picker", McpManager(), "/tmp/atelier-tui-test")
+
+    // /session list → 选择模式 → ↓ 选 sess_b → Enter 切换 → 发 hi → Esc 退出
+    let keys = textKeys("/session list")
+    keys.add(KeyEvent(KeyCode.Enter, KeyModifiers()))
+    keys.add(KeyEvent(KeyCode.Down, KeyModifiers()))
+    keys.add(KeyEvent(KeyCode.Enter, KeyModifiers()))
+    keys.add(KeyEvent(KeyCode.Char(Rune(UInt32(104))), KeyModifiers()))
+    keys.add(KeyEvent(KeyCode.Char(Rune(UInt32(105))), KeyModifiers()))
+    keys.add(KeyEvent(KeyCode.Enter, KeyModifiers()))
+    keys.add(KeyEvent(KeyCode.Esc, KeyModifiers()))
+    tui.runWith(FakeTerminal(keys))
+
+    // 切换后聊天落到 sess_b（msgB + 本轮回复 ok）
+    let b = store.load("sess_b")
+    @Expect(b.size >= 2, true)
+    match (b[b.size - 1]) {
+        case am: AssistantMessage => @Expect(contentText(am.content), "ok")
+        case _ => @Fail("expected assistant ok in sess_b")
+    }
+    // sess_a 不受影响
+    let a = store.load("sess_a")
+    @Expect(a.size, 1)
+}

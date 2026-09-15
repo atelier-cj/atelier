@@ -204,6 +204,31 @@ public class ChatHistory {
     }
 }
 
+// ═══════ 会话选择器（包级，可单测）═══════════════════════════════
+// /session list 进入交互选择：↑/↓ 移动、Enter 选中、Esc 取消。
+public class SessionPicker {
+    private var ids: ArrayList<String>
+    private var idx: Int64
+
+    public init(ids: ArrayList<String>) {
+        this.ids = ids
+        this.idx = 0
+    }
+
+    public func moveUp(): Unit {
+        if (this.idx > 0) { this.idx = this.idx - 1 }
+    }
+
+    public func moveDown(): Unit {
+        if (this.idx < this.ids.size - 1) { this.idx = this.idx + 1 }
+    }
+
+    public func selected(): String { this.ids[this.idx] }
+    public func size(): Int64 { this.ids.size }
+    public func idAt(i: Int64): String { this.ids[Int64(i)] }
+    public func index(): Int64 { this.idx }
+}
+
 // ═══════ 聊天 TUI ══════════════════════════════════════════
 
 // raw mode + ANSI。输入侧复用 xisp 的 terminal（POSIX 已实测；Windows 实现存在但未验证）；
@@ -231,6 +256,7 @@ public class ChatTui {
     private var modelOverride: String
     private let subMgr: SubAgentManager
     private var hist: ChatHistory
+    private var picker: Option<SessionPicker>
     private var out: AutoStream
 
     public init(agentName: String, registry: SlashCommandRegistry, agentConfig: AgentConfig,
@@ -256,6 +282,7 @@ public class ChatTui {
         this.running = true
         this.modelOverride = ""
         this.hist = ChatHistory()
+        this.picker = None
         this.out = AutoStream.stdout()
         // 可持续子 Agent：回合内工具 + /subagent 命令（与 REPL 同装配）
         this.subMgr = SubAgentManager(toolRegistry, trustManager, skillRegistry,
@@ -326,14 +353,34 @@ public class ChatTui {
         sb.append(csiMove(0, 0))
         sb.append("\u{1b}[2K")
         sb.append("Atelier TUI — Agent: " + this.agentName + "  Session: " + this.sessionId + "   /help")
-        let lines = this.messageLines(c)
         let msgRows = r - 3
-        let start = if (lines.size > msgRows) { lines.size - msgRows - this.scroll } else { 0 }
-        for (i in 0..msgRows) {
-            sb.append(csiMove(0, i + 1))
-            sb.append("\u{1b}[2K")
-            let idx = start + i
-            if (idx >= 0 && idx < lines.size) { sb.append(lines[Int64(idx)]) }
+        match (this.picker) {
+            case Some(p) =>
+                // 会话选择列表：窗口跟随选择行
+                let start = p.index() - msgRows / 2
+                let wStart = if (start < 0) { 0 } else { start }
+                for (i in 0..msgRows) {
+                    sb.append(csiMove(0, i + 1))
+                    sb.append("\u{1b}[2K")
+                    let idx = wStart + i
+                    if (idx >= 0 && idx < p.size()) {
+                        let cur = if (p.idAt(idx) == this.sessionId) { " (current)" } else { "" }
+                        if (idx == p.index()) {
+                            sb.append("\u{1b}[7m" + "→ " + p.idAt(idx) + cur + C_RESET)
+                        } else {
+                            sb.append("  " + p.idAt(idx) + cur)
+                        }
+                    }
+                }
+            case None =>
+                let lines = this.messageLines(c)
+                let start = if (lines.size > msgRows) { lines.size - msgRows - this.scroll } else { 0 }
+                for (i in 0..msgRows) {
+                    sb.append(csiMove(0, i + 1))
+                    sb.append("\u{1b}[2K")
+                    let idx = start + i
+                    if (idx >= 0 && idx < lines.size) { sb.append(lines[Int64(idx)]) }
+                }
         }
         sb.append(csiMove(0, r - 2))
         sb.append("\u{1b}[2K")
@@ -371,6 +418,26 @@ public class ChatTui {
     // ── 按键 ──────────────────────────────────────────────
 
     private func handleKey(ke: KeyEvent, t: Terminal): Unit {
+        // 会话选择模式优先：↑/↓ 选择、Enter 切换、Esc 取消
+        match (this.picker) {
+            case Some(p) =>
+                match (ke.code) {
+                    case KeyCode.Up => p.moveUp(); this.render(t)
+                    case KeyCode.Down => p.moveDown(); this.render(t)
+                    case KeyCode.Enter =>
+                        let target = p.selected()
+                        this.picker = None
+                        this.switchToSession(target)
+                        this.render(t)
+                    case KeyCode.Esc =>
+                        this.picker = None
+                        this.status = ""
+                        this.render(t)
+                    case _ => ()
+                }
+                return
+            case None => ()
+        }
         match (ke.code) {
             case KeyCode.Char(r) =>
                 if (ke.modifiers.contains(KeyModifiers.CONTROL)) {
@@ -535,6 +602,21 @@ public class ChatTui {
         }
     }
 
+    private func switchToSession(targetId: String): Unit {
+        this.persistTurn(this.messages)
+        this.messages = try { this.sessionStore.load(targetId) } catch (e: Exception) {
+            this.status = "[atelier] session load failed (sessionId=" + targetId + "): " + e.message
+            ArrayList<Message>()
+        }
+        if (this.messages.size == 0) {
+            this.status = "Session not found: " + targetId
+            return
+        }
+        this.sessionId = targetId
+        this.scroll = 0
+        this.status = "Switched to session: " + targetId + "  Messages: " + this.messages.size.toString()
+    }
+
     // ═══ 斜杠命令（与 REPL 同命令面；输出统一进状态行）═══
 
     private func runCommand(line: String): Unit {
@@ -571,29 +653,14 @@ public class ChatTui {
             if (sessions.size == 0) {
                 this.status = "No saved sessions"
             } else {
-                let sb = StringBuilder()
-                sb.append("Saved sessions (" + sessions.size.toString() + "): ")
-                for (i in 0..sessions.size) {
-                    let s = sessions[Int64(i)]
-                    if (i > 0) { sb.append("  ") }
-                    sb.append(s.id + (if (s.id == this.sessionId) { " (current)" } else { "" }))
-                }
-                this.status = sb.toString()
+                // 交互式选择：消息区列会话，↑/↓ 选择、Enter 切换、Esc 取消
+                let ids = ArrayList<String>()
+                for (i in 0..sessions.size) { ids.add(sessions[Int64(i)].id) }
+                this.picker = Some(SessionPicker(ids))
+                this.status = "↑/↓ 选择 · Enter 切换 · Esc 取消"
             }
         } else if (cmd == "switch" && parts.size > 2) {
-            let targetId = parts[2]
-            this.persistTurn(this.messages)
-            this.messages = try { this.sessionStore.load(targetId) } catch (e: Exception) {
-                this.status = "[atelier] session load failed (sessionId=" + targetId + "): " + e.message
-                ArrayList<Message>()
-            }
-            if (this.messages.size == 0) {
-                this.status = "Session not found: " + targetId
-                return
-            }
-            this.sessionId = targetId
-            this.scroll = 0
-            this.status = "Switched to session: " + targetId + "  Messages: " + this.messages.size.toString()
+            this.switchToSession(parts[2])
         } else if (cmd == "export" && parts.size > 2) {
             let targetId = parts[2]
             let fmt = if (parts.size > 3) { parts[3] } else { "jsonl" }
