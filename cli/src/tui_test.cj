@@ -168,3 +168,35 @@ func chatTui_enterSubmitsAndPersists() {
         case _ => @Fail("expected assistant reply last")
     }
 }
+
+@Test
+func chatTui_systemPromptExcludedFromConversation() {
+    // 带系统提示词的配置：运行时把提示词注入工作列表头部（UserMessage），
+    // 显示与落库都必须排除它——首条应为用户 hi，而非提示词文本
+    let keys = ArrayList<KeyEvent>()
+    keys.add(KeyEvent(KeyCode.Char(Rune(UInt32(104))), KeyModifiers()))
+    keys.add(KeyEvent(KeyCode.Char(Rune(UInt32(105))), KeyModifiers()))
+    keys.add(KeyEvent(KeyCode.Enter, KeyModifiers()))
+    keys.add(KeyEvent(KeyCode.Esc, KeyModifiers()))
+    let fake = FakeTerminal(keys)
+    let store = MemorySessionStore()
+    let trustMgr = TrustManager()
+    let cfg = AgentConfig("t", None, "你是系统提示词", None, "m", None,
+        ArrayList<String>(), ArrayList<String>(), 3, UInt32(20), Float32(0.7),
+        UInt32(4096), None, false, UInt32(16384), UInt32(20000), None,
+        UInt32(50), UInt32(30), UInt32(0), ArrayList<String>(), None, Int64(0), Int64(0))
+    let tui = ChatTui("default", SlashCommandRegistry(trustMgr), cfg, StubProvider(),
+        ToolRegistry(), store, trustMgr, SkillRegistry(), AgentRegistry(), ProviderRegistry(),
+        "sess_test_prompt", McpManager(), "/tmp/atelier-tui-test")
+    tui.runWith(fake)
+    let msgs = store.load("sess_test_prompt")
+    @Expect(msgs.size >= 2, true)
+    match (msgs[0]) {
+        case um: UserMessage => @Expect(contentText(um.content), "hi")
+        case _ => @Fail("expected user hi first (system prompt must be excluded)")
+    }
+    match (msgs[msgs.size - 1]) {
+        case am: AssistantMessage => @Expect(contentText(am.content), "ok")
+        case _ => @Fail("expected assistant reply last")
+    }
+}
