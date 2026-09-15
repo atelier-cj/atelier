@@ -647,3 +647,38 @@ func markdown_listMarkerNotRepeatedOnWrap() {
     }
     @Expect(markerCount, 1)
 }
+
+@Test
+func conversationLines_turnSeparatorBetweenRounds() {
+    let msgs = ArrayList<Message>()
+    msgs.add(plainMsg("第一问"))
+    msgs.add(asstMsg("第一答"))
+    msgs.add(plainMsg("第二问"))
+    msgs.add(asstMsg("第二答"))
+    let lines = conversationLines(msgs, 40)
+    // 第二问前应有分隔线：总行数 = 4 条消息行 + 1 条分隔线
+    @Expect(lines.size, 5)
+    // 分隔线含暗色样式与 ─
+    var sepFound = false
+    for (l in lines) {
+        if (l.contains("─") && l.startsWith(C_DIM)) { sepFound = true }
+    }
+    @Expect(sepFound, true)
+}
+
+@Test
+func conversationLines_noTrailingSeparator() {
+    let msgs = ArrayList<Message>()
+    msgs.add(plainMsg("问"))
+    msgs.add(asstMsg("答"))
+    let lines = conversationLines(msgs, 40)
+    @Expect(lines.size, 2)   // 结尾助手回复后不再加分隔线
+}
+
+@Test
+func conversationLines_singleUserNoSeparator() {
+    let msgs = ArrayList<Message>()
+    msgs.add(plainMsg("问"))
+    let lines = conversationLines(msgs, 40)
+    @Expect(lines.size, 1)
+}

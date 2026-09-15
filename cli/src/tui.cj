@@ -307,6 +307,29 @@ public func helpLines(): ArrayList<String> {
     out
 }
 
+// ═══════ 会话渲染：轮次分隔线 ═════════════════════════════════
+// 用户消息前（上一轮为助手回复时）画暗色分隔线，标记轮次边界。
+public func turnLine(width: Int64): String {
+    let sb = StringBuilder()
+    for (i in 0..width) { sb.append("─") }
+    C_DIM + sb.toString() + C_RESET
+}
+
+public func conversationLines(messages: ArrayList<Message>, width: Int64): ArrayList<String> {
+    let out = ArrayList<String>()
+    var prevIsAssistant = false
+    for (m in messages) {
+        let role = m.role()
+        if (prevIsAssistant && match (role) { case MessageRole.User => true; case _ => false }) {
+            out.add(turnLine(width))
+        }
+        let lines = decorateMessageLines(m, width)
+        for (l in lines) { out.add(l) }
+        prevIsAssistant = match (role) { case MessageRole.Assistant => true; case _ => false }
+    }
+    out
+}
+
 // ═══════ 聊天 TUI ══════════════════════════════════════════
 
 // raw mode + ANSI。输入侧复用 xisp 的 terminal（POSIX 已实测；Windows 实现存在但未验证）；
@@ -516,12 +539,7 @@ public class ChatTui {
     }
 
     private func messageLines(c: Int64): ArrayList<String> {
-        let out = ArrayList<String>()
-        for (m in this.messages) {
-            let lines = decorateMessageLines(m, c)
-            for (l in lines) { out.add(l) }
-        }
-        out
+        conversationLines(this.messages, c)
     }
 
     // ── 按键 ──────────────────────────────────────────────
