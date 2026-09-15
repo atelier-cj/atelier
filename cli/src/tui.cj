@@ -152,6 +152,58 @@ public func decorateMessageLines(m: Message, width: Int64): ArrayList<String> {
     out
 }
 
+// String → 输入缓冲（ArrayList<Rune>）
+public func toRunes(s: String): ArrayList<Rune> {
+    let out = ArrayList<Rune>()
+    for (r in s.toRuneArray()) { out.add(r) }
+    out
+}
+
+// ═══════ 输入历史（包级，可单测）═══════════════════════════════
+// ↑/↓ 遍历已提交输入；首次按 ↑ 保存当前草稿，↓ 越过最新一条时恢复草稿。
+public class ChatHistory {
+    private var entries: ArrayList<String>
+    private var idx: Int64
+    private var draft: String
+
+    public init() {
+        this.entries = ArrayList<String>()
+        this.idx = 0
+        this.draft = ""
+    }
+
+    // 提交一行：入历史（相邻去重），重置浏览位置到最新
+    public func push(line: String): Unit {
+        if (line == "") { return }
+        if (this.entries.size > 0 && this.entries[this.entries.size - 1] == line) { return }
+        this.entries.add(line)
+        this.idx = this.entries.size
+    }
+
+    // 上一条：首次进入浏览时把当前输入存为草稿
+    public func up(current: String): Option<String> {
+        if (this.entries.size == 0) { return None }
+        if (this.idx >= this.entries.size) {
+            this.draft = current
+            this.idx = this.entries.size - 1
+        } else if (this.idx > 0) {
+            this.idx = this.idx - 1
+        }
+        Some(this.entries[this.idx])
+    }
+
+    // 下一条：越过最新一条时恢复草稿
+    public func down(): Option<String> {
+        if (this.entries.size == 0) { return None }
+        if (this.idx >= this.entries.size - 1) {
+            this.idx = this.entries.size
+            return Some(this.draft)
+        }
+        this.idx = this.idx + 1
+        Some(this.entries[this.idx])
+    }
+}
+
 // ═══════ 聊天 TUI ══════════════════════════════════════════
 
 // raw mode + ANSI。输入侧复用 xisp 的 terminal（POSIX 已实测；Windows 实现存在但未验证）；
@@ -178,6 +230,7 @@ public class ChatTui {
     private var running: Bool
     private var modelOverride: String
     private let subMgr: SubAgentManager
+    private var hist: ChatHistory
     private var out: AutoStream
 
     public init(agentName: String, registry: SlashCommandRegistry, agentConfig: AgentConfig,
@@ -202,6 +255,7 @@ public class ChatTui {
         this.status = ""
         this.running = true
         this.modelOverride = ""
+        this.hist = ChatHistory()
         this.out = AutoStream.stdout()
         // 可持续子 Agent：回合内工具 + /subagent 命令（与 REPL 同装配）
         this.subMgr = SubAgentManager(toolRegistry, trustManager, skillRegistry,
@@ -331,8 +385,18 @@ public class ChatTui {
                     this.renderInputOnly(t)
                 }
             case KeyCode.Enter => this.submit(t)
-            case KeyCode.Up => this.scroll = this.scroll + 1; this.render(t)
+            case KeyCode.Up =>
+                match (this.hist.up(String(this.input))) {
+                    case Some(text) => this.input = toRunes(text); this.renderInputOnly(t)
+                    case None => ()
+                }
             case KeyCode.Down =>
+                match (this.hist.down()) {
+                    case Some(text) => this.input = toRunes(text); this.renderInputOnly(t)
+                    case None => ()
+                }
+            case KeyCode.PageUp => this.scroll = this.scroll + 1; this.render(t)
+            case KeyCode.PageDown =>
                 if (this.scroll > 0) { this.scroll = this.scroll - 1 }
                 this.render(t)
             case KeyCode.Esc => this.running = false
@@ -344,6 +408,7 @@ public class ChatTui {
         let line = String(this.input)
         this.input = ArrayList<Rune>()
         if (line == "") { return }
+        this.hist.push(line)
         if (line.startsWith("/")) {
             this.runCommand(line)
             this.render(t)
