@@ -110,16 +110,13 @@ main(): Int64 {
         case "repl" =>
             let agentName = if (args.size > 2) { args[2] } else { "default" }
             let resumeId = if (args.size > 3) { args[3] } else { "" }
-            let slashReg = SlashCommandRegistry(trustMgr)
-            let cfg = match (agentReg.get(agentName)) {
-                case Some(c) => c
-                case None => AgentConfig.default()
-            }
-            let prov = resolveProviderFor(cfg, providerRegForCli)
-            let repl = REPL(agentName, slashReg, cfg, prov,
-                toolReg, sessionStore, trustMgr, skillReg,
-                agentReg, providerRegForCli, resumeId, mcpMgr, sessionDir)
-            repl.run()
+            runTui(agentName, resumeId, toolReg, trustMgr, skillReg, agentReg,
+                providerRegForCli, sessionStore, mcpMgr, sessionDir)
+
+        case "" =>
+            // 直接 cli.app：进入聊天 TUI（传统 agent 交互）
+            runTui("default", "", toolReg, trustMgr, skillReg, agentReg,
+                providerRegForCli, sessionStore, mcpMgr, sessionDir)
 
         case "run" =>
             if (args.size < 3) {
@@ -165,7 +162,7 @@ main(): Int64 {
             println("Usage:")
             println("  cli.app serve [port]          Start HTTP server")
             println("  cli.app acp [agent]           Serve as ACP v1 agent over stdio (agent picked at startup)")
-            println("  cli.app repl [agent] [sid]    Start interactive REPL (resume session if sid given)")
+            println("  cli.app repl [agent] [sid]    Start interactive TUI (resume session if sid given)")
             println("  cli.app run [agent] <prompt>  Run single prompt")
             println("")
             println("REPL slash commands: /help, /trust, /untrust, /session (new/list/switch), /clear, /exit")
@@ -177,6 +174,22 @@ main(): Int64 {
     }
     try { sessionStore.close() } catch (_) { () }
     0
+}
+
+// 聊天 TUI 装配（与 REPL 同套组件；无子命令与 repl 子命令都走这里）
+private func runTui(agentName: String, resumeId: String, toolReg: ToolRegistry,
+    trustMgr: TrustManager, skillReg: SkillRegistry, agentReg: AgentRegistry,
+    providerReg: ProviderRegistry, sessionStore: SessionStore, mcpMgr: McpManager,
+    sessionDir: String): Unit {
+    let slashReg = SlashCommandRegistry(trustMgr)
+    let cfg = match (agentReg.get(agentName)) {
+        case Some(c) => c
+        case None => AgentConfig.default()
+    }
+    let prov = resolveProviderFor(cfg, providerReg)
+    let tui = ChatTui(agentName, slashReg, cfg, prov, toolReg, sessionStore, trustMgr, skillReg,
+        agentReg, providerReg, resumeId, mcpMgr, sessionDir)
+    tui.run()
 }
 
 func initLogger(cfg: TomlLogging): Unit {
