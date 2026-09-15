@@ -480,16 +480,26 @@ func flattenStatus_flattensAndTruncates() {
     @Expect(flat.toRuneArray().size <= 19, true)
 }
 
+func helpHasEntry(lines: ArrayList<String>, keyword: String): Bool {
+    for (l in lines) {
+        if (l.contains(keyword)) { return true }
+    }
+    false
+}
+
 @Test
 func helpLines_eachEntryOnOwnLine() {
     let lines = helpLines()
-    @Expect(lines.size >= 9, true)
-    @Expect(lines[0].contains("/help"), true)
-    @Expect(lines[1].contains("/agent"), true)
-    @Expect(lines[2].contains("/session"), true)
-    @Expect(lines[3].contains("/model"), true)
-    @Expect(lines[4].contains("/tools"), true)
-    @Expect(lines[5].contains("/subagent"), true)
+    @Expect(lines.size >= 10, true)
+    @Expect(helpHasEntry(lines, "/help"), true)
+    @Expect(helpHasEntry(lines, "/new"), true)
+    @Expect(helpHasEntry(lines, "/agent"), true)
+    @Expect(helpHasEntry(lines, "/session"), true)
+    @Expect(helpHasEntry(lines, "/model"), true)
+    @Expect(helpHasEntry(lines, "/models"), true)
+    @Expect(helpHasEntry(lines, "/tools"), true)
+    @Expect(helpHasEntry(lines, "/subagent"), true)
+    @Expect(helpHasEntry(lines, "/clear"), true)
     // 每条目独立一行（不含换行符）
     for (l in lines) {
         @Expect(l.contains("\n"), false)
@@ -523,4 +533,22 @@ func chatTui_newAliasStartsNewSession() {
         case am: AssistantMessage => @Expect(contentText(am.content), "ok")
         case _ => @Fail("expected ok in original session")
     }
+}
+
+@Test
+func uniqueModels_dedupesByOrder() {
+    let agents = ArrayList<(String, AgentConfig)>()
+    agents.add(("a1", AgentConfig("a1", None, "", None, "gpt-4o", None, ArrayList<String>(), ArrayList<String>(), 3,
+        UInt32(20), Float32(0.7), UInt32(4096), None, false, UInt32(16384), UInt32(20000), None,
+        UInt32(50), UInt32(30), UInt32(0), ArrayList<String>(), None, Int64(0), Int64(0))))
+    agents.add(("a2", AgentConfig("a2", None, "", None, "deepseek-chat", None, ArrayList<String>(), ArrayList<String>(), 3,
+        UInt32(20), Float32(0.7), UInt32(4096), None, false, UInt32(16384), UInt32(20000), None,
+        UInt32(50), UInt32(30), UInt32(0), ArrayList<String>(), None, Int64(0), Int64(0))))
+    agents.add(("a3", AgentConfig("a3", None, "", None, "gpt-4o", None, ArrayList<String>(), ArrayList<String>(), 3,
+        UInt32(20), Float32(0.7), UInt32(4096), None, false, UInt32(16384), UInt32(20000), None,
+        UInt32(50), UInt32(30), UInt32(0), ArrayList<String>(), None, Int64(0), Int64(0))))
+    let models = uniqueModels(agents)
+    @Expect(models.size, 2)
+    @Expect(models[0], "gpt-4o")
+    @Expect(models[1], "deepseek-chat")
 }

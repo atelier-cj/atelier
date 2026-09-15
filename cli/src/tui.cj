@@ -275,6 +275,20 @@ public func flattenStatus(s: String, width: Int64): String {
     truncateLine(s.replace("\n", " | "), width)
 }
 
+// ═══════ 配置模型清单（包级，可单测）═════════════════════════════
+// 从 agent 配置里收集去重后的模型（按出现顺序）
+public func uniqueModels(agents: ArrayList<(String, AgentConfig)>): ArrayList<String> {
+    let out = ArrayList<String>()
+    for ((_, cfg) in agents) {
+        var seen = false
+        for (m in out) {
+            if (m == cfg.model) { seen = true; break }
+        }
+        if (!seen) { out.add(cfg.model) }
+    }
+    out
+}
+
 // ═══════ /help 命令清单（包级，可单测）═══════════════════════════
 public func helpLines(): ArrayList<String> {
     let out = ArrayList<String>()
@@ -282,6 +296,7 @@ public func helpLines(): ArrayList<String> {
     out.add("/agent [name]         切换 Agent（无参=交互选择）")
     out.add("/session [new|list|switch <id>|export <id> <jsonl|html>]")
     out.add("/model <name>         切换模型")
+    out.add("/models               列出配置的所有模型")
     out.add("/tools                列出当前 agent 工具")
     out.add("/subagent [list|poll|start [--remote] <agent> <prompt>|send <id> <text>|respond <id> <text>|close <id>]")
     out.add("/trust <path>         信任目录（平行工具免审）")
@@ -709,6 +724,23 @@ public class ChatTui {
         }
     }
 
+    private func handleModelsCommand(): Unit {
+        let models = uniqueModels(this.agentRegistry.list())
+        if (models.size == 0) {
+            this.status = "没有配置模型"
+            return
+        }
+        let sb = StringBuilder()
+        sb.append("Models: ")
+        for (i in 0..models.size) {
+            if (i > 0) { sb.append(", ") }
+            sb.append(models[Int64(i)])
+        }
+        let current = if (this.modelOverride != "") { this.modelOverride } else { this.agentConfig.model }
+        sb.append("（当前: " + current + "）")
+        this.status = sb.toString()
+    }
+
     private func handleAgentCommand(line: String): Unit {
         let parts = line.split(" ")
         if (parts.size > 1) {
@@ -762,6 +794,7 @@ public class ChatTui {
     // ═══ 斜杠命令（与 REPL 同命令面；输出统一进状态行）═══
 
     private func runCommand(line: String): Unit {
+        if (line == "/models") { this.handleModelsCommand(); return }
         // /new 别名：新建会话
         if (line == "/new") {
             this.handleSessionCommand("/session new")
