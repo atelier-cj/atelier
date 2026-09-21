@@ -25,9 +25,17 @@ public enum ToolPresentationMode {
  * 失败以值表达，而不是抛异常穿过求值器：脚本侧表现为可检出的错误值，
  * 与 xisp 的「错误即值」模型一致，程序可以用条件分支决定是否继续。
  */
-public enum PtcBindingOutcome {
+public enum PtcBindingOutcome <: ToString {
     | Ok(JsonValue)
     | Err(String)
+
+    public func toString(): String {
+        match (this) {
+            // 成功值不展开打印：它可能很大，且仅在诊断时用到
+            case Ok(_) => "ok"
+            case Err(message) => "err(${message})"
+        }
+    }
 }
 
 /**
