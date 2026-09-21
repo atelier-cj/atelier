@@ -19,6 +19,9 @@ repository = "https://atomgit.com/ystyle/atelier"
 "opencj::ulid" = "0.1.2"
 "llm_api" = "1.2.1"
 "acp" = "0.2.4"
+# PTC 程序执行引擎。暂用本地 path（xisp 侧的中断检查点与纯函数子集尚未发版）；
+# 发版后改回版本号依赖。
+"ystyle::xisp" = { path = "../xisp" }
 
 [target.x86_64-unknown-linux-gnu]
 link-option = "-luring"
