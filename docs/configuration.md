@@ -169,6 +169,9 @@ let config = AgentConfig(
 | `maxToolCalls` | `UInt32` | `50` | 单次运行最大工具调用数 |
 | `toolTimeout` | `UInt32` | `30` | 工具超时（秒） |
 | `minToolInterval` | `UInt32` | `0` | 工具调用最小间隔（毫秒） |
+| `toolPresentation` | `ToolPresentationMode` | `Native` | 工具呈现模式：`native` / `ptc` / `both`，见 [tools.md](tools.md) |
+| `ptcTimeoutSeconds` | `UInt32` | `30` | PTC 单次程序的经过时间预算（秒） |
+| `ptcMaxSubCalls` | `UInt32` | `64` | PTC 单次程序允许的子调用上限 |
 | `tags` | `ArrayList<String>` | `[]` | 标签 |
 | `createdBy` | `Option<String>` | `None` | 创建者 |
 | `createdAt` | `Int64` | `0` | 创建时间戳 |
