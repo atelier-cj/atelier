@@ -16,6 +16,7 @@ import atelier.session.exportToJsonl
 import atelier.session.exportToHtml
 import atelier.trust.*
 import atelier.skill.*
+import atelier.ptc.{JsonBridge, RunXispTool}
 
 // ═══════ 纯逻辑（包级，可单测）══════════════════════════════
 
@@ -145,8 +146,18 @@ public func decorateMessageLines(m: Message, width: Int64): ArrayList<String> {
                     else { out.add(lines[Int64(i)]) }
                 }
             }
+            // 工具调用：模型侧的意图必须可见——PTC 下它承载整段程序，native 下它承载
+            // 调用参数，两者都是理解后续结果的前提
+            for (tc in am.content.toolCalls()) {
+                for (l in toolCallLines(tc, width)) { out.add(l) }
+            }
         case tr: ToolResultMessage =>
-            out.add(colorize(toolLineText(tr, width), C_TOOL))
+            if (tr.toolName == RunXispTool.TOOL_NAME) {
+                // 程序输出是「日志 + 完成值」，压成一行等于没显示
+                for (l in runXispResultLines(tr, width)) { out.add(l) }
+            } else {
+                out.add(colorize(toolLineText(tr, width), C_TOOL))
+            }
         case _ => ()
     }
     out
@@ -328,6 +339,63 @@ public func conversationLines(messages: ArrayList<Message>, width: Int64): Array
         prevIsAssistant = match (role) { case MessageRole.Assistant => true; case _ => false }
     }
     out
+}
+
+// ═══════ PTC / 工具调用的呈现 ═══════════════════════════════
+// 工具呈现为「调用」与「结果」两段。PTC 模式下模型写的程序、以及程序产生的日志
+// 与完成值都在这两段里——压成一行就完全看不出它在做什么，因此按多行渲染。
+
+/** 程序体与结果正文的显示行数上限，超出部分折叠成一行提示。 */
+public let PTC_MAX_BODY_LINES: Int64 = 40
+
+/**
+ * 助手消息里的一个工具调用。
+ *
+ * `run_xisp` 的程序是本次调用的主体，展开显示；其余工具显示一行参数摘要。
+ */
+public func toolCallLines(tc: ToolCallBlock, width: Int64): ArrayList<String> {
+    let out = ArrayList<String>()
+    if (tc.name == RunXispTool.TOOL_NAME) {
+        let desc = match (JsonBridge.stringField(tc.args, "description")) {
+            case Some(s) => s
+            case None => ""
+        }
+        let head = if (desc == "") { "tool→ run_xisp" } else { "tool→ run_xisp  " + desc }
+        out.add(colorize(head, C_TOOL))
+        match (JsonBridge.stringField(tc.args, "code")) {
+            case Some(code) => appendBodyLines(out, code, width)
+            case None => ()
+        }
+    } else {
+        let summary = truncateLine(JsonBridge.render(tc.args), width - 8)
+        out.add(colorize("tool→ " + tc.name + "  " + summary, C_TOOL))
+    }
+    out
+}
+
+/** `run_xisp` 的结果：日志与完成值按行原样显示，错误单独标注。 */
+public func runXispResultLines(tr: ToolResultMessage, width: Int64): ArrayList<String> {
+    let out = ArrayList<String>()
+    let head = if (tr.isError) { "tool← run_xisp ⚠" } else { "tool← run_xisp" }
+    out.add(colorize(head, C_TOOL))
+    appendBodyLines(out, contentText(tr.content), width)
+    out
+}
+
+/** 逐行加入缩进正文；超过上限时折叠为一行提示。 */
+private func appendBodyLines(out: ArrayList<String>, body: String, width: Int64): Unit {
+    if (body == "") { return }
+    let lines = body.split("\n")
+    var shown: Int64 = 0
+    for (line in lines) {
+        if (shown >= PTC_MAX_BODY_LINES) { break }
+        out.add(colorize("  │ " + truncateLine(line, width - 4), C_TOOL))
+        shown = shown + 1
+    }
+    let hidden = lines.size - shown
+    if (hidden > 0) {
+        out.add(colorize("  │ … 还有 " + hidden.toString() + " 行", C_DIM))
+    }
 }
 
 // ═══════ 聊天 TUI ══════════════════════════════════════════

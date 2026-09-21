@@ -8,6 +8,8 @@ import atelier.session.*
 import atelier.tool.*
 import atelier.trust.*
 import atelier.skill.*
+import jsonvalue.*
+import atelier.ptc.{JsonBridge, RunXispTool}
 import atelier.event.EventStream
 import ystyle::xisp.terminal.*
 
@@ -681,4 +683,128 @@ func conversationLines_singleUserNoSeparator() {
     msgs.add(plainMsg("问"))
     let lines = conversationLines(msgs, 40)
     @Expect(lines.size, 1)
+}
+
+// ═══════ PTC：工具调用与结果的多行呈现 ═══════════════════════════════
+// 工具调用此前完全不渲染、工具结果被压成一行；PTC 下程序与日志都在这两处，
+// 所以要守住「调用可见、正文成块、超长折叠」，同时守住非 PTC 路径不变。
+
+func toolCall(name: String, args: JsonValue): ToolCallBlock {
+    ToolCallBlock("call_1", name, args)
+}
+
+func jsonMap(pairs: Array<(String, String)>): JsonValue {
+    let m = HashMap<String, JsonValue>()
+    for ((k, v) in pairs) { m.add(k, JsonValue.String(v)) }
+    JsonValue.Map(m)
+}
+
+func asstMsgWithCalls(text: String, calls: Array<ToolCallBlock>): Message {
+    let blocks = ArrayList<ContentBlock>()
+    if (text != "") { blocks.add(ContentBlock.TextBlock(text)) }
+    for (c in calls) { blocks.add(ContentBlock.ToolCall(c)) }
+    AssistantMessage(ContentList(blocks), "", "", StopReason.ToolUse, TokenUsage(0, 0), 0)
+}
+
+@Test
+func toolCallLines_plainToolIsSingleLineWithArgs() {
+    let lines = toolCallLines(toolCall("read_file", jsonMap([("path", "a.cj")])), 80)
+    @Expect(lines.size, 1)
+    @Assert(lines[0].contains("tool→ read_file"))
+    @Assert(lines[0].contains("a.cj"))
+}
+
+@Test
+func toolCallLines_runXispExpandsProgram() {
+    let args = jsonMap([("description", "读两个文件"), ("code", "(tools::read_file {:path \"a\"})\n(tools::read_file {:path \"b\"})")])
+    let lines = toolCallLines(toolCall(RunXispTool.TOOL_NAME, args), 80)
+    // 首行是说明，其后每行程序各占一行——程序被折叠成一行就失去了意义
+    @Assert(lines[0].contains("run_xisp"))
+    @Assert(lines[0].contains("读两个文件"))
+    @Assert(lines.size >= 3)
+    var joined = ""
+    for (l in lines) { joined = joined + l + "\n" }
+    @Assert(joined.contains("tools::read_file"))
+    @Assert(joined.contains(":path \"b\""))
+}
+
+@Test
+func toolCallLines_runXispWithoutDescription() {
+    let args = jsonMap([("description", ""), ("code", "(+ 1 2)")])
+    let lines = toolCallLines(toolCall(RunXispTool.TOOL_NAME, args), 80)
+    @Assert(lines[0].contains("tool→ run_xisp"))
+    @Expect(lines.size, 2)
+}
+
+@Test
+func runXispResultLines_multiLineBody() {
+    let tr = ToolResultMessage("call_1", RunXispTool.TOOL_NAME,
+        ContentList.ofText("progress-line\nfinal-value"), false, 0)
+    let lines = runXispResultLines(tr, 80)
+    @Assert(lines[0].contains("tool← run_xisp"))
+    @Assert(!lines[0].contains("⚠"))
+    var joined = ""
+    for (l in lines) { joined = joined + l + "\n" }
+    @Assert(joined.contains("progress-line"))
+    @Assert(joined.contains("final-value"))
+}
+
+@Test
+func runXispResultLines_marksError() {
+    let tr = ToolResultMessage("call_1", RunXispTool.TOOL_NAME,
+        ContentList.ofText("[syntax_error] unexpected end of input"), true, 0)
+    let lines = runXispResultLines(tr, 80)
+    @Assert(lines[0].contains("⚠"))
+}
+
+@Test
+func runXispResultLines_foldsLongBody() {
+    let sb = StringBuilder()
+    for (i in 0..(PTC_MAX_BODY_LINES + 5)) { sb.append("line-${i}\n") }
+    let tr = ToolResultMessage("call_1", RunXispTool.TOOL_NAME,
+        ContentList.ofText(sb.toString()), false, 0)
+    let lines = runXispResultLines(tr, 80)
+    // 1 行标题 + PTC_MAX_BODY_LINES 行正文 + 1 行折叠提示
+    @Expect(lines.size, PTC_MAX_BODY_LINES + 2)
+    @Assert(lines[lines.size - 1].contains("还有"))
+}
+
+@Test
+func decorateMessageLines_rendersAssistantToolCalls() {
+    // 这是此前的缺口：助手消息的 toolCalls 完全不渲染
+    let calls: Array<ToolCallBlock> = [toolCall("read_file", jsonMap([("path", "a.cj")]))]
+    let m = asstMsgWithCalls("我来读文件", calls)
+    let lines = decorateMessageLines(m, 80)
+    var joined = ""
+    for (l in lines) { joined = joined + l + "\n" }
+    // 前缀着色会在其后插入 RESET，因此正文要单独断言
+    @Assert(lines[0].contains("ai:  "))
+    @Assert(lines[0].contains("我来读文件"))
+    @Assert(joined.contains("tool→ read_file"))
+}
+
+@Test
+func decorateMessageLines_assistantWithoutCallsUnchanged() {
+    // 回归守卫：没有 toolCalls 时行为与改动前一致（单行）
+    let lines = decorateMessageLines(asstMsg("回复"), 40)
+    @Expect(lines.size, 1)
+    @Assert(lines[0].startsWith(C_AI + "ai:  "))
+}
+
+@Test
+func decorateMessageLines_plainToolResultStillSingleLine() {
+    // 回归守卫：非 run_xisp 的结果仍走一行摘要
+    let tr = ToolResultMessage("call_1", "bash", ContentList.ofText("ok"), false, 0)
+    let lines = decorateMessageLines(tr, 40)
+    @Expect(lines.size, 1)
+    @Assert(lines[0].startsWith(C_TOOL + "tool: bash"))
+}
+
+@Test
+func decorateMessageLines_runXispResultIsMultiLine() {
+    let tr = ToolResultMessage("call_1", RunXispTool.TOOL_NAME,
+        ContentList.ofText("log-a\nanswer"), false, 0)
+    let lines = decorateMessageLines(tr, 80)
+    @Assert(lines.size >= 3)
+    @Assert(lines[0].contains("tool← run_xisp"))
 }
