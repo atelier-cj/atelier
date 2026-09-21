@@ -40,8 +40,11 @@ cjpm build -j 16
 # 运行所有测试
 cjpm test -j 16 --no-progress
 
-# 运行指定测试
-cjpm test --show-all-output --filter 'TestName.*'
+# 运行指定测试（--filter 是【通配符】不是正则：* 匹配任意字符）
+#   注意：本仓测试是顶层函数风格（如 runtime_ptcModeExposesOnlyRunXisp），用例名里没有点，
+#   因此 '.*' 选不中任何用例——那是 class 风格的写法（类名.方法名）。
+cjpm test --show-all-output --filter '*keyword*'     # 子串匹配（最常用）
+cjpm test --show-all-output --filter 'runtime_ptc*'  # 前缀匹配
 
 # 清理构建缓存
 cjpm clean

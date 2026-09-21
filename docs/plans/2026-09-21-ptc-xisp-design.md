@@ -561,7 +561,20 @@ case Symbol(sym) =>
 - **安全回归**：专门的用例断言「Ptc 模式下脚本无法访问文件系统/模块/进程」与「子调用受信任闸门约束」——这两条是本设计的核心承诺，必须有测试守住；
 - **实测核对**（手工，一次性）：`Both` 模式下确认请求头里工具列表同时含 native schema 与 `run_xisp`。
 
-> ⚠️ 工具链注意：当前 cjc/cjpm 1.1.3 下 `cjpm test --filter` **完全选不中用例**（`--filter '.*'` 亦为 `PASSED: 0, SKIPPED: 314`），只能整包跑（约 2 分钟）。这与根 `cjpm.toml:62-63` 的 `[profile.test] filter = "-ProviderIntegrationTest.*"` 可能有关（该类在仓内并不存在），建议在 M2 之前单独查清，否则 TDD 迭代会很慢。
+> **`cjpm test --filter` 的语法（实现期查清）。** `--filter` 是**通配符**匹配，不是正则
+> （见 cjpm 文档：`过滤测试用例（通配符匹配，如 * / *.* / *.*Test）`）。此前误用正则写法
+> `--filter 'jsonBridge.*'` 导致 `PASSED: 0`，一度被误判为工具链失效；实际上
+> `.*` 在通配符语义下要求被测名里**含一个点**，因此只对 class 风格的用例名
+> （`PureEnvTest.testArithmetic`）有效，对顶层函数风格（`jsonBridge_scalars`）无效。
+>
+> 正确用法：
+> - 子串：`cjpm test --filter '*jsonBridge*'` → 实测 `PASSED: 12, SKIPPED: 390`
+> - 前缀：`cjpm test --filter 'jsonBridge_*'`
+> - 全选：`cjpm test --filter '*'`
+> - class 风格：`cjpm test --filter 'PureEnvTest.*'`（类名后确有 `.`，故可用）
+>
+> 根 `cjpm.toml` 的 `[profile.test] filter` 与本项无关——cjpm 文档中 `[profile.test]`
+> 的合法字段只有 `compile-option` / `mock` / `env`，该字段未见记载，也不影响命令行过滤。
 
 ## 十、风险与边界
 
