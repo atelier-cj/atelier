@@ -139,7 +139,13 @@ public class REPL {
             this.agentConfig.toolTimeout,
             this.agentConfig.minToolInterval,
             this.agentConfig.tags, this.agentConfig.createdBy,
-            this.agentConfig.createdAt, this.agentConfig.updatedAt)
+            this.agentConfig.createdAt, this.agentConfig.updatedAt,
+            // 逐字段拷贝必须把「声明在末尾的可选参数」一并带上：漏传会静默落回默认值，
+            // 表现为配置生效不了（此前 supportsVision 与 PTC 三项都在此被丢掉）
+            supportsVision: this.agentConfig.supportsVision,
+            toolPresentation: this.agentConfig.toolPresentation,
+            ptcTimeoutSeconds: this.agentConfig.ptcTimeoutSeconds,
+            ptcMaxSubCalls: this.agentConfig.ptcMaxSubCalls)
         AgentRuntime(cfg, this.provider, this.toolRegistry, this.sessionStore,
             this.trustManager, this.skillRegistry, this.agentRegistry, this.providerRegistry,
             ArrayList<Hook>(), { q =>

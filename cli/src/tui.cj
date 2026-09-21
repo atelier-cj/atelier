@@ -698,7 +698,12 @@ public class ChatTui {
             this.agentConfig.toolTimeout,
             this.agentConfig.minToolInterval,
             this.agentConfig.tags, this.agentConfig.createdBy,
-            this.agentConfig.createdAt, this.agentConfig.updatedAt)
+            this.agentConfig.createdAt, this.agentConfig.updatedAt,
+            // 同 repl：末尾的可选参数必须显式带上，漏传会静默落回默认值
+            supportsVision: this.agentConfig.supportsVision,
+            toolPresentation: this.agentConfig.toolPresentation,
+            ptcTimeoutSeconds: this.agentConfig.ptcTimeoutSeconds,
+            ptcMaxSubCalls: this.agentConfig.ptcMaxSubCalls)
         AgentRuntime(cfg, this.provider, this.toolRegistry, this.sessionStore,
             this.trustManager, this.skillRegistry, this.agentRegistry, this.providerRegistry,
             ArrayList<Hook>(), { q =>

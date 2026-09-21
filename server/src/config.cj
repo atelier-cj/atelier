@@ -4,6 +4,7 @@ import atelier.agent.*
 import atelier.context.CompactionConfig
 import atelier.provider.*
 import atelier.tool.McpServerConfig
+import atelier.ptc.ToolPresentationMode
 import tomlcj.*
 import stdx.serialization.serialization.*
 import std.collection.*
@@ -237,6 +238,12 @@ public class TomlAgent <: Serializable<TomlAgent> {
     public var tools: ArrayList<String> = ArrayList()
     public var skills: ArrayList<String> = ArrayList()
     public var mcpCooldownTurns: Int64 = 0
+    // 工具呈现模式：native（默认，逐次 JSON Schema）/ ptc（只暴露 run_xisp）/ both
+    public var toolPresentation: String = "native"
+    // PTC 单次程序的经过时间预算（秒）
+    public var ptcTimeoutSeconds: Int64 = 30
+    // PTC 单次程序允许的子调用上限
+    public var ptcMaxSubCalls: Int64 = 64
     public var compaction: Option<TomlCompaction> = None
     public init() {}
 
@@ -249,6 +256,9 @@ public class TomlAgent <: Serializable<TomlAgent> {
         sb.add(field<ArrayList<String>>("tools", tools))
         sb.add(field<ArrayList<String>>("skills", skills))
         sb.add(field<Int64>("mcpCooldownTurns", mcpCooldownTurns))
+        sb.add(field<String>("toolPresentation", toolPresentation))
+        sb.add(field<Int64>("ptcTimeoutSeconds", ptcTimeoutSeconds))
+        sb.add(field<Int64>("ptcMaxSubCalls", ptcMaxSubCalls))
         match (this.compaction) {
             case Some(c) => sb.add(Field("compaction", c.serialize()))
             case None => ()
@@ -279,6 +289,10 @@ public class TomlAgent <: Serializable<TomlAgent> {
             case _ => ()
         }
         r.mcpCooldownTurns = match (dms.get("mcpCooldownTurns")) { case i: DataModelInt => i.getValue(); case _ => Int64(0) }
+        // 缺字段时保持与字段声明一致的默认值：旧配置照常加载，行为不变
+        r.toolPresentation = match (dms.get("toolPresentation")) { case s: DataModelString => s.getValue(); case _ => "native" }
+        r.ptcTimeoutSeconds = match (dms.get("ptcTimeoutSeconds")) { case i: DataModelInt => i.getValue(); case _ => Int64(30) }
+        r.ptcMaxSubCalls = match (dms.get("ptcMaxSubCalls")) { case i: DataModelInt => i.getValue(); case _ => Int64(64) }
         match (dms.get("compaction")) {
             case s: DataModelStruct => r.compaction = Some(TomlCompaction.deserialize(s))
             case _ => ()
@@ -476,7 +490,24 @@ public func agentConfigFrom(a: TomlAgent): AgentConfig {
         a.tools, a.skills, a.mcpCooldownTurns,
         UInt32(20), Float32(0.7), UInt32(4096), None,
         true, UInt32(16384), UInt32(20000), compactionCfg, UInt32(50), UInt32(30), UInt32(0),
-        ArrayList<String>(), None, 0, 0)
+        ArrayList<String>(), None, 0, 0,
+        toolPresentation: ToolPresentationMode.fromString(a.toolPresentation),
+        ptcTimeoutSeconds: ptcBudget(a.ptcTimeoutSeconds, UInt32(30)),
+        ptcMaxSubCalls: ptcBudget(a.ptcMaxSubCalls, UInt32(64)))
+}
+
+/**
+ * 把 TOML 里的整数收束成合法的 UInt32 预算值。
+ *
+ * 配置写错（0、负数、超出范围）时回落到默认值，而不是让构造抛异常——
+ * 与 `ToolPresentationMode.fromString` 的态度一致：笔误应当退化为「保持现状」，
+ * 不该让整个 Agent 起不来。
+ */
+func ptcBudget(value: Int64, fallback: UInt32): UInt32 {
+    if (value <= 0 || value > 4294967295) {
+        return fallback
+    }
+    UInt32(value)
 }
 
 public func loadToml(path: String): TomlConfig {
