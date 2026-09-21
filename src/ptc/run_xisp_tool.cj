@@ -77,17 +77,20 @@ public class RunXispTool <: Tool {
      * 永远给不出自己的失败原因（只剩一句笼统的工具超时），所以外层放宽到那之后：
      * 先让内层报错，实在不动了才由外层兜底。
      */
-    public func timeoutBudget(): Option<Duration> {
+    public func timeoutBudget(): ToolBudget {
         match (this.env.timeout) {
-            case None => None
+            case None => ToolBudget.Default
             case Some(program) =>
-                let inFlight = match (this.env.toolTimeout) {
-                    case Some(sub) => sub
-                    case None => Duration.Zero
+                // 子调用属于哪一类（只读/有副作用）此刻还不知道，取更宽的那个，
+                // 否则外层会抢在内层子调用报错之前把脚本掐断
+                match (this.env.toolBudget.widest()) {
+                    // 子调用自己都不限时 → 外层也不设限：掐断只会让一个仍在跑的
+                    // 脚本失去汇报，而它并不会因此停下
+                    case None => ToolBudget.Unbounded
+                    case Some(inFlight) => ToolBudget.Limit(Duration.millisecond *
+                        (program.toMilliseconds() + inFlight.toMilliseconds() +
+                            RunXispTool.TIMEOUT_GRACE_MS))
                 }
-                let ms = program.toMilliseconds() + inFlight.toMilliseconds() +
-                    RunXispTool.TIMEOUT_GRACE_MS
-                Some(Duration.millisecond * ms)
         }
     }
 
@@ -188,7 +191,7 @@ class RunXispHost <: PtcSubCallHost {
         this.env.emit(PtcEvent.DispatchStart(callId, tool.name()))
         let result = try {
             // 子调用与模型直调受同一个预算约束：卡住的工具不能把整个脚本一起拖死
-            executeTool(tool, this.ctx, args, toolBudget(tool, this.env.toolTimeout))
+            executeTool(tool, this.ctx, args, this.env.toolBudget.forTool(tool))
         } catch (e: Exception) {
             // 工具抛出的异常不能穿过求值器：转成普通的失败结果
             ToolResult("[tool error: ${e.message}]", None, true, false)

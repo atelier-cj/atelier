@@ -246,6 +246,9 @@ public class TomlAgent <: Serializable<TomlAgent> {
     public var ptcMaxSubCalls: Int64 = 64
     // 单次工具调用的墙钟预算（秒）；0 = 不限时
     public var toolTimeout: Int64 = 30
+    // 有副作用（Sequential）工具的单次墙钟预算（秒）；0 = 不限时。
+    // 比只读宽：构建/安装这类正常耗时本就长，且这一类的超时意味着「结果未知」
+    public var sideEffectToolTimeout: Int64 = 300
     public var compaction: Option<TomlCompaction> = None
     public init() {}
 
@@ -262,6 +265,7 @@ public class TomlAgent <: Serializable<TomlAgent> {
         sb.add(field<Int64>("ptcTimeoutSeconds", ptcTimeoutSeconds))
         sb.add(field<Int64>("ptcMaxSubCalls", ptcMaxSubCalls))
         sb.add(field<Int64>("toolTimeout", toolTimeout))
+        sb.add(field<Int64>("sideEffectToolTimeout", sideEffectToolTimeout))
         match (this.compaction) {
             case Some(c) => sb.add(Field("compaction", c.serialize()))
             case None => ()
@@ -297,6 +301,7 @@ public class TomlAgent <: Serializable<TomlAgent> {
         r.ptcTimeoutSeconds = match (dms.get("ptcTimeoutSeconds")) { case i: DataModelInt => i.getValue(); case _ => Int64(30) }
         r.ptcMaxSubCalls = match (dms.get("ptcMaxSubCalls")) { case i: DataModelInt => i.getValue(); case _ => Int64(64) }
         r.toolTimeout = match (dms.get("toolTimeout")) { case i: DataModelInt => i.getValue(); case _ => Int64(30) }
+        r.sideEffectToolTimeout = match (dms.get("sideEffectToolTimeout")) { case i: DataModelInt => i.getValue(); case _ => Int64(300) }
         match (dms.get("compaction")) {
             case s: DataModelStruct => r.compaction = Some(TomlCompaction.deserialize(s))
             case _ => ()
@@ -498,7 +503,8 @@ public func agentConfigFrom(a: TomlAgent): AgentConfig {
         ArrayList<String>(), None, 0, 0,
         toolPresentation: ToolPresentationMode.fromString(a.toolPresentation),
         ptcTimeoutSeconds: ptcBudget(a.ptcTimeoutSeconds, UInt32(30)),
-        ptcMaxSubCalls: ptcBudget(a.ptcMaxSubCalls, UInt32(64)))
+        ptcMaxSubCalls: ptcBudget(a.ptcMaxSubCalls, UInt32(64)),
+        sideEffectToolTimeout: toolBudgetSeconds(a.sideEffectToolTimeout, UInt32(300)))
 }
 
 /**

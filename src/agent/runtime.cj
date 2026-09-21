@@ -30,11 +30,19 @@ import stdx.log.*
 import opencj::ulid.nextId
 
 /**
- * 工具预算：配置里 0 表示不限时（见 `AgentConfig.toolTimeout`）。
+ * 工具预算策略：只读工具用 `toolTimeout`，有副作用工具用 `sideEffectToolTimeout`。
  *
- * 不限时是**显式选择**：那时同步工具会一直占着回合，只留 Ctrl+C 一条退路。
+ * 两类分开的理由见 {@link ToolBudgetPolicy}：有副作用的调用被超时后**结果未知**，
+ * 代价远大于读类，所以既给更宽的额度，也在超时文本里要求「先核实再重试」。
+ * 单项配 0 = 该类不限时（显式选择：同步工具会一直占着回合，只留 Ctrl+C 一条退路）。
  */
-func toolBudgetOf(seconds: UInt32): Option<Duration> {
+func toolBudgetPolicyOf(config: AgentConfig): ToolBudgetPolicy {
+    ToolBudgetPolicy(budgetSeconds(config.toolTimeout),
+        budgetSeconds(config.sideEffectToolTimeout))
+}
+
+/** 秒 → 预算；0 = 不限时。 */
+func budgetSeconds(seconds: UInt32): Option<Duration> {
     if (seconds == 0) {
         return None
     }
@@ -87,7 +95,7 @@ public open class AgentRuntime {
         this.agentRegistry = agentRegistry
         this.providerRegistry = providerRegistry
         this.toolExecutor = ToolExecutor(this.toolRegistry,
-            toolTimeout: toolBudgetOf(config.toolTimeout))
+            budget: toolBudgetPolicyOf(config))
         this.hooks = hooks
         this.askUser = askUser
         this.modelRegistry = ModelContextRegistry()
@@ -619,7 +627,7 @@ public open class AgentRuntime {
                 { => cancelFlag.load() }, emit, authorizer,
                 maxSubCalls: Int64(this.config.ptcMaxSubCalls),
                 timeout: Some(Duration.second * Int64(this.config.ptcTimeoutSeconds)),
-                toolTimeout: toolBudgetOf(this.config.toolTimeout))
+                toolBudget: toolBudgetPolicyOf(this.config))
             let tool = RunXispTool(visible, env)
             // 注册进注册表：分发链路按名字查找，因此必须与其它工具同样可见
             this.toolRegistry.register(tool)

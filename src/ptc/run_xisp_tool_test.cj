@@ -25,7 +25,7 @@ class RunXispTestHelpers {
         denyReason: Option<String>,
         maxSubCalls!: Int64 = 10,
         timeout!: Option<Duration> = None,
-        toolTimeout!: Option<Duration> = None
+        toolBudget!: ToolBudgetPolicy = ToolBudgetPolicy(None, None)
     ): PtcRunEnv {
         let auth: PtcAuthorizer = { _, _ =>
             match (denyReason) {
@@ -39,7 +39,7 @@ class RunXispTestHelpers {
             auth,
             maxSubCalls: maxSubCalls,
             timeout: timeout,
-            toolTimeout: toolTimeout)
+            toolBudget: toolBudget)
     }
 
     static func tools(items: Array<Tool>): ArrayList<Tool> {
@@ -363,7 +363,8 @@ func runXisp_subCallTimeoutFailsTheProgram() {
     let tool = RunXispTool(RunXispTestHelpers.tools([BlockingTool(gate)]),
         RunXispTestHelpers.makeEnv(ArrayList<PtcEvent>(), None,
             timeout: Duration.second * 30,
-            toolTimeout: Duration.millisecond * 300))
+            toolBudget: ToolBudgetPolicy(
+                Some(Duration.millisecond * 300), Some(Duration.millisecond * 300))))
 
     let start = MonoTime.now()
     let result = tool.execute(ToolContext(""),
@@ -387,23 +388,38 @@ func runXisp_timeoutBudgetLeavesRoomForInnerFailure() {
     let tool = RunXispTool(RunXispTestHelpers.tools([]),
         RunXispTestHelpers.makeEnv(ArrayList<PtcEvent>(), None,
             timeout: Duration.second * 30,
-            toolTimeout: Duration.second * 20))
+            toolBudget: ToolBudgetPolicy(Some(Duration.second * 1), Some(Duration.second * 20))))
     match (tool.timeoutBudget()) {
-        case Some(value) =>
-            @Assert(value.toMilliseconds() > 50000)
+        case ToolBudget.Limit(value) =>
+            // 30s 程序预算 + 20s（更宽的那类子调用）+ 5s 宽限
             @Expect(value.toMilliseconds(), 55000)
-        case None => @Fail("expected a declared budget")
+        case other => @Fail("expected a declared budget, got ${other}")
     }
 }
 
 @Test
-func runXisp_timeoutBudgetWithoutToolBudgetStillLeavesGrace() {
+func runXisp_timeoutBudgetIsNoneWhenSubCallsAreUnbounded() {
+    // 子调用自己都不限时 → 外层也不设限（掐断只会让仍在跑的脚本失去汇报）
+    let tool = RunXispTool(RunXispTestHelpers.tools([]),
+        RunXispTestHelpers.makeEnv(ArrayList<PtcEvent>(), None,
+            timeout: Duration.second * 30,
+            toolBudget: ToolBudgetPolicy(Some(Duration.second * 1), None)))
+    match (tool.timeoutBudget()) {
+        case ToolBudget.Unbounded => ()
+        case other => @Fail("unbounded sub-calls must leave the outer budget unbounded, got ${other}")
+    }
+}
+
+@Test
+func runXisp_timeoutBudgetIsNoneWithoutAnySubCallBudget() {
+    // 完全没配子调用预算：外层也不设限——用无界的项相加得不到有界的和，
+    // 硬给一个数只会变成「掐断仍在跑的脚本」
     let tool = RunXispTool(RunXispTestHelpers.tools([]),
         RunXispTestHelpers.makeEnv(ArrayList<PtcEvent>(), None,
             timeout: Duration.second * 30))
     match (tool.timeoutBudget()) {
-        case Some(value) => @Expect(value.toMilliseconds(), 35000)
-        case None => @Fail("expected a declared budget")
+        case ToolBudget.Unbounded => ()
+        case other => @Fail("no sub-call budget must leave the outer budget unbounded, got ${other}")
     }
 }
 
@@ -413,7 +429,8 @@ func runXisp_timeoutBudgetIsNoneWithoutProgramBudget() {
     let tool = RunXispTool(RunXispTestHelpers.tools([]),
         RunXispTestHelpers.makeEnv(ArrayList<PtcEvent>(), None))
     match (tool.timeoutBudget()) {
-        case None => ()
-        case Some(_) => @Fail("expected None when the program has no budget")
+        // 程序自己没预算 = 没意见，交给框架策略（run_xisp 是 Sequential → 写类额度）
+        case ToolBudget.Default => ()
+        case other => @Fail("expected Default when the program has no budget, got ${other}")
     }
 }

@@ -136,8 +136,11 @@ class SleepingTool <: Tool {
         ToolExecutionMode.Sequential
     }
 
-    public func timeoutBudget(): Option<Duration> {
-        this.declared
+    public func timeoutBudget(): ToolBudget {
+        match (this.declared) {
+            case Some(d) => ToolBudget.Limit(d)
+            case None => ToolBudget.Default
+        }
     }
 }
 
@@ -311,7 +314,8 @@ func executor_batchSequentialAppliesBudgetToEveryCall() {
     let second = GatedTool("slow-b", ToolExecutionMode.Sequential, BudgetGate(), 30000)
     reg.register(first)
     reg.register(second)
-    let exec = ToolExecutor(reg, toolTimeout: Some(Duration.millisecond * 300))
+    let exec = ToolExecutor(reg, budget: ToolBudgetPolicy(
+        Some(Duration.millisecond * 300), Some(Duration.millisecond * 300)))
 
     let start = MonoTime.now()
     let results = exec.executeBatch(budgetBatch(["slow-a", "slow-b"]))
@@ -333,7 +337,8 @@ func executor_singleExecuteAppliesBudget() {
     let reg = ToolRegistry()
     let tool = GatedTool("slow", ToolExecutionMode.Sequential, BudgetGate(), 30000)
     reg.register(tool)
-    let exec = ToolExecutor(reg, toolTimeout: Some(Duration.millisecond * 300))
+    let exec = ToolExecutor(reg, budget: ToolBudgetPolicy(
+        Some(Duration.millisecond * 300), Some(Duration.millisecond * 300)))
 
     let result = exec.execute("slow", ToolContext(""), budgetArgs())
     tool.gate.release()
@@ -348,7 +353,8 @@ func executor_batchParallelAppliesBudget() {
     let second = GatedTool("slow-b", ToolExecutionMode.Parallel, BudgetGate(), 30000)
     reg.register(first)
     reg.register(second)
-    let exec = ToolExecutor(reg, toolTimeout: Some(Duration.millisecond * 300))
+    let exec = ToolExecutor(reg, budget: ToolBudgetPolicy(
+        Some(Duration.millisecond * 300), Some(Duration.millisecond * 300)))
 
     let start = MonoTime.now()
     let results = exec.executeBatch(budgetBatch(["slow-a", "slow-b"]))
@@ -370,7 +376,8 @@ func executor_timeoutDoesNotSkipRemainingSequentialTools() {
     let slow = GatedTool("slow", ToolExecutionMode.Sequential, BudgetGate(), 30000)
     reg.register(slow)
     reg.register(ThreadProbeTool("probe", ToolResult("ok", None, false, false)))
-    let exec = ToolExecutor(reg, toolTimeout: Some(Duration.millisecond * 300))
+    let exec = ToolExecutor(reg, budget: ToolBudgetPolicy(
+        Some(Duration.millisecond * 300), Some(Duration.millisecond * 300)))
 
     let results = exec.executeBatch(budgetBatch(["slow", "probe"]))
     slow.gate.release()
@@ -387,7 +394,8 @@ func executor_declaredBudgetOverridesConfigFallback() {
     let reg = ToolRegistry()
     // 工具自己声明 5s，配置只给 300ms：以工具声明为准，慢 1s 的调用应当跑完
     reg.register(SleepingTool(1000, Some(Duration.millisecond * 5000)))
-    let exec = ToolExecutor(reg, toolTimeout: Some(Duration.millisecond * 300))
+    let exec = ToolExecutor(reg, budget: ToolBudgetPolicy(
+        Some(Duration.millisecond * 300), Some(Duration.millisecond * 300)))
 
     let results = exec.executeBatch(budgetBatch(["sleeper"]))
     @Expect(results.size, 1)
@@ -404,4 +412,128 @@ func executor_noBudgetKeepsToolsInline() {
 
     exec.executeBatch(budgetBatch(["probe"]))
     @Expect(probe.threadId, Thread.currentThread.id)
+}
+
+// ── 只读 / 有副作用分流 ────────────────────────────────────────
+
+/** 声明指定模式的阻塞工具（用于分流判定）。 */
+class ModeGatedTool <: Tool {
+    let toolName: String
+    let mode: ToolExecutionMode
+    let gate: BudgetGate
+    let holdMillis: Int64
+
+    init(name: String, mode: ToolExecutionMode, gate: BudgetGate, holdMillis: Int64) {
+        this.toolName = name
+        this.mode = mode
+        this.gate = gate
+        this.holdMillis = holdMillis
+    }
+
+    public func name(): String { this.toolName }
+    public func description(): String { "blocks until released" }
+    public func schema(): JsonValue { JsonValue.Map(HashMap<String, JsonValue>()) }
+    public func execute(ctx: ToolContext, args: JsonValue): ToolResult {
+        this.gate.waitUpTo(this.holdMillis)
+        ToolResult("done", None, false, false)
+    }
+    public func executionMode(): ToolExecutionMode { this.mode }
+}
+
+@Test
+func policy_forToolSplitsByMode() {
+    let ro = Some(Duration.second * 30)
+    let se = Some(Duration.second * 300)
+    let policy = ToolBudgetPolicy(ro, se)
+
+    match (policy.forTool(ModeGatedTool("r", ToolExecutionMode.Parallel, BudgetGate(), 10))) {
+        case Some(v) => @Expect(v.toMilliseconds(), 30000)
+        case None => @Fail("read-only tool should get the read-only budget")
+    }
+    match (policy.forTool(ModeGatedTool("w", ToolExecutionMode.Sequential, BudgetGate(), 10))) {
+        case Some(v) => @Expect(v.toMilliseconds(), 300000)
+        case None => @Fail("side-effecting tool should get the side-effect budget")
+    }
+}
+
+@Test
+func policy_forToolPrefersDeclared() {
+    let declared = SleepingTool(1, Some(Duration.millisecond * 7000))
+    let policy = ToolBudgetPolicy(Some(Duration.second * 1), Some(Duration.second * 2))
+    match (policy.forTool(declared)) {
+        case Some(v) => @Expect(v.toMilliseconds(), 7000)
+        case None => @Fail("declared budget must win")
+    }
+}
+
+@Test
+func policy_widestPicksTheLargerAndTreatsUnboundedAsUnbounded() {
+    match (ToolBudgetPolicy(Some(Duration.second * 30), Some(Duration.second * 300)).widest()) {
+        case Some(v) => @Expect(v.toMilliseconds(), 300000)
+        case None => @Fail("expected 300s")
+    }
+    // 任一类不限时 → 子调用可能无限等，外层也不设限
+    match (ToolBudgetPolicy(Some(Duration.second * 30), None).widest()) {
+        case None => ()
+        case Some(_) => @Fail("unbounded side-effect budget must make widest unbounded")
+    }
+}
+
+@Test
+func executeTool_sequentialTimeoutSaysOutcomeUnknown() {
+    // 写类超时最危险的是模型当成「失败」直接重试 → 一次写入变两次
+    let gate = BudgetGate()
+    let tool = ModeGatedTool("write_file", ToolExecutionMode.Sequential, gate, 30000)
+    let result = executeTool(tool, ToolContext(""), budgetArgs(),
+        Some(Duration.millisecond * 300))
+    gate.release()
+
+    @Expect(result.isError, true)
+    @Assert(result.text.contains("outcome is UNKNOWN"))
+    @Assert(result.text.contains("before retrying"))
+}
+
+@Test
+func executeTool_readOnlyTimeoutDoesNotAskForVerification() {
+    let gate = BudgetGate()
+    let tool = ModeGatedTool("read_file", ToolExecutionMode.Parallel, gate, 30000)
+    let result = executeTool(tool, ToolContext(""), budgetArgs(),
+        Some(Duration.millisecond * 300))
+    gate.release()
+
+    @Expect(result.isError, true)
+    @Assert(result.text.contains("side-effect-free"))
+    @Assert(!result.text.contains("UNKNOWN"))
+}
+
+@Test
+func executor_sequentialToolIsNotCutByTheReadOnlyBudget() {
+    // 只读 300ms、写类不限时：写类慢工具必须跑完（分流生效的直接证据）
+    let reg = ToolRegistry()
+    let slowWrite = ModeGatedTool("write_slow", ToolExecutionMode.Sequential,
+        BudgetGate(), 900)
+    reg.register(slowWrite)
+    let exec = ToolExecutor(reg, budget: ToolBudgetPolicy(
+        Some(Duration.millisecond * 300), None))
+
+    let results = exec.executeBatch(budgetBatch(["write_slow"]))
+    @Expect(results.size, 1)
+    @Expect(results[0].isError, false)
+    @Expect(results[0].text, "done")
+}
+
+@Test
+func executor_readOnlyToolIsCutByTheReadOnlyBudget() {
+    let reg = ToolRegistry()
+    let slowRead = ModeGatedTool("read_slow", ToolExecutionMode.Parallel,
+        BudgetGate(), 30000)
+    reg.register(slowRead)
+    let exec = ToolExecutor(reg, budget: ToolBudgetPolicy(
+        Some(Duration.millisecond * 300), None))
+
+    let results = exec.executeBatch(budgetBatch(["read_slow"]))
+    slowRead.gate.release()
+    @Expect(results.size, 1)
+    @Expect(results[0].isError, true)
+    @Assert(results[0].text.contains("side-effect-free"))
 }

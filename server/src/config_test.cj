@@ -377,6 +377,37 @@ func agentConfigFrom_carriesToolTimeout() {
 }
 
 @Test
+func agentConfigFrom_carriesSideEffectToolTimeout() {
+    let a = TomlAgent()
+    a.sideEffectToolTimeout = 45
+    @Expect(agentConfigFrom(a).sideEffectToolTimeout, UInt32(45))
+}
+
+@Test
+func agentConfigFrom_zeroSideEffectTimeoutMeansUnbounded() {
+    // 0 = 该类不限时，同样是显式选择
+    let a = TomlAgent()
+    a.sideEffectToolTimeout = 0
+    @Expect(agentConfigFrom(a).sideEffectToolTimeout, UInt32(0))
+}
+
+@Test
+func agentConfigFrom_defaultSideEffectTimeoutIsWiderThanReadOnly() {
+    // 有副作用那一类默认宽一个量级：构建/安装这类正常耗时本就长，
+    // 且这一类的超时意味着「结果未知」，代价比读类大
+    let cfg = agentConfigFrom(TomlAgent())
+    @Expect(cfg.toolTimeout, UInt32(30))
+    @Expect(cfg.sideEffectToolTimeout, UInt32(300))
+}
+
+@Test
+func tomlAgent_sideEffectToolTimeoutRoundTrip() {
+    let a = TomlAgent()
+    a.sideEffectToolTimeout = 45
+    @Expect(TomlAgent.deserialize(a.serialize()).sideEffectToolTimeout, Int64(45))
+}
+
+@Test
 func agentConfigFrom_zeroToolTimeoutMeansUnbounded() {
     // 0 = 不限时是使用者的显式选择，不能被「像笔误就回落默认」的规则改掉
     let a = TomlAgent()

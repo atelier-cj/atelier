@@ -894,7 +894,8 @@ public class ChatTui {
             supportsVision: this.agentConfig.supportsVision,
             toolPresentation: this.agentConfig.toolPresentation,
             ptcTimeoutSeconds: this.agentConfig.ptcTimeoutSeconds,
-            ptcMaxSubCalls: this.agentConfig.ptcMaxSubCalls)
+            ptcMaxSubCalls: this.agentConfig.ptcMaxSubCalls,
+            sideEffectToolTimeout: this.agentConfig.sideEffectToolTimeout)
         AgentRuntime(cfg, this.provider, this.toolRegistry, this.sessionStore,
             this.trustManager, this.skillRegistry, this.agentRegistry, this.providerRegistry,
             ArrayList<Hook>(), { q => this.askForApproval(t, q) }, this.mcpManager)

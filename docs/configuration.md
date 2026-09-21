@@ -167,7 +167,8 @@ let config = AgentConfig(
 | `compactionReserveTokens` | `UInt32` | `16384` | 压缩保留缓冲 |
 | `keepRecentTokens` | `UInt32` | `20000` | 保留最近 Token 数 |
 | `maxToolCalls` | `UInt32` | `50` | 单次运行最大工具调用数 |
-| `toolTimeout` | `UInt32` | `30` | 单次工具调用的墙钟预算（秒）；`0` = 不限时，语义见下 |
+| `toolTimeout` | `UInt32` | `30` | **只读**（`Parallel`）工具的单次墙钟预算（秒）；`0` = 不限时 |
+| `sideEffectToolTimeout` | `UInt32` | `300` | **有副作用**（`Sequential`）工具的预算（秒）；`0` = 不限时 |
 | `minToolInterval` | `UInt32` | `0` | 工具调用最小间隔（毫秒） |
 | `toolPresentation` | `ToolPresentationMode` | `Native` | 工具呈现模式：`native` / `ptc` / `both`，见 [tools.md](tools.md) |
 | `ptcTimeoutSeconds` | `UInt32` | `30` | PTC 单次程序的经过时间预算（秒） |
@@ -177,21 +178,42 @@ let config = AgentConfig(
 | `createdAt` | `Int64` | `0` | 创建时间戳 |
 | `updatedAt` | `Int64` | `0` | 更新时间戳 |
 
-### 工具预算（`toolTimeout`）
+### 工具预算（`toolTimeout` / `sideEffectToolTimeout`）
 
 工具是同步接口（`execute` 一直阻塞到返回），内部没有可协作的中断点，因此预算在
-**调用边界**上用「另起线程 + 限时等待」实现。语义：
+**调用边界**上用「另起线程 + 限时等待」实现。核心事实：
 
-- **超时 = 不再等它，不是把它停掉**。调用方立刻拿到一个失败结果
-  （`[tool timeout] '<name>' did not return within 30s; ...`），回合继续，模型能看到
-  失败原因并自行重试或换路；而那次执行**不会停止**——仓颉线程不可抢占，它会在后台
-  跑到自己结束。预算是保护回合前进，不保护副作用（写操作类工具尤其要注意）。
+> **超时 = 不再等它，不是把它停掉。** 仓颉线程不可抢占，被超时的那次执行会在后台
+> 一直跑到自己结束——预算保护回合的前进，不保护副作用。
+
+这条事实决定了两类工具必须分开配额度，因为超时的**含义**不同：
+
+| 类别 | 判定 | 默认 | 超时意味着 | 模型该怎么做 |
+|---|---|---|---|---|
+| 只读 | `ToolExecutionMode.Parallel` | 30s | 白跑一趟 | 重试无害 |
+| 有副作用 | `ToolExecutionMode.Sequential` | 300s | **结果未知**（可能已落盘，也可能什么都没做） | 先核实状态再决定是否重试 |
+
+写类额度宽一个量级：构建、安装、批量写入这类正常耗时本就长，而这一类的「超时」
+代价大得多——模型若当成失败直接重试，一次写入会变成两次。因此超时文本也分两套：
+
+```
+[tool timeout] 'read_file' did not return within 30s; the call was abandoned and may still
+be running in the background (declared side-effect-free).
+
+[tool timeout] 'bash' did not return within 300s. The call was abandoned but may still
+complete in the background, so its outcome is UNKNOWN — verify the resulting state
+(read the file / check the effect) before retrying.
+```
+
+其它语义：
+
 - **超时不是 `terminate`**：同一批次里后面的工具照常执行。
 - 生效范围包括程序化调用（PTC）的**子调用**：否则一个卡住的工具连脚本带回合一起拖死。
-- 工具可以用 `Tool.timeoutBudget()` 声明自己的预算，声明值**优先**于本配置——
-  `run_xisp` 就是这么做的：它在外层按「程序预算 + 一次在途子调用 + 宽限」申请时间，
-  好让脚本先给出自己的失败原因，而不是被外层掐成一句笼统的工具超时。
-- `0` = 不限时（显式选择）。此时卡住的工具会一直占着回合，只剩 Ctrl+C 一条退路。
+- 工具可以用 `Tool.timeoutBudget()` 覆盖本配置，三态：`Default`（用本表）、
+  `Unbounded`（本工具不该有预算，如 `ask_user` 等人回答）、`Limit(d)`（自己的额度）。
+  `run_xisp` 用 `Limit`：外层额度 = 程序预算 + 一次在途子调用 + 5s 宽限，好让脚本
+  先给出自己的失败原因，而不是被外层掐成一句笼统的工具超时。
+- `0` = 该类不限时（显式选择）。此时卡住的同步工具会一直占着回合，只剩 Ctrl+C 一条退路。
 
 ### 默认配置
 

@@ -670,7 +670,25 @@ case Symbol(sym) =>
 | 生效范围 | 直调两条路径（`ToolExecutor.execute` 与 `executeBatch` 的串行/并行分支）+ PTC 子调用（`RunXispHost.dispatch`） |
 | 工具自声明 | `Tool.timeoutBudget()` 默认 `None`（用框架配置）；`run_xisp` 声明「程序预算 + 一次在途子调用 + 5s 宽限」，让脚本先给出自己的失败原因，而不是被外层掐成一句笼统的工具超时 |
 | `0` 的语义 | 不限时（显式选择）；server 侧用 `toolBudgetSeconds()` 收束，0 不被当作笔误回落（区别于 `ptcBudget()`） |
-| 配置暴露 | `~/.atelier.toml` 的 `[[agent]] toolTimeout`（秒），默认 30 |
+| 配置暴露 | `~/.atelier.toml` 的 `[[agent]] toolTimeout`（秒，只读类，默认 30）与 `sideEffectToolTimeout`（秒，有副作用类，默认 300）；`0` = 该类不限时 |
+
+### 12.1 补正：超时必须按「只读 / 有副作用」分流（同日再修）
+
+初版把两类工具一视同仁，留下一个真问题：**被超时的执行不会停止**，于是「超时」
+对写类工具的含义是**结果未知**——模型若当成「失败」直接重试，一次写入会变成两次。
+另有一处直接的功能性缺陷：`ask_user` 是 `Parallel`，30s 的读类预算会套到「等人回答」
+头上（用户想 31 秒，模型收到一句超时）。
+
+补正内容：
+
+| 项 | 结论 |
+| --- | --- |
+| 额度 | 只读 30s / 有副作用 300s（写类宽一个量级：构建、安装这类正常耗时本就长，且这一类的假超时代价大得多） |
+| 超时文本 | 按类分流：读类说明「已放弃、无副作用」；写类明确 **outcome is UNKNOWN**，要求先核实再重试 |
+| 工具声明 | `Tool.timeoutBudget()` 改为三态：`Default`（用框架策略）/ `Unbounded`（不该有预算）/ `Limit(d)`。原先的 `Option<Duration>` 把「没意见」与「不该有预算」混成一个空值 |
+| `ask_user` | 声明 `Unbounded`：人思考多久都不算工具卡死 |
+| `run_xisp` 外层 | 程序预算 + **较宽的那类**子调用 + 宽限；若子调用自己不限时，外层也不设限（用无界的项相加得不到有界的和，硬给一个数只会掐断仍在跑的脚本） |
+| 分类口径 | 沿用 `ToolExecutionMode`（信任闸门同源）。注意 MCP 工具由 `MCPToolWrapper` 默认 `Parallel`——写类 MCP 工具因此既不进信任闸门，也拿读类口径，属独立议题 |
 
 ## 十三、实时进度：脚本日志进事件流 + 两个终端前端消费（原 scope ③）
 

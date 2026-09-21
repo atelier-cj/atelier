@@ -66,15 +66,13 @@ public interface Tool {
     func execute(ctx: ToolContext, args: JsonValue): ToolResult
     func executionMode(): ToolExecutionMode
     /**
-     * 该工具自身的时间预算。
+     * 该工具对自己时间预算的声明。
      *
-     * 默认 `None`：交由框架配置（`AgentConfig.toolTimeout`）决定。
-     * 返回非 `None` 时**优先**于框架配置——工具比框架更清楚自己需要多久，
-     * 典型场景是内部还压着一层自己的预算：那层预算走完才会给出具体失败原因，
-     * 被外层提前掐断只会得到一句笼统的「工具超时」。
+     * 默认 `ToolBudget.Default`：交由框架策略决定。工具比框架更清楚自己需要多久，
+     * 所以有两种更具体的声明方式——见 {@link ToolBudget}（声明额度 / 声明不该有预算）。
      */
-    func timeoutBudget(): Option<Duration> {
-        None
+    func timeoutBudget(): ToolBudget {
+        ToolBudget.Default
     }
 }
 
