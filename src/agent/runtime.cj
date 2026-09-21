@@ -29,6 +29,18 @@ import std.time.MonoTime
 import stdx.log.*
 import opencj::ulid.nextId
 
+/**
+ * 工具预算：配置里 0 表示不限时（见 `AgentConfig.toolTimeout`）。
+ *
+ * 不限时是**显式选择**：那时同步工具会一直占着回合，只留 Ctrl+C 一条退路。
+ */
+func toolBudgetOf(seconds: UInt32): Option<Duration> {
+    if (seconds == 0) {
+        return None
+    }
+    Some(Duration.second * Int64(seconds))
+}
+
 public open class AgentRuntime {
     private let config: AgentConfig
     private let provider: Provider
@@ -74,7 +86,8 @@ public open class AgentRuntime {
         this.skillRegistry = skillRegistry
         this.agentRegistry = agentRegistry
         this.providerRegistry = providerRegistry
-        this.toolExecutor = ToolExecutor(this.toolRegistry)
+        this.toolExecutor = ToolExecutor(this.toolRegistry,
+            toolTimeout: toolBudgetOf(config.toolTimeout))
         this.hooks = hooks
         this.askUser = askUser
         this.modelRegistry = ModelContextRegistry()
@@ -605,7 +618,8 @@ public open class AgentRuntime {
             let env = PtcRunEnv(ctx.workDir, ctx.sessionId,
                 { => cancelFlag.load() }, emit, authorizer,
                 maxSubCalls: Int64(this.config.ptcMaxSubCalls),
-                timeout: Some(Duration.second * Int64(this.config.ptcTimeoutSeconds)))
+                timeout: Some(Duration.second * Int64(this.config.ptcTimeoutSeconds)),
+                toolTimeout: toolBudgetOf(this.config.toolTimeout))
             let tool = RunXispTool(visible, env)
             // 注册进注册表：分发链路按名字查找，因此必须与其它工具同样可见
             this.toolRegistry.register(tool)

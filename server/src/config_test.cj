@@ -330,6 +330,7 @@ func tomlAgent_ptcFieldsRoundTrip() {
     a.toolPresentation = "ptc"
     a.ptcTimeoutSeconds = 45
     a.ptcMaxSubCalls = 12
+    a.toolTimeout = 7
 
     let dm = a.serialize()
     // 往返即可覆盖「serialize 漏字段」：漏了 deserialize 会落回默认值，下面的断言会失败
@@ -337,6 +338,7 @@ func tomlAgent_ptcFieldsRoundTrip() {
     @Expect(back.toolPresentation, "ptc")
     @Expect(back.ptcTimeoutSeconds, Int64(45))
     @Expect(back.ptcMaxSubCalls, Int64(12))
+    @Expect(back.toolTimeout, Int64(7))
 }
 
 @Test
@@ -350,6 +352,7 @@ func tomlAgent_missingPtcFieldsUseDefaults() {
     @Expect(a.toolPresentation, "native")
     @Expect(a.ptcTimeoutSeconds, Int64(30))
     @Expect(a.ptcMaxSubCalls, Int64(64))
+    @Expect(a.toolTimeout, Int64(30))
 }
 
 @Test
@@ -364,6 +367,28 @@ func agentConfigFrom_carriesPtcFields() {
     @Expect(cfg.toolPresentation.toString(), "ptc")
     @Expect(cfg.ptcTimeoutSeconds, UInt32(45))
     @Expect(cfg.ptcMaxSubCalls, UInt32(12))
+}
+
+@Test
+func agentConfigFrom_carriesToolTimeout() {
+    let a = TomlAgent()
+    a.toolTimeout = 7
+    @Expect(agentConfigFrom(a).toolTimeout, UInt32(7))
+}
+
+@Test
+func agentConfigFrom_zeroToolTimeoutMeansUnbounded() {
+    // 0 = 不限时是使用者的显式选择，不能被「像笔误就回落默认」的规则改掉
+    let a = TomlAgent()
+    a.toolTimeout = 0
+    @Expect(agentConfigFrom(a).toolTimeout, UInt32(0))
+}
+
+@Test
+func agentConfigFrom_negativeToolTimeoutFallsBack() {
+    let a = TomlAgent()
+    a.toolTimeout = -5
+    @Expect(agentConfigFrom(a).toolTimeout, UInt32(30))
 }
 
 @Test

@@ -65,6 +65,17 @@ public interface Tool {
     func schema(): JsonValue
     func execute(ctx: ToolContext, args: JsonValue): ToolResult
     func executionMode(): ToolExecutionMode
+    /**
+     * 该工具自身的时间预算。
+     *
+     * 默认 `None`：交由框架配置（`AgentConfig.toolTimeout`）决定。
+     * 返回非 `None` 时**优先**于框架配置——工具比框架更清楚自己需要多久，
+     * 典型场景是内部还压着一层自己的预算：那层预算走完才会给出具体失败原因，
+     * 被外层提前掐断只会得到一句笼统的「工具超时」。
+     */
+    func timeoutBudget(): Option<Duration> {
+        None
+    }
 }
 
 /**

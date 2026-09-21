@@ -1,6 +1,8 @@
 package atelier.agent
 
 import std.collection.*
+import std.sync.*
+import std.time.*
 import jsonvalue.*
 import atelier.message.*
 import atelier.provider.*
@@ -27,13 +29,15 @@ class CaptureRequestHook <: Hook {
     }
 }
 
-func ptcRuntimeConfig(mode: ToolPresentationMode): AgentConfig {
+func ptcRuntimeConfig(mode: ToolPresentationMode,
+    toolTimeoutSeconds!: UInt32 = UInt32(30),
+    toolPattern!: String = "read_*"): AgentConfig {
     let tools = ArrayList<String>()
-    tools.add("read_*")
+    tools.add(toolPattern)
     let skills = ArrayList<String>()
     AgentConfig("ptc-agent", None, "", None, "m", None, tools, skills, 3,
         UInt32(5), Float32(0.7), UInt32(4096), None,
-        false, UInt32(16384), UInt32(20000), None, UInt32(50), UInt32(30), UInt32(0),
+        false, UInt32(16384), UInt32(20000), None, UInt32(50), toolTimeoutSeconds, UInt32(0),
         ArrayList<String>(), None, Int64(0), Int64(0),
         toolPresentation: mode)
 }
@@ -223,21 +227,28 @@ func textOfContent(list: ContentList): String {
 
 func runProgramThroughLoop(program: String): (RecordingTool, ArrayList<Message>) {
     let recorder = RecordingTool("read_file")
+    let messages = runProgramWithTool(recorder, program,
+        ptcRuntimeConfig(ToolPresentationMode.Ptc))
+    (recorder, messages)
+}
+
+/** 跑一轮完整回合：首个请求调用 `run_xisp`，可见工具由调用方决定。 */
+func runProgramWithTool(tool: Tool, program: String, config: AgentConfig): ArrayList<Message> {
     let toolReg = ToolRegistry()
-    toolReg.register(recorder)
+    toolReg.register(tool)
 
     let provider = ProgramProvider(program)
     let providerReg = ProviderRegistry()
     providerReg.register("default", provider)
 
     // run_xisp 是 Sequential：workDir 未信任时走交互审批，这里一律放行
-    let runtime = AgentRuntime(ptcRuntimeConfig(ToolPresentationMode.Ptc), provider,
+    let runtime = AgentRuntime(config, provider,
         toolReg, MemorySessionStore(), TrustManager(), SkillRegistry(), AgentRegistry(),
         providerReg, ArrayList<Hook>(), { q => "y" }, McpManager())
 
     let msgs = ArrayList<Message>()
     msgs.add(UserMessage(ContentList.ofText("go"), 0))
-    (recorder, runtime.chat(msgs).result())
+    runtime.chat(msgs).result()
 }
 
 @Test
@@ -299,4 +310,157 @@ func runtime_ptcEndToEndLogsReachModel() {
     // 日志与完成值都要回到模型：前者是过程，后者是结果
     @Assert(text.contains("progress-line"))
     @Assert(text.contains("final-value"))
+}
+
+/** 阻塞到闸门放行（或上限）的工具：模拟卡死的 MCP / 网络工具。 */
+class HangingTool <: Tool {
+    private let toolName: String
+    private let gate: AtomicBool
+
+    public init(name: String, gate: AtomicBool) {
+        this.toolName = name
+        this.gate = gate
+    }
+
+    public func name(): String { this.toolName }
+    public func description(): String { "blocks until released" }
+
+    public func schema(): JsonValue {
+        JsonValue.Map(HashMap<String, JsonValue>())
+    }
+
+    public func execute(ctx: ToolContext, args: JsonValue): ToolResult {
+        var waited: Int64 = 0
+        while (waited < 30000 && !this.gate.load()) {
+            sleep(Duration.millisecond * 10)
+            waited += 10
+        }
+        ToolResult("never-blocked", None, false, false)
+    }
+
+    public func executionMode(): ToolExecutionMode { ToolExecutionMode.Parallel }
+}
+
+@Test
+func runtime_stuckToolDoesNotHangTheTurn() {
+    // 端到端：卡住的可见工具经过「run_xisp → 子调用预算」后，回合必须照样收场，
+    // 而且模型看到的失败要带原因——这正是「一个工具卡住 = 整个回合没有反馈」的反例
+    let gate = AtomicBool(false)
+    let hanging = HangingTool("hanging", gate)
+    let config = ptcRuntimeConfig(ToolPresentationMode.Ptc,
+        toolTimeoutSeconds: UInt32(1), toolPattern: "hanging")
+
+    let start = MonoTime.now()
+    let messages = runProgramWithTool(hanging, "(tools::hanging {})", config)
+    let elapsed = (MonoTime.now() - start).toMilliseconds()
+    gate.store(true)
+
+    // 工具自身上限 30s：回合在预算（1s）内收场即证明没有等它
+    if (elapsed >= 20000) {
+        @Fail("turn should not wait for a stuck tool, waited ${elapsed}ms")
+    }
+    var sawResult = false
+    for (m in messages) {
+        match (m) {
+            case tr: ToolResultMessage =>
+                if (tr.toolName == "run_xisp") {
+                    sawResult = true
+                    @Assert(tr.isError)
+                    @Assert(textOfContent(tr.content).contains("[tool timeout]"))
+                }
+            case _ => ()
+        }
+    }
+    @Assert(sawResult)
+}
+
+@Test
+func toolBudgetOf_zeroDisablesTheTimeout() {
+    match (toolBudgetOf(UInt32(0))) {
+        case None => ()
+        case Some(_) => @Fail("0 must mean unbounded")
+    }
+}
+
+@Test
+func toolBudgetOf_secondsBecomeDuration() {
+    match (toolBudgetOf(UInt32(30))) {
+        case Some(value) => @Expect(value.toMilliseconds(), 30000)
+        case None => @Fail("expected a 30s budget")
+    }
+}
+
+@Test
+func runtime_nativeToolCallIsAlsoBounded() {
+    // 直调路径（非 PTC）同样受预算约束：并行批处理里卡住的工具不能拖死回合
+    let gate = AtomicBool(false)
+    let hanging = HangingTool("hanging", gate)
+    let toolReg = ToolRegistry()
+    toolReg.register(hanging)
+
+    let provider = DirectCallProvider("hanging")
+    let providerReg = ProviderRegistry()
+    providerReg.register("default", provider)
+
+    let runtime = AgentRuntime(ptcRuntimeConfig(ToolPresentationMode.Native,
+        toolTimeoutSeconds: UInt32(1), toolPattern: "hanging"), provider,
+        toolReg, MemorySessionStore(), TrustManager(), SkillRegistry(), AgentRegistry(),
+        providerReg, ArrayList<Hook>(), { q => "y" }, McpManager())
+
+    let msgs = ArrayList<Message>()
+    msgs.add(UserMessage(ContentList.ofText("go"), 0))
+    let start = MonoTime.now()
+    let result = runtime.chat(msgs).result()
+    let elapsed = (MonoTime.now() - start).toMilliseconds()
+    gate.store(true)
+
+    if (elapsed >= 20000) {
+        @Fail("turn should not wait for a stuck tool, waited ${elapsed}ms")
+    }
+    var sawResult = false
+    for (m in result) {
+        match (m) {
+            case tr: ToolResultMessage =>
+                if (tr.toolName == "hanging") {
+                    sawResult = true
+                    @Assert(tr.isError)
+                    @Assert(textOfContent(tr.content).contains("[tool timeout]"))
+                }
+            case _ => ()
+        }
+    }
+    @Assert(sawResult)
+}
+
+/** 首回合直调指定工具，次回合收尾。 */
+class DirectCallProvider <: Provider {
+    private var calls: Int64 = 0
+    private let toolName: String
+
+    public init(toolName: String) { this.toolName = toolName }
+    public func name(): String { "direct-provider" }
+
+    public func chat(req: ChatRequest): ChatResponse {
+        ChatResponse(AssistantMessage(ContentList.ofText("done"), "", "",
+            StopReason.EndTurn, TokenUsage(0, 0), 0))
+    }
+
+    public func chatStreaming(req: ChatRequest): EventStream<ChatDelta, AssistantMessage> {
+        this.calls = this.calls + 1
+        let stream = EventStream<ChatDelta, AssistantMessage>()
+        if (this.calls == Int64(1)) {
+            let args = HashMap<String, JsonValue>()
+            let blocks = ArrayList<ContentBlock>()
+            blocks.add(ContentBlock.ToolCall(ToolCallBlock("call_1", this.toolName, JsonValue.Map(args))))
+            let msg = AssistantMessage(ContentList(blocks), "", "", StopReason.ToolUse, TokenUsage(0, 0), 0)
+            stream.emit(ChatDelta("", "", Some(msg.stopReason)))
+            stream.setResult(msg)
+        } else {
+            let msg = AssistantMessage(ContentList.ofText("done"), "", "",
+                StopReason.EndTurn, TokenUsage(0, 0), 0)
+            stream.emit(ChatDelta("", "", Some(msg.stopReason)))
+            stream.setResult(msg)
+        }
+        stream
+    }
 }

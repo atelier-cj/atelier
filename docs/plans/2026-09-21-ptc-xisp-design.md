@@ -459,7 +459,7 @@ D1 让呈现模式按部署配置，但**每个使用方都需要一条判据**�
 
 - **不隐式重放**：超时或中断后，程序已提交的副作用一律保留，绝不自动重跑（与参考实现一致）；
 - **取消必须真的停下来**：`run_xisp` 的 `execute` 里把 `cancelFlag` 包成 `cancelled: () -> Bool` 交给 `XispRuntime`，由 §4.2 的检查点消费；不能只依赖 atelier 现有的「回合/工具边界」检查（`src/agent/runtime.cj:113-114` 原文：「正在执行的工具不强制中断」）；
-- `AgentConfig.toolTimeout` 目前是**死字段**（无任何执行路径读取），本设计不复活它；PTC 超时由 `ptcTimeoutSeconds` 独立承担。
+- `AgentConfig.toolTimeout` 当时是**死字段**（无任何执行路径读取），本设计不依赖它；PTC 超时由 `ptcTimeoutSeconds` 独立承担。该字段当日随后被单独复活，见 §十二。
 
 ### 6.1 工具失败会中止程序（实现期确认的语义约束）
 
@@ -593,7 +593,7 @@ case Symbol(sym) =>
 - **不做 REPL 式持久内核**：每次 `run_xisp` 用全新 `Environment`，程序之间不共享状态。理由是会话日志可重建性——跨调用的隐藏状态会让「同一份历史重放得到同一结果」不再成立。
 - **不做 per-tool 呈现分层**（此工具 native、彼工具 ptc-only）：需要每工具元数据与呈现拆分，等有实际使用证据再说。
 - **不做 SDK 标识符改写**：工具名原样作为 `tools::<name>` 的一部分；不做连字符↔下划线别名。
-- **不复活 `AgentConfig.toolTimeout`**：它当前是死字段，是否复活是独立议题。
+- ~~**不复活 `AgentConfig.toolTimeout`**：它当前是死字段，是否复活是独立议题。~~ 当日后续推翻：卡住的工具会连 PTC 程序一起拖死（中断检查只在跑指令时发生），预算必须落在工具调用边界上，见 §十二。
 - **不做子进程执行后端**：留待确有隔离需求时作为第二个后端引入。
 
 ## 附录 A：探针实测记录
@@ -643,10 +643,31 @@ case Symbol(sym) =>
 | 工具分发与策略链 | `src/agent/runtime.cj:287-391` |
 | `resolveTools()` | `src/agent/runtime.cj:513-549` |
 | 取消检查点（仅边界） | `src/agent/runtime.cj:176/213/247/397`，注释 `:113-114` |
-| `toolTimeout` 死字段 | `src/agent/config.cj:26`（无执行路径读取） |
+| `toolTimeout` | 原为死字段，现已由 `src/tool/invoke.cj` 消费（见 §十二） |
 | 提示段扩展点（**不用于 SDK 段**，见 D10） | `src/context/system_prompt_builder.cj:12-14`；`SessionEnvironment` 定义 `src/session/session.cj:7-18` |
 | 工具可见性覆盖接缝 | `src/agent/session_loop.cj:68-77`（`toolRegOverride!`） |
 | 未 emit 的进度事件 | `src/agent/event.cj:62-66` |
 | 组合根注册 | `cli/src/app/main.cj:226-235` |
 | MCP 工具 schema 原样透传（`$ref`/`$defs` 会丢失） | `src/tool/mcp_tool.cj:27-38` |
 | 依赖位置 | `cli/cjpm.toml:16`（`ystyle::xisp 0.4.0`）；根 `cjpm.toml` 尚无 |
+
+## 十二、工具预算：复活 `toolTimeout`（同日补做）
+
+§六 与 §十一 记的「`toolTimeout` 是死字段、本设计不复活」在同日后续被推翻。
+
+起因是一次真实故障：问一句「当前目录下有什么」，160 秒没有任何任务反馈。查下来是两层
+问题叠加——一层是 TUI 的审批提示既看不见也答不了（已单独修复），另一层是**框架层没有
+任何工具执行超时**：工具是同步接口，一旦阻塞就停在原生调用里，回合、PTC 程序、连同 PTC
+自己的超时检查（只在跑指令时轮询）全部停在原地。
+
+于是预算落在**工具调用边界**上（`src/tool/invoke.cj`）：
+
+| 决策 | 内容 |
+| --- | --- |
+| 实现方式 | `spawn` + `Future.get(budget)`；超时后调用方立即拿回失败结果，被超时的那次执行不可抢占，继续在后台跑到自己结束（预算是「不再等它」，不是「把它停掉」） |
+| 判定精度 | 用 `tryGet()` 区分「真的等满了」与「工具自己抛了 `TimeoutException`」；后者原样冒泡，不伪装成框架超时 |
+| 失败形态 | `[tool timeout] '<name>' did not return within 30s; ...`，`isError = true`、`terminate = false`（同批后续工具照常执行） |
+| 生效范围 | 直调两条路径（`ToolExecutor.execute` 与 `executeBatch` 的串行/并行分支）+ PTC 子调用（`RunXispHost.dispatch`） |
+| 工具自声明 | `Tool.timeoutBudget()` 默认 `None`（用框架配置）；`run_xisp` 声明「程序预算 + 一次在途子调用 + 5s 宽限」，让脚本先给出自己的失败原因，而不是被外层掐成一句笼统的工具超时 |
+| `0` 的语义 | 不限时（显式选择）；server 侧用 `toolBudgetSeconds()` 收束，0 不被当作笔误回落（区别于 `ptcBudget()`） |
+| 配置暴露 | `~/.atelier.toml` 的 `[[agent]] toolTimeout`（秒），默认 30 |
