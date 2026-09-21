@@ -10,15 +10,15 @@ authors = ["ystyle"]
 repository = "https://atomgit.com/ystyle/atelier"
 
 [dependencies]
-"mcp" = "2.3.13"
+"mcp" = "2.3.14"
 "sonyflake" = "1.0.9"
 "jsonvalue" = "1.1.0"
 "mustache" = "1.2.1"
-"ystyle::jsonrpc" = "0.7.6"
+"ystyle::jsonrpc" = "0.7.7"
 "bstorm" = "1.4.7"
 "opencj::ulid" = "0.1.2"
 "llm_api" = "1.2.1"
-"acp" = "0.2.4"
+"acp" = "0.2.5"
 # PTC 程序执行引擎。暂用本地 path（xisp 侧的中断检查点与纯函数子集尚未发版）；
 # 发版后改回版本号依赖。
 "ystyle::xisp" = { path = "../xisp" }
