@@ -99,7 +99,7 @@ public struct PtcRunRequest {
  * 各类别互不蕴含：超时不等于异常，取消不等于超时，语法错误也不等于运行时错误。
  * 与「程序正常返回 nil」严格可区分——后者是 `value = None, error = None`。
  */
-public enum PtcFailureKind {
+public enum PtcFailureKind <: ToString {
     /** 脚本运行时错误（含 eval 产生的 Error 值）。 */
     | Exception
     /** 解析失败：输入不完整或存在语法错误。 */
@@ -110,6 +110,17 @@ public enum PtcFailureKind {
     | Cancelled
     /** 日志或完成值超出上限。 */
     | OutputLimit
+
+    /** 稳定的短标识，用于日志与事件（不是给模型看的 prose）。 */
+    public func toString(): String {
+        match (this) {
+            case Exception => "exception"
+            case SyntaxError => "syntax_error"
+            case Timeout => "timeout"
+            case Cancelled => "cancelled"
+            case OutputLimit => "output_limit"
+        }
+    }
 }
 
 /**
