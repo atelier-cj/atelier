@@ -216,14 +216,19 @@ public enum PtcEvent <: ToString {
     | DispatchStart(String, String)
     /** 子调用结束：callId、工具名、结果文本、是否失败。 */
     | DispatchEnd(String, String, String, Bool)
-    /** 脚本输出片段（实时，与最终 logs 内容一致）。 */
-    | Log(String)
+    /**
+     * 脚本输出片段（实时，与最终 logs 内容一致）。
+     *
+     * 带的是**运行级**标识（`run_xisp#N`）而不是子调用 id：求值器与子调用同线程，
+     * 脚本代码只在两次子调用之间执行，一条日志本就不归属于某一次子调用。
+     */
+    | Log(String, String)
 
     public func toString(): String {
         match (this) {
             case DispatchStart(callId, name) => "dispatch_start(${callId}, ${name})"
             case DispatchEnd(callId, name, _, isError) => "dispatch_end(${callId}, ${name}, error=${isError})"
-            case Log(text) => "log(${text})"
+            case Log(callId, text) => "log(${callId}, ${text})"
         }
     }
 }

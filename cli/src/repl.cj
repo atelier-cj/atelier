@@ -4,6 +4,7 @@ import std.env.*
 import std.collection.*
 import std.fs.*
 import std.io.InputStream
+import std.time.MonoTime
 import stdx.log.*
 import atelier.agent.*
 import atelier.message.*
@@ -201,6 +202,10 @@ public class REPL {
         let runtime = this.makeRuntime()
         this.messages.add(UserMessage(ContentList.ofText(line), 0))
         let stream = runtime.chatWithSessionId(this.sessionId, this.messages, SessionEnvironment())
+
+        // 事件流消费：工具调用与脚本输出的实时进度。不消费就只剩等待——
+        // 长脚本 / 卡住的工具在终端上没有任何区别（都是"什么都没发生"）。
+        pumpProgress(stream, { line => println(line) })
 
         let allMsgs = try {
             stream.result()

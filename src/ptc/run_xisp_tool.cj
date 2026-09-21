@@ -115,7 +115,7 @@ public class RunXispTool <: Tool {
 
         let request = PtcRunRequest(code, namespaces, this.env.workDir,
             this.env.cancelled,
-            { text => this.env.emit(PtcEvent.Log(text)) },
+            { text => this.env.emit(PtcEvent.Log(parentCallId, text)) },
             timeout: this.env.timeout,
             maxLogChars: this.env.maxLogChars)
         let result = this.runtime.run(request)
