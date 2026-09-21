@@ -15,6 +15,23 @@ import ystyle::xisp.terminal.*
 
 func plainMsg(text: String): Message { UserMessage(ContentList.ofText(text), 0) }
 
+/** 等待后台回合收尾（submit 是异步的：回合跑在后台线程，主线程要继续读键盘
+ *  才能回答信任闸门的询问）。分步断言必须显式等待，不能一次把按键全喂进去。 */
+func waitTurn(tui: ChatTui): Unit {
+    var guard = 0
+    while (tui.busy.load() && guard < 500) {
+        sleep(Duration.millisecond * 10)
+        guard = guard + 1
+    }
+}
+
+/** 走一次完整的提交（填输入 → 提交 → 等回合结束）。 */
+func submitText(tui: ChatTui, t: Terminal, text: String): Unit {
+    tui.input = toRunes(text)
+    tui.submit(t)
+    waitTurn(tui)
+}
+
 func asstMsg(text: String): Message {
     AssistantMessage(ContentList.ofText(text), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0)
 }
@@ -405,17 +422,12 @@ func chatTui_switchAgentStartsNewSession() {
         ToolRegistry(), store, trustMgr, SkillRegistry(), agentReg, ProviderRegistry(),
         "sess_test_agent", McpManager(), "/tmp/atelier-tui-test")
 
-    // m1 聊天 → 落在 sess_test_agent；/agent a2 切换（新会话）；m2 聊天 → 新会话
-    let keys = textKeys("m1")
-    keys.add(KeyEvent(KeyCode.Enter, KeyModifiers()))
-    let agentCmd = textKeys("/agent a2")
-    for (k in agentCmd) { keys.add(k) }
-    keys.add(KeyEvent(KeyCode.Enter, KeyModifiers()))
-    let m2 = textKeys("m2")
-    for (k in m2) { keys.add(k) }
-    keys.add(KeyEvent(KeyCode.Enter, KeyModifiers()))
-    keys.add(KeyEvent(KeyCode.Esc, KeyModifiers()))
-    tui.runWith(FakeTerminal(keys))
+    // m1 聊天 → 落在 sess_test_agent；/agent a2 切换（新会话）；m2 聊天 → 新会话。
+    // 分步驱动：一次性喂按键会让 /agent 与上一轮回合并发。
+    let fake = FakeTerminal(ArrayList<KeyEvent>())
+    submitText(tui, fake, "m1")
+    tui.runCommand("/agent a2")
+    submitText(tui, fake, "m2")
 
     // 原会话只有 m1 + ok1（切换后的聊天去了新会话）
     let a = store.load("sess_test_agent")
@@ -511,17 +523,11 @@ func chatTui_newAliasStartsNewSession() {
         ToolRegistry(), store, trustMgr, SkillRegistry(), AgentRegistry(), ProviderRegistry(),
         "sess_test_new", McpManager(), "/tmp/atelier-tui-test")
 
-    // m1 聊天 → sess_test_new；/new 开新会话；m2 聊天 → 新会话
-    let keys = textKeys("m1")
-    keys.add(KeyEvent(KeyCode.Enter, KeyModifiers()))
-    let cmd = textKeys("/new")
-    for (k in cmd) { keys.add(k) }
-    keys.add(KeyEvent(KeyCode.Enter, KeyModifiers()))
-    let m2 = textKeys("m2")
-    for (k in m2) { keys.add(k) }
-    keys.add(KeyEvent(KeyCode.Enter, KeyModifiers()))
-    keys.add(KeyEvent(KeyCode.Esc, KeyModifiers()))
-    tui.runWith(FakeTerminal(keys))
+    // m1 聊天 → sess_test_new；/new 开新会话；m2 聊天 → 新会话。分步驱动，同上。
+    let fake = FakeTerminal(ArrayList<KeyEvent>())
+    submitText(tui, fake, "m1")
+    tui.runCommand("/new")
+    submitText(tui, fake, "m2")
 
     // 原会话只有 m1 + ok1（/new 后的聊天去了新会话）
     let a = store.load("sess_test_new")
@@ -807,4 +813,38 @@ func decorateMessageLines_runXispResultIsMultiLine() {
     let lines = decorateMessageLines(tr, 80)
     @Assert(lines.size >= 3)
     @Assert(lines[0].contains("tool← run_xisp"))
+}
+
+// ═══════ 信任闸门询问：必须能被主线程回答 ═══════════════════════════
+// 此前运行线程自己 readLine，与主线程的 readKey 抢同一个 stdin，提示又被重绘覆盖——
+// 表现为「跑了几分钟没有任何反馈」，实际是在等一个用户看不到的询问。
+
+@Test
+func approvalRequest_waitsUntilResolved() {
+    let request = ApprovalRequest("Tool 'glob' needs your approval.")
+    // 主线程在稍后回填；运行线程在此之前必须阻塞而不是拿到空答案
+    spawn {
+        sleep(Duration.millisecond * 120)
+        request.resolve("y")
+    }
+    @Expect(request.waitAnswer(), "y")
+}
+
+@Test
+func approvalRequest_firstAnswerWins() {
+    let request = ApprovalRequest("q")
+    request.resolve("y")
+    request.resolve("n")            // 重复回填不得覆盖
+    @Expect(request.waitAnswer(), "y")
+}
+
+@Test
+func approvalStatusText_keepsFirstLineAndStatesOptions() {
+    let q = "Tool 'glob' needs your approval.\n  y  — allow this once (session only)\n  a  — always allow this directory\n  n  — deny"
+    let text = approvalStatusText(q)
+    // 状态行只有一行：保留询问对象，选项自述，多行细节不进状态行
+    @Assert(text.contains("glob"))
+    @Assert(text.contains("y=本次"))
+    @Assert(!text.contains("session only"))
+    @Assert(!text.contains("\n"))
 }
