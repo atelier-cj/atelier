@@ -696,8 +696,11 @@ public open class AgentRuntime {
                 this.emit(stream, ToolExecutionStartEvent(callId, name))
             case PtcEvent.DispatchEnd(callId, _, text, isError) =>
                 this.emit(stream, ToolExecutionEndEvent(callId, text, isError))
-            // 脚本输出随最终结果一起返回，不额外占用事件流
-            case PtcEvent.Log(_) => ()
+            // 脚本输出必须实时发出去：它是长脚本唯一的进度信号。只随最终结果返回的话，
+            // 前端在整个脚本跑完前只能显示读秒——用户看到的就是「卡住了」
+            // （写操作类工具还可能在超时后于后台继续跑，更需要这条线索）。
+            case PtcEvent.Log(callId, text) =>
+                this.emit(stream, ToolExecutionUpdateEvent(callId, text))
         }
     }
 

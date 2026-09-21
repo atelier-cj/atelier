@@ -153,6 +153,8 @@ main(): Int64 {
             let msgs = ArrayList<Message>()
             msgs.add(UserMessage(ContentList.ofText(prompt), 0))
             let stream = runtime.chat(msgs)
+            // 进度走 stderr：stdout 只留答案（一次性运行常被管道/脚本消费）
+            pumpProgress(stream, { line => eprintln(line) })
             let result = stream.result()
             let last = lastTextFrom(result)
             println(last)

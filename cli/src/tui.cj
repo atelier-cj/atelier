@@ -5,6 +5,7 @@ import cjterm_stream.*
 import opencj::ulid.nextId
 import std.core.Duration
 import std.core.sleep
+import std.time.MonoTime
 import std.sync.*
 import std.env.*
 import std.collection.*
@@ -493,6 +494,8 @@ public class ChatTui {
     private let approvalLock = Mutex()
     /** 回合是否在后台线程里进行中（防止并发提交写同一份历史）。 */
     let busy = AtomicBool(false)
+    /** 本回合的实时活动（工具/子调用/脚本输出），只在回合进行中显示。 */
+    private let activity = TurnActivity()
 
     public init(agentName: String, registry: SlashCommandRegistry, agentConfig: AgentConfig,
         provider: Provider, toolRegistry: ToolRegistry, sessionStore: SessionStore,
@@ -677,8 +680,16 @@ public class ChatTui {
         this.out.flush()
     }
 
-    private func messageLines(c: Int64): ArrayList<String> {
-        conversationLines(this.messages, c)
+    // 消息区 = 会话尾部 + （回合进行中时）活动块。活动块跟着尾部滚动，
+    // 回合结束即消失：那时会话区已经有 tool→/tool← 的完整记录。
+    func messageLines(c: Int64): ArrayList<String> {
+        let lines = conversationLines(this.messages, c)
+        if (this.busy.load()) {
+            for (line in this.activity.snapshotLines(MonoTime.now(), c)) {
+                lines.add(line)
+            }
+        }
+        lines
     }
 
     // ── 按键 ──────────────────────────────────────────────
@@ -793,10 +804,20 @@ public class ChatTui {
             let runtime = this.makeRuntime(t)
             let stream = runtime.chatWithSessionId(sessionId, oldMsgs, SessionEnvironment())
             var waited: Int64 = 0
+            var lastPaint = MonoTime.now()
             var done = false
             while (!done) {
                 match (stream.receive(500 * Duration.millisecond)) {
-                    case Some(_) => ()
+                    case Some(e) =>
+                        // 事件流是唯一的实时进度来源：工具开始/结束、PTC 子调用、脚本
+                        // println 都在这里。只把它当"有动静"的滴答用，界面上就只剩读秒——
+                        // 「工具卡住」与「模型在思考」长得一模一样。
+                        this.activity.onEvent(e, MonoTime.now())
+                        // 事件可能很密（脚本一次打印很多行）：按 60ms 合帧，避免刷屏
+                        if ((MonoTime.now() - lastPaint).toMilliseconds() >= 60) {
+                            lastPaint = MonoTime.now()
+                            this.render(t)
+                        }
                     case None =>
                         if (stream.isClosed()) {
                             done = true
@@ -810,6 +831,8 @@ public class ChatTui {
                         }
                 }
             }
+            // 收尾即清空活动块：随后这一次重绘要给的是完整会话
+            this.activity.clear()
             let allMsgs = try {
                 stream.result()
             } catch (e: Exception) {

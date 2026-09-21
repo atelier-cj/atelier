@@ -218,7 +218,7 @@ func runXisp_dispatchesVisibleTools() {
                 ends = ends + 1
                 @Assert(callId == "run_xisp#1:ptc:1")
                 @Assert(!isError)
-            case PtcEvent.Log(_) => ()
+            case PtcEvent.Log(_, _) => ()
         }
     }
     @Assert(starts == 1)
@@ -273,7 +273,9 @@ func runXisp_logsAreStreamedThroughEvents() {
     var sawLog = false
     for (e in events) {
         match (e) {
-            case PtcEvent.Log(text) =>
+            // 日志带运行级标识：不归属某一次子调用（脚本代码只在两次子调用之间跑）
+            case PtcEvent.Log(callId, text) =>
+                @Assert(callId == "run_xisp#1")
                 if (text.contains("streamed")) {
                     sawLog = true
                 }

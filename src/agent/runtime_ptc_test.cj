@@ -464,3 +464,64 @@ class DirectCallProvider <: Provider {
         stream
     }
 }
+
+/** 跑一轮并**收集事件**（`runProgramWithTool` 把事件流丢掉了，这里要看的就是事件）。 */
+func runProgramCollectingEvents(program: String): ArrayList<AgentEvent> {
+    let recorder = RecordingTool("read_file")
+    let toolReg = ToolRegistry()
+    toolReg.register(recorder)
+
+    let provider = ProgramProvider(program)
+    let providerReg = ProviderRegistry()
+    providerReg.register("default", provider)
+
+    let runtime = AgentRuntime(ptcRuntimeConfig(ToolPresentationMode.Ptc), provider,
+        toolReg, MemorySessionStore(), TrustManager(), SkillRegistry(), AgentRegistry(),
+        providerReg, ArrayList<Hook>(), { q => "y" }, McpManager())
+
+    let msgs = ArrayList<Message>()
+    msgs.add(UserMessage(ContentList.ofText("go"), 0))
+    let stream = runtime.chat(msgs)
+    let events = ArrayList<AgentEvent>()
+    var done = false
+    while (!done) {
+        match (stream.receive(Duration.second)) {
+            case Some(e) => events.add(e)
+            case None =>
+                if (stream.isClosed()) {
+                    done = true
+                }
+        }
+    }
+    let _ = stream.result()
+    events
+}
+
+@Test
+func runtime_ptcLogsReachTheEventStream() {
+    // 脚本的 println 必须实时进事件流：不消费事件流的前端在整个脚本跑完前
+    // 只有读秒——「脚本在长循环里」与「工具卡死」在界面上长得一模一样
+    let events = runProgramCollectingEvents("(begin (println \"tick-1\") (println \"tick-2\") 42)")
+
+    let logs = ArrayList<String>()
+    var runIds: ArrayList<String> = ArrayList()
+    for (e in events) {
+        match (e) {
+            case u: ToolExecutionUpdateEvent =>
+                logs.add(u.progress)
+                if (!runIds.contains(u.toolCallId)) {
+                    runIds.add(u.toolCallId)
+                }
+            case _ => ()
+        }
+    }
+    var joined = ""
+    for (line in logs) {
+        joined = joined + line
+    }
+    @Assert(joined.contains("tick-1"))
+    @Assert(joined.contains("tick-2"))
+    // 日志带运行级标识（脚本代码只在两次子调用之间跑，不归属于某一次子调用）
+    @Expect(runIds.size, 1)
+    @Expect(runIds[0], "run_xisp#1")
+}
