@@ -53,8 +53,11 @@ class MockHost <: PtcSubCallHost {
         this.deny = deny
     }
 
-    public func authorize(tool: Tool, args: JsonValue): Option<String> {
-        this.deny
+    public func authorize(tool: Tool, args: JsonValue): PtcAuthDecision {
+        match (this.deny) {
+            case Some(reason) => PtcAuthDecision.Deny(reason)
+            case None => PtcAuthDecision.Allow
+        }
     }
 
     public func dispatch(tool: Tool, args: JsonValue, callId: String): ToolResult {

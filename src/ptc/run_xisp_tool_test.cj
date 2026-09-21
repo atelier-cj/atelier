@@ -21,12 +21,17 @@ class RunXispTestHelpers {
 
     static func makeEnv(
         events: ArrayList<PtcEvent>,
-        authorize: Option<String>,
+        denyReason: Option<String>,
         maxSubCalls!: Int64 = 10,
         timeout!: Option<Duration> = None
     ): PtcRunEnv {
-        let auth: PtcAuthorizer = { _, _ => authorize }
-        PtcRunEnv("", "sess-1", "call-1",
+        let auth: PtcAuthorizer = { _, _ =>
+            match (denyReason) {
+                case Some(reason) => PtcAuthDecision.Deny(reason)
+                case None => PtcAuthDecision.Allow
+            }
+        }
+        PtcRunEnv("", "sess-1",
             { => false },
             { e => events.add(e) },
             auth,
@@ -204,11 +209,11 @@ func runXisp_dispatchesVisibleTools() {
         match (e) {
             case PtcEvent.DispatchStart(callId, name) =>
                 starts = starts + 1
-                @Assert(callId == "call-1:ptc:1")
+                @Assert(callId == "run_xisp#1:ptc:1")
                 @Assert(name == "echo")
             case PtcEvent.DispatchEnd(callId, name, _, isError) =>
                 ends = ends + 1
-                @Assert(callId == "call-1:ptc:1")
+                @Assert(callId == "run_xisp#1:ptc:1")
                 @Assert(!isError)
             case PtcEvent.Log(_) => ()
         }

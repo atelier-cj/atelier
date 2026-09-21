@@ -11,7 +11,7 @@ import atelier.tool.*
  * native schema 与 SDK 声明是同一个可见工具集的两种投影，不是两次独立注册：
  * 切换模式只改变「通告给模型什么」，不改变工具本身的可用性。
  */
-public enum ToolPresentationMode <: ToString {
+public enum ToolPresentationMode <: ToString & Equatable<ToolPresentationMode> {
     /** 默认：工具以 JSON Schema 逐次通告（现网行为）。 */
     | Native
     /** 只通告 run_xisp，工具经 SDK 绑定暴露。 */
@@ -25,6 +25,14 @@ public enum ToolPresentationMode <: ToString {
             case Ptc => "ptc"
             case Both => "both"
         }
+    }
+
+    public operator func ==(right: ToolPresentationMode): Bool {
+        this.toString() == right.toString()
+    }
+
+    public operator func !=(right: ToolPresentationMode): Bool {
+        !(this == right)
     }
 
     /**
@@ -221,9 +229,25 @@ public enum PtcEvent <: ToString {
 }
 
 /**
- * 授权一次子调用：`None` 放行，`Some(reason)` 拒绝。
+ * 子调用的授权结果。
+ *
+ * 与模型直调的 `beforeTool` 钩子语义对齐：除了放行与拒绝，还允许改写参数
+ * （`Modify`）。不支持改写会让 PTC 与 native 模式在同一套钩子下行为分叉。
  */
-public type PtcAuthorizer = (Tool, JsonValue) -> Option<String>
+public enum PtcAuthDecision {
+    /** 放行，按原参数执行。 */
+    | Allow
+    /** 放行，并以给定参数替换原参数。 */
+    | AllowWith(JsonValue)
+    /** 拒绝，理由作为工具错误回给脚本。 */
+    | Deny(String)
+}
+
+/**
+ * 授权一次子调用。实现方应复用与模型直调相同的策略链：
+ * 信任闸门 → 交互审批 → `beforeTool` 钩子。
+ */
+public type PtcAuthorizer = (Tool, JsonValue) -> PtcAuthDecision
 
 /**
  * 一次 `run_xisp` 的执行环境。
@@ -236,8 +260,6 @@ public struct PtcRunEnv {
     public let workDir: String
     /** 所属会话 id。 */
     public let sessionId: String
-    /** 外层调用的 callId；子调用编号以它为前缀。 */
-    public let parentCallId: String
     /** 外层取消检查。 */
     public let cancelled: () -> Bool
     /** 子调用与脚本输出的事件出口。 */
@@ -257,7 +279,6 @@ public struct PtcRunEnv {
     public init(
         workDir: String,
         sessionId: String,
-        parentCallId: String,
         cancelled: () -> Bool,
         emit: (PtcEvent) -> Unit,
         authorize: PtcAuthorizer,
@@ -267,7 +288,6 @@ public struct PtcRunEnv {
     ) {
         this.workDir = workDir
         this.sessionId = sessionId
-        this.parentCallId = parentCallId
         this.cancelled = cancelled
         this.emit = emit
         this.authorize = authorize

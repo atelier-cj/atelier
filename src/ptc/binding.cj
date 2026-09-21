@@ -13,11 +13,9 @@ import atelier.tool.*
  */
 public interface PtcSubCallHost {
     /**
-     * 授权一次子调用。
-     *
-     * @return `None` 放行；`Some(reason)` 拒绝，reason 作为工具错误回给脚本
+     * 授权一次子调用，并给出最终参数（钩子可以改写）。
      */
-    func authorize(tool: Tool, args: JsonValue): Option<String>
+    func authorize(tool: Tool, args: JsonValue): PtcAuthDecision
 
     /**
      * 执行一次子调用，含开始/结束事件与 `afterTool` 钩子。
@@ -64,16 +62,25 @@ public class PtcBindings {
     private static func makeBinding(tool: Tool, host: PtcSubCallHost): PtcBindingFunction {
         { args: JsonValue =>
             match (host.authorize(tool, args)) {
-                case Some(reason) => PtcBindingOutcome.Err(reason)
-                case None =>
-                    let callId = host.nextCallId()
-                    let result = host.dispatch(tool, args, callId)
-                    if (result.isError) {
-                        PtcBindingOutcome.Err(result.text)
-                    } else {
-                        PtcBindingOutcome.Ok(JsonValue.String(result.text))
-                    }
+                case PtcAuthDecision.Deny(reason) => PtcBindingOutcome.Err(reason)
+                case PtcAuthDecision.Allow => dispatchWith(host, tool, args)
+                // 钩子改写的参数同样要落到实际执行上，否则两种呈现下语义不一致
+                case PtcAuthDecision.AllowWith(replaced) => dispatchWith(host, tool, replaced)
             }
+        }
+    }
+
+    private static func dispatchWith(
+        host: PtcSubCallHost,
+        tool: Tool,
+        args: JsonValue
+    ): PtcBindingOutcome {
+        let callId = host.nextCallId()
+        let result = host.dispatch(tool, args, callId)
+        if (result.isError) {
+            PtcBindingOutcome.Err(result.text)
+        } else {
+            PtcBindingOutcome.Ok(JsonValue.String(result.text))
         }
     }
 }

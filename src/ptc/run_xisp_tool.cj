@@ -21,6 +21,13 @@ public class RunXispTool <: Tool {
     /** 本回合的执行环境。 */
     private let env: PtcRunEnv
     private let runtime = XispRuntime()
+    /**
+     * 本实例内的调用序号。
+     *
+     * 子调用编号需要以「哪一次 run_xisp」为前缀，而模型的 callId 只在 execute
+     * 时才知道，因此在此处递增。Sequential 声明保证同一实例不会被并发调用。
+     */
+    private var runSeq: Int64 = 0
 
     private static let CODE_PARAM_DESCRIPTION: String =
         "要执行的 xisp 程序。最后一个表达式的值作为本次调用的返回值；" +
@@ -77,8 +84,10 @@ public class RunXispTool <: Tool {
         }
 
         // 绑定只按「本次可见」注册：不注册再过滤，因为权限检查对特殊形式无效
+        this.runSeq = this.runSeq + 1
+        let parentCallId = "${RunXispTool.TOOL_NAME}#${this.runSeq}"
         let namespaces = ArrayList<PtcBindingNamespace>()
-        namespaces.add(PtcBindings.forTools(this.visibleTools, RunXispHost(this.env, ctx)))
+        namespaces.add(PtcBindings.forTools(this.visibleTools, RunXispHost(this.env, ctx, parentCallId)))
 
         let request = PtcRunRequest(code, namespaces, this.env.workDir,
             this.env.cancelled,
@@ -135,16 +144,18 @@ public class RunXispTool <: Tool {
 class RunXispHost <: PtcSubCallHost {
     private let env: PtcRunEnv
     private let ctx: ToolContext
+    private let parentCallId: String
     private var counter: Int64 = 0
 
-    init(env: PtcRunEnv, ctx: ToolContext) {
+    init(env: PtcRunEnv, ctx: ToolContext, parentCallId: String) {
         this.env = env
         this.ctx = ctx
+        this.parentCallId = parentCallId
     }
 
-    public func authorize(tool: Tool, args: JsonValue): Option<String> {
+    public func authorize(tool: Tool, args: JsonValue): PtcAuthDecision {
         if (this.counter >= this.env.maxSubCalls) {
-            return Some("sub-call budget exhausted (${this.env.maxSubCalls} calls)")
+            return PtcAuthDecision.Deny("sub-call budget exhausted (${this.env.maxSubCalls} calls)")
         }
         this.env.authorize(tool, args)
     }
@@ -163,7 +174,7 @@ class RunXispHost <: PtcSubCallHost {
 
     public func nextCallId(): String {
         this.counter = this.counter + 1
-        "${this.env.parentCallId}:ptc:${this.counter}"
+        "${this.parentCallId}:ptc:${this.counter}"
     }
 }
 
