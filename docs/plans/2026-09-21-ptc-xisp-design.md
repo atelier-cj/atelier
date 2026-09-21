@@ -408,7 +408,7 @@ let binding = { (args: JsonValue): PtcBindingOutcome =>
 }
 ```
 
-子调用 id 用 `<parent-callId>:ptc:<n>`（n 从 1 递增，按提交顺序编号）。前端按该前缀分组即可把子调用折叠进 `run_xisp` 卡片；`ToolExecutionUpdateEvent`（`src/agent/event.cj:62-66`，目前从未 emit）可用于子分发进度。
+子调用 id 用 `<parent-callId>:ptc:<n>`（n 从 1 递增，按提交顺序编号）。前端按该前缀分组即可把子调用折叠进 `run_xisp` 卡片；`ToolExecutionUpdateEvent`（`src/agent/event.cj:62-66`）用于子分发进度与脚本输出，见 §十三。
 
 **上下文延后**：子调用产生的图片等多模态内容不进程序返回值，而是按 DSH 的 `deferContext` 语义挂到外层结果之后。首版可先只支持文本，多模态留 P2。
 
@@ -551,7 +551,7 @@ case Symbol(sym) =>
 
 1. 用 `EchoProvider` 与真实 provider 各跑一条 e2e：模型在一个程序里组合两次 `read_file` + 一次 `grep`；
 2. 前端折叠：子调用事件按 `<parent>:ptc:<n>` 归组（TUI 先做，HTTP 事件已在流里）；
-3. 子分发进度事件（`ToolExecutionUpdateEvent`）；
+3. 子分发进度事件（`ToolExecutionUpdateEvent`）——已做，见 §十三；
 4. 文档补充「什么时候用 Ptc / 什么时候用 Native」。
 
 ## 九、验证方式
@@ -646,7 +646,7 @@ case Symbol(sym) =>
 | `toolTimeout` | 原为死字段，现已由 `src/tool/invoke.cj` 消费（见 §十二） |
 | 提示段扩展点（**不用于 SDK 段**，见 D10） | `src/context/system_prompt_builder.cj:12-14`；`SessionEnvironment` 定义 `src/session/session.cj:7-18` |
 | 工具可见性覆盖接缝 | `src/agent/session_loop.cj:68-77`（`toolRegOverride!`） |
-| 未 emit 的进度事件 | `src/agent/event.cj:62-66` |
+| 进度事件（脚本日志现已 emit） | `src/agent/event.cj:62-66`；emit 点 `src/agent/runtime.cj:emitPtcEvent` |
 | 组合根注册 | `cli/src/app/main.cj:226-235` |
 | MCP 工具 schema 原样透传（`$ref`/`$defs` 会丢失） | `src/tool/mcp_tool.cj:27-38` |
 | 依赖位置 | `cli/cjpm.toml:16`（`ystyle::xisp 0.4.0`）；根 `cjpm.toml` 尚无 |
@@ -671,3 +671,48 @@ case Symbol(sym) =>
 | 工具自声明 | `Tool.timeoutBudget()` 默认 `None`（用框架配置）；`run_xisp` 声明「程序预算 + 一次在途子调用 + 5s 宽限」，让脚本先给出自己的失败原因，而不是被外层掐成一句笼统的工具超时 |
 | `0` 的语义 | 不限时（显式选择）；server 侧用 `toolBudgetSeconds()` 收束，0 不被当作笔误回落（区别于 `ptcBudget()`） |
 | 配置暴露 | `~/.atelier.toml` 的 `[[agent]] toolTimeout`（秒），默认 30 |
+
+## 十三、实时进度：脚本日志进事件流 + 两个终端前端消费（原 scope ③）
+
+M4 的「子分发进度事件」当日随后补齐，覆盖范围比原计划大一点：**脚本输出也进事件流**，
+并且 TUI / REPL / 一次性运行三个前端都开始消费事件。
+
+### 13.1 为什么脚本日志必须进事件流
+
+`println` 是长脚本**唯一**的进度信号。原先 `emitPtcEvent` 把它丢掉（注释写着「随最终
+结果一起返回，不额外占用事件流」），代价是：脚本在长循环里、工具卡死、写操作超时后
+还在后台跑——这三种状态在界面上一模一样，都是一个读秒。用户看到的结论就是「卡住了」。
+
+现在 `PtcEvent.Log` 带**运行级**标识（`run_xisp#N`）并转发成
+`ToolExecutionUpdateEvent`：求值器与子调用同线程，脚本代码只在两次子调用之间执行，
+一条日志本就不归属某一次子调用。ACP 与 HTTP SSE 消费方顺带受益（它们本来就在转发
+该事件），前端不需要新的协议面。
+
+### 13.2 两个前端
+
+| 前端 | 呈现 | 说明 |
+| --- | --- | --- |
+| TUI | 活动块（整帧重绘的**快照**） | 跟在会话尾部滚动，回合结束即消失（那时会话区已有 `tool→/tool←` 完整记录）；事件很密时按 60ms 合帧 |
+| REPL | 只追加的进度行 | `pumpProgress(stream, sink)`；REPL 走 stdout（与对话同流），`cli.app run` 走 stderr（stdout 只留答案） |
+
+共用一份归约（`cli/src/activity.cj` 的 `TurnActivity`）：谁在跑、跑了多久、脚本刚打印
+了什么。日志行数有上限（脚本可能打印几千行），状态自带锁（回合线程写、界面线程读）。
+
+TUI 快照形态（实机，真模型 + PTC 程序）：
+
+```
+· 工具 1 次 · 进行中 1
+  ▶ run_xisp  (0ms)
+· 工具 2 次 · 进行中 1
+  ▶ run_xisp  (96ms)
+  │ "step-1 glob"
+```
+
+### 13.3 已知边界
+
+- 活动块是**回合内**的临时视图：回合结束即消失，历史回看仍靠会话区的 `tool→/tool←`。
+- 事件里的工具**参数**不带（`ToolExecutionStartEvent` 只有 callId 与名字），因此活动块
+  只显示工具名与耗时；参数与结果在回合结束后的工具行里。
+- PTC 子调用在 ACP 客户端表现为「id 为 `run_xisp#N:ptc:M` 的独立工具调用」——首版即如此，
+  不是本次引入的；日志按运行级 id 归属，客户端若只认模型 callId 会看到一条未关联的
+  toolCall 更新。
