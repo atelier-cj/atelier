@@ -482,7 +482,8 @@ public class AcpBridge {
             this.baseConfig.toolTimeout,
             this.baseConfig.minToolInterval,
             this.baseConfig.tags, this.baseConfig.createdBy,
-            this.baseConfig.createdAt, this.baseConfig.updatedAt)
+            this.baseConfig.createdAt, this.baseConfig.updatedAt,
+            sideEffectToolTimeout: this.baseConfig.sideEffectToolTimeout)
     }
 }
 

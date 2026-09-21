@@ -14,18 +14,20 @@ import jsonvalue.*
  * - If any tool returns terminate=true, remaining sequential tools are skipped
  *   (parallel tools already running may still complete).
  *
- * Every call is bounded by [toolTimeout] (0/None = unbounded) unless the tool
- * declares its own budget; see {@link executeTool} for what "timeout" means for
- * a synchronous tool.
+ * Every call is bounded by [budget] (None = unbounded) unless the tool declares
+ * its own; see {@link executeTool} for what "timeout" means for a synchronous
+ * tool, and {@link ToolBudgetPolicy} for why read-only and side-effecting tools
+ * get different budgets.
  */
 public class ToolExecutor {
     let registry: ToolRegistry
-    /** 框架级工具预算；None 或不足 1ms = 不限时。 */
-    let toolTimeout: Option<Duration>
+    /** 框架级工具预算策略（只读/有副作用分开）；两类都为 None = 不限时。 */
+    let budget: ToolBudgetPolicy
 
-    public init(registry: ToolRegistry, toolTimeout!: Option<Duration> = None) {
+    public init(registry: ToolRegistry,
+        budget!: ToolBudgetPolicy = ToolBudgetPolicy(None, None)) {
         this.registry = registry
-        this.toolTimeout = toolTimeout
+        this.budget = budget
     }
 
     /**
@@ -35,7 +37,7 @@ public class ToolExecutor {
         let maybeTool = this.registry.get(name)
         match (maybeTool) {
             case Some(tool) =>
-                return executeTool(tool, ctx, args, toolBudget(tool, this.toolTimeout))
+                return executeTool(tool, ctx, args, this.budget.forTool(tool))
             case None =>
                 return ToolResult("Tool not found: ${name}", None, true, false)
         }
@@ -67,8 +69,7 @@ public class ToolExecutor {
                     match (tool.executionMode()) {
                         case ToolExecutionMode.Sequential =>
                             // Run sequential tool directly
-                            let result = executeTool(tool, ctx, args,
-                                toolBudget(tool, this.toolTimeout))
+                            let result = executeTool(tool, ctx, args, this.budget.forTool(tool))
                             resultMap[i] = result
                             if (result.terminate) {
                                 // Mark remaining as skipped
@@ -112,7 +113,7 @@ public class ToolExecutor {
                                 }
                                 let future = spawn {
                                     let r = executeTool(innerTool, pctx, pargs,
-                                        toolBudget(innerTool, this.toolTimeout))
+                                        this.budget.forTool(innerTool))
                                     (idx, r)
                                 }
                                 futures.add(future)

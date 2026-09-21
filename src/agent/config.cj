@@ -24,7 +24,12 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
     public let keepRecentTokens: UInt32
     public let compaction: Option<CompactionConfig>
     public let maxToolCalls: UInt32
+    // 只读（Parallel）工具的墙钟预算（秒）；0 = 不限时
     public let toolTimeout: UInt32
+    // 有副作用（Sequential）工具的墙钟预算（秒）；0 = 不限时。
+    // 比只读宽：构建/安装这类正常耗时本就长，而这一类的超时意味着「结果未知」
+    // （被超时的执行不会被停掉），代价比读类大得多
+    public let sideEffectToolTimeout: UInt32
     public let minToolInterval: UInt32
     public let tags: ArrayList<String>
     public let createdBy: Option<String>
@@ -55,7 +60,8 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
         supportsVision!: Bool = false,
         toolPresentation!: ToolPresentationMode = ToolPresentationMode.Native,
         ptcTimeoutSeconds!: UInt32 = 30,
-        ptcMaxSubCalls!: UInt32 = 64
+        ptcMaxSubCalls!: UInt32 = 64,
+        sideEffectToolTimeout!: UInt32 = 300
     ) {
         this.name = name; this.description = description
         this.systemPrompt = systemPrompt; this.userPromptTemplate = userPromptTemplate
@@ -69,6 +75,7 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
         this.compaction = compaction
         this.maxToolCalls = maxToolCalls
         this.toolTimeout = toolTimeout
+        this.sideEffectToolTimeout = sideEffectToolTimeout
         this.minToolInterval = minToolInterval
         this.tags = tags
         this.createdBy = createdBy; this.createdAt = createdAt; this.updatedAt = updatedAt
@@ -101,6 +108,7 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
         w.writeName("compaction").writeValue(this.compaction)
         w.writeName("maxToolCalls").writeValue(Int64(this.maxToolCalls))
         w.writeName("toolTimeout").writeValue(Int64(this.toolTimeout))
+        w.writeName("sideEffectToolTimeout").writeValue(Int64(this.sideEffectToolTimeout))
         w.writeName("minToolInterval").writeValue(Int64(this.minToolInterval))
         w.writeName("createdAt").writeValue(this.createdAt)
         w.writeName("updatedAt").writeValue(this.updatedAt)
@@ -133,6 +141,7 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
         var compaction: Option<CompactionConfig> = None
         var maxToolCalls = UInt32(50)
         var toolTimeout = UInt32(30)
+        var sideEffectToolTimeout = UInt32(300)
         var minToolInterval = UInt32(0)
         var tags = ArrayList<String>()
         var createdBy: Option<String> = None; var createdAt = Int64(0); var updatedAt = Int64(0)
@@ -163,6 +172,7 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
                 case "compaction" => compaction = r.readValue<Option<CompactionConfig>>()
                 case "maxToolCalls" => maxToolCalls = UInt32(r.readValue<Int64>())
                 case "toolTimeout" => toolTimeout = UInt32(r.readValue<Int64>())
+                case "sideEffectToolTimeout" => sideEffectToolTimeout = UInt32(r.readValue<Int64>())
                 case "minToolInterval" => minToolInterval = UInt32(r.readValue<Int64>())
                 case "tags" => tags = r.readValue<ArrayList<String>>()
                 case "createdBy" => createdBy = r.readValue<Option<String>>()
@@ -185,7 +195,8 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
             tags, createdBy, createdAt, updatedAt, supportsVision: supportsVision,
             toolPresentation: toolPresentation,
             ptcTimeoutSeconds: ptcTimeoutSeconds,
-            ptcMaxSubCalls: ptcMaxSubCalls)
+            ptcMaxSubCalls: ptcMaxSubCalls,
+            sideEffectToolTimeout: sideEffectToolTimeout)
     }
 
     public func toString(): String {

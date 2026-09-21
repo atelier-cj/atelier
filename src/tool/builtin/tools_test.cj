@@ -243,3 +243,22 @@ func useSkills_noResourcesNoSection() {
     @Expect(r.isError, false)
     @Expect(r.text.contains("资源文件"), false)
 }
+
+@Test
+func askUserTool_declaresUnboundedBudget() {
+    // 本工具的时间花在等人回答上：套上框架预算的后果是「用户想了 31 秒，
+    // 模型却收到一句超时」——人思考多久都不算工具卡死
+    let tool = AskUserTool()
+    match (tool.timeoutBudget()) {
+        case ToolBudget.Unbounded => ()
+        case ToolBudget.Default => @Fail("ask_user must declare Unbounded, not Default")
+        case ToolBudget.Limit(_) => @Fail("ask_user must not declare a limit")
+    }
+    // 而且即使框架两类预算都配了，它也不吃
+    let policy = ToolBudgetPolicy(
+        Some(Duration.second * 30), Some(Duration.second * 300))
+    match (policy.forTool(tool)) {
+        case None => ()
+        case Some(_) => @Fail("read-only/side-effect budgets must not apply to ask_user")
+    }
+}

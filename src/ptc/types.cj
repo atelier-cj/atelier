@@ -279,13 +279,13 @@ public struct PtcRunEnv {
     /** 经过时间预算；None 用配置缺省值。 */
     public let timeout: Option<Duration>
     /**
-     * 单次子调用的时间预算；None 用配置缺省值。
+     * 子调用的时间预算策略（只读/有副作用分开）。
      *
      * 程序整体预算（{@link timeout}）挡不住「子调用卡死」：求值器的中断检查只在
      * 跑指令时发生，而同步工具一旦阻塞就停在原生调用里。子调用必须自带预算，
      * 卡住时把失败交回程序，求值器才能重新拿到控制权。
      */
-    public let toolTimeout: Option<Duration>
+    public let toolBudget: ToolBudgetPolicy
     /** 日志累计上限（字符数）。 */
     public let maxLogChars: Int64
 
@@ -297,7 +297,7 @@ public struct PtcRunEnv {
         authorize: PtcAuthorizer,
         maxSubCalls!: Int64 = 64,
         timeout!: Option<Duration> = None,
-        toolTimeout!: Option<Duration> = None,
+        toolBudget!: ToolBudgetPolicy = ToolBudgetPolicy(None, None),
         maxLogChars!: Int64 = 32768
     ) {
         this.workDir = workDir
@@ -307,7 +307,7 @@ public struct PtcRunEnv {
         this.authorize = authorize
         this.maxSubCalls = maxSubCalls
         this.timeout = timeout
-        this.toolTimeout = toolTimeout
+        this.toolBudget = toolBudget
         this.maxLogChars = maxLogChars
     }
 }

@@ -375,18 +375,33 @@ func runtime_stuckToolDoesNotHangTheTurn() {
 }
 
 @Test
-func toolBudgetOf_zeroDisablesTheTimeout() {
-    match (toolBudgetOf(UInt32(0))) {
+func budgetSeconds_zeroDisablesTheTimeout() {
+    match (budgetSeconds(UInt32(0))) {
         case None => ()
         case Some(_) => @Fail("0 must mean unbounded")
     }
 }
 
 @Test
-func toolBudgetOf_secondsBecomeDuration() {
-    match (toolBudgetOf(UInt32(30))) {
+func budgetSeconds_secondsBecomeDuration() {
+    match (budgetSeconds(UInt32(30))) {
         case Some(value) => @Expect(value.toMilliseconds(), 30000)
         case None => @Fail("expected a 30s budget")
+    }
+}
+
+@Test
+func toolBudgetPolicyOf_splitsReadOnlyAndSideEffecting() {
+    // 只读 30s / 写类 300s：写类宽得多（构建、安装这类正常耗时本就长）
+    let config = ptcRuntimeConfig(ToolPresentationMode.Ptc)
+    let policy = toolBudgetPolicyOf(config)
+    match (policy.readOnly) {
+        case Some(v) => @Expect(v.toMilliseconds(), 30000)
+        case None => @Fail("expected the read-only budget")
+    }
+    match (policy.sideEffecting) {
+        case Some(v) => @Expect(v.toMilliseconds(), 300000)
+        case None => @Fail("expected the side-effect budget")
     }
 }
 
