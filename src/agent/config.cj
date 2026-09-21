@@ -3,6 +3,7 @@ package atelier.agent
 import std.collection.*
 import stdx.encoding.json.stream.*
 import atelier.context.CompactionConfig
+import atelier.ptc.ToolPresentationMode
 
 public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> {
     public let name: String
@@ -31,6 +32,12 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
     public let updatedAt: Int64
     // 模型能力：是否支持图片输入（多模态）。默认 false；发图前据此检查/路由
     public let supportsVision: Bool
+    // 工具呈现模式：native（默认，逐次 JSON Schema）/ ptc（只暴露 run_xisp）/ both
+    public let toolPresentation: ToolPresentationMode
+    // PTC 程序的经过时间预算（秒）
+    public let ptcTimeoutSeconds: UInt32
+    // PTC 单次程序允许的子调用上限
+    public let ptcMaxSubCalls: UInt32
 
     public init(
         name: String, description: Option<String>,
@@ -45,7 +52,10 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
         maxToolCalls: UInt32, toolTimeout: UInt32, minToolInterval: UInt32,
         tags: ArrayList<String>,
         createdBy: Option<String>, createdAt: Int64, updatedAt: Int64,
-        supportsVision!: Bool = false
+        supportsVision!: Bool = false,
+        toolPresentation!: ToolPresentationMode = ToolPresentationMode.Native,
+        ptcTimeoutSeconds!: UInt32 = 30,
+        ptcMaxSubCalls!: UInt32 = 64
     ) {
         this.name = name; this.description = description
         this.systemPrompt = systemPrompt; this.userPromptTemplate = userPromptTemplate
@@ -63,6 +73,9 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
         this.tags = tags
         this.createdBy = createdBy; this.createdAt = createdAt; this.updatedAt = updatedAt
         this.supportsVision = supportsVision
+        this.toolPresentation = toolPresentation
+        this.ptcTimeoutSeconds = ptcTimeoutSeconds
+        this.ptcMaxSubCalls = ptcMaxSubCalls
     }
 
     public static func default(): AgentConfig {
@@ -101,6 +114,9 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
         w.writeName("mcpCooldownTurns").writeValue(this.mcpCooldownTurns)
         w.writeName("tags").writeValue(this.tags)
         w.writeName("supportsVision").writeValue(this.supportsVision)
+        w.writeName("toolPresentation").writeValue(this.toolPresentation.toString())
+        w.writeName("ptcTimeoutSeconds").writeValue(Int64(this.ptcTimeoutSeconds))
+        w.writeName("ptcMaxSubCalls").writeValue(Int64(this.ptcMaxSubCalls))
         w.endObject()
     }
 
@@ -121,6 +137,9 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
         var tags = ArrayList<String>()
         var createdBy: Option<String> = None; var createdAt = Int64(0); var updatedAt = Int64(0)
         var supportsVision = false
+        var toolPresentation = ToolPresentationMode.Native
+        var ptcTimeoutSeconds = UInt32(30)
+        var ptcMaxSubCalls = UInt32(64)
 
         r.startObject()
         while (r.peek() != EndObject) {
@@ -150,6 +169,9 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
                 case "createdAt" => createdAt = r.readValue<Int64>()
                 case "updatedAt" => updatedAt = r.readValue<Int64>()
                 case "supportsVision" => supportsVision = r.readValue<Bool>()
+                case "toolPresentation" => toolPresentation = ToolPresentationMode.fromString(r.readValue<String>())
+                case "ptcTimeoutSeconds" => ptcTimeoutSeconds = UInt32(r.readValue<Int64>())
+                case "ptcMaxSubCalls" => ptcMaxSubCalls = UInt32(r.readValue<Int64>())
                 case _ => r.skip()
             }
         }
@@ -160,7 +182,10 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
             maxTurns, temperature, maxOutputTokens, thinkingLevel,
             compactionEnabled, compactionReserveTokens, keepRecentTokens, compaction,
             maxToolCalls, toolTimeout, minToolInterval,
-            tags, createdBy, createdAt, updatedAt, supportsVision: supportsVision)
+            tags, createdBy, createdAt, updatedAt, supportsVision: supportsVision,
+            toolPresentation: toolPresentation,
+            ptcTimeoutSeconds: ptcTimeoutSeconds,
+            ptcMaxSubCalls: ptcMaxSubCalls)
     }
 
     public func toString(): String {

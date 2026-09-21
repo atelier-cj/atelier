@@ -11,13 +11,35 @@ import atelier.tool.*
  * native schema 与 SDK 声明是同一个可见工具集的两种投影，不是两次独立注册：
  * 切换模式只改变「通告给模型什么」，不改变工具本身的可用性。
  */
-public enum ToolPresentationMode {
+public enum ToolPresentationMode <: ToString {
     /** 默认：工具以 JSON Schema 逐次通告（现网行为）。 */
     | Native
     /** 只通告 run_xisp，工具经 SDK 绑定暴露。 */
     | Ptc
     /** 原生 schema 与 SDK 并存。提示词成本翻倍，仅用于灰度对比。 */
     | Both
+
+    public func toString(): String {
+        match (this) {
+            case Native => "native"
+            case Ptc => "ptc"
+            case Both => "both"
+        }
+    }
+
+    /**
+     * 从配置文本解析；无法识别时回落到 `Native`（现网行为）。
+     *
+     * 不做严格拒绝：配置里的拼写错误应当退化为「保持现状」而不是让整个
+     * Agent 起不来；需要显式发现拼写问题的地方用 `toString()` 回读比对。
+     */
+    public static func fromString(text: String): ToolPresentationMode {
+        match (text) {
+            case "ptc" => Ptc
+            case "both" => Both
+            case _ => Native
+        }
+    }
 }
 
 /**
