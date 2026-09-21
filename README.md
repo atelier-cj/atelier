@@ -62,7 +62,7 @@ cli.app serve 8080
 **CLI** — 交互式或单次运行：
 
 ```bash
-cli.app repl
+cli.app tui
 cli.app run "你好"
 ```
 
@@ -76,8 +76,8 @@ cli.app run "你好"
 export OPENAI_API_KEY="sk-xxx"
 export OPENAI_BASE_URL="https://api.openai.com/v1"
 
-# 交互式 REPL
-./cli/target/release/bin/cli.app repl
+# 交互式 TUI
+./cli/target/release/bin/cli.app tui
 
 # 单次对话
 ./cli/target/release/bin/cli.app run "你好，介绍一下你自己"
@@ -130,7 +130,7 @@ command = "npx @playwright/mcp"
 | [信任闸门](docs/trust.md) | 权限控制 |
 | [Skill](docs/skills.md) | 声明式技能注入 |
 | [HTTP API](docs/http-api.md) | 端点参考 + curl 示例 |
-| [CLI 参考](docs/cli.md) | serve/repl/run/acp |
+| [CLI 参考](docs/cli.md) | serve/tui/run/acp |
 | [ACP 接入](docs/acp.md) | ACP v1 Agent 侧：能力矩阵、接入示例、config options |
 | [架构设计](docs/design.md) | 总体设计文档 |
 

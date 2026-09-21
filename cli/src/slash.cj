@@ -32,7 +32,7 @@ public class SlashCommandRegistry {
             "Session commands: /session (show current), /session new (create new)"
         })
         register("clear", "Clear conversation history", { args => "Conversation cleared" })
-        register("exit", "Exit the REPL", { args => "exit" })
+        register("exit", "Exit the TUI", { args => "exit" })
         register("quit", "Alias for /exit", { args => "exit" })
     }
 
@@ -74,4 +74,27 @@ func subStr3(s: String, start: Int64, end: Int64): String {
     let raw = Array<Byte>(result.size, repeat: 0)
     for (j in 0..result.size) { raw[j] = result[j] }
     String.fromUtf8(raw)
+}
+
+// ── /subagent start 的参数解析（TUI 的 /subagent 命令用；纯函数，便于单测）──
+
+// parts = "/subagent start ..." 切词结果：返回 (isRemote, agentName, prompt)
+// agentName == "" = 缺 agent（调用方打印用法）。prompt 允许空串（由调用方容忍）。
+func parseSubStartArgs(parts: Array<String>): (Bool, String, String) {
+    if (parts.size < 3) { return (false, "", "") }
+    if (parts[2] == "--remote") {
+        if (parts.size < 4) { return (true, "", "") }
+        (true, parts[3], joinWords(parts, 4))
+    } else {
+        (false, parts[2], joinWords(parts, 3))
+    }
+}
+
+func joinWords(parts: Array<String>, from: Int64): String {
+    var out = ""
+    for (i in from..parts.size) {
+        if (out != "") { out = out + " " }
+        out = out + parts[Int64(i)]
+    }
+    out
 }

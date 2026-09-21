@@ -64,7 +64,7 @@ Tool 'bash' needs your approval.
 - `a` → `setTrust(workDir, Trusted)`，永久信任
 - `n` → 拒绝，结果标记为"not allowed"
 
-## REPL 命令
+## 交互命令（TUI）
 
 ```bash
 /trust /home/user/project     # 信任目录

@@ -1,6 +1,7 @@
 package cli
 
 import std.env.*
+import std.fs.*
 import stdx.net.http.*
 import atelier.agent.*
 import atelier.provider.*
@@ -41,4 +42,17 @@ public func parseInt(s: String): Int64 {
         else { break }
     }
     r
+}
+
+/**
+ * 当前可执行文件真实路径：Linux `/proc/self/exe` 符号链接递归解析。
+ *
+ * 解析失败回退 `"atelier.cli"`（依赖 PATH/相对路径）——远程子 Agent 进程由此启动。
+ */
+public func currentExePath(): String {
+    try {
+        let p = SymbolicLink.readFrom(Path("/proc/self/exe"), recursive: true)
+        if (p.toString() != "") { return p.toString() }
+    } catch (_) { () }
+    "atelier.cli"
 }

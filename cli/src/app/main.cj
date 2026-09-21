@@ -107,7 +107,8 @@ main(): Int64 {
                 agentReg, providerRegForCli, sessionStore, mcpMgr, sessionDir,
                 acpSessionDirOverride)
 
-        case "repl" =>
+        // 交互入口只有一个 TUI；"repl" 是历史命令名（早期另有行式 REPL，已移除）
+        case "repl" | "tui" =>
             let agentName = if (args.size > 2) { args[2] } else { "default" }
             let resumeId = if (args.size > 3) { args[3] } else { "" }
             runTui(agentName, resumeId, toolReg, trustMgr, skillReg, agentReg,
@@ -164,10 +165,10 @@ main(): Int64 {
             println("Usage:")
             println("  cli.app serve [port]          Start HTTP server")
             println("  cli.app acp [agent]           Serve as ACP v1 agent over stdio (agent picked at startup)")
-            println("  cli.app repl [agent] [sid]    Start interactive TUI (resume session if sid given)")
+            println("  cli.app tui [agent] [sid]     Start interactive TUI (alias: repl; resume session if sid given)")
             println("  cli.app run [agent] <prompt>  Run single prompt")
             println("")
-            println("REPL slash commands: /help, /trust, /untrust, /session (new/list/switch), /clear, /exit")
+            println("TUI slash commands: /help, /agent, /session, /model, /models, /tools, /subagent, /trust, /untrust, /clear, /exit")
             println("Config: ~/.atelier.toml  — agent, provider, server, mcpServer, logging")
             println("Skills: ~/.agents/skills/<name>/SKILL.md")
             println("Logs:   ~/.atelier/atelier.log (set [logging] level = \"debug\")")
@@ -178,7 +179,7 @@ main(): Int64 {
     0
 }
 
-// 聊天 TUI 装配（与 REPL 同套组件；无子命令与 repl 子命令都走这里）
+// 聊天 TUI 装配（无子命令、tui / repl 子命令都走这里）
 private func runTui(agentName: String, resumeId: String, toolReg: ToolRegistry,
     trustMgr: TrustManager, skillReg: SkillRegistry, agentReg: AgentRegistry,
     providerReg: ProviderRegistry, sessionStore: SessionStore, mcpMgr: McpManager,

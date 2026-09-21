@@ -486,8 +486,8 @@ curl -X POST http://localhost:8080/agent/run \
 # 单次对话
 cli.app run -a data-assistant "分析上个月销售"
 
-# 交互式 REPL
-cli.app repl -a data-assistant
+# 交互式 TUI
+cli.app tui -a data-assistant
 
 # 列表 Agent
 atelier agent list
@@ -1023,7 +1023,7 @@ public interface Hook {
 - [x] 工具防护链（配额 maxToolCalls + 速率限制 minToolInterval）
 - [x] 上下文压缩接入运行时（afterTurn 时自动摘要）
 - [x] 会话持久化（StormSessionStore ≈ 存储 ~/.atelier/sessions/）
-- [x] REPL 会话管理（/session new/list/switch）
+- [x] 交互前端会话管理（/session new/list/switch）
 - [x] Anthropic Provider 扩展（兼容 DeepSeek Anthropic API）
 - [x] Ollama Provider 扩展（sync + streaming + 工具调用）
 
@@ -1033,25 +1033,25 @@ public interface Hook {
 - [x] SKILL.md 格式校验器
 - [x] Skill 运行时注入（指令拼入 system prompt）
 - [x] 斜杠命令系统（/help /trust /untrust /session /model /tools /clear /exit）
-- [x] 交互式 REPL（session 持久化 + 恢复 + 模型切换）
+- [x] 交互式 TUI（session 持久化 + 恢复 + 模型切换）
 - [x] CLI run 命令（单次执行）
 - [x] 会话导出（JSONL/HTML）
 
 ### Phase 4：增强
 
-- [x] 会话导出与 HTML 回放（JSONL 导出 + 自足 HTML 页面，REPL + HTTP 端点）
+- [x] 会话导出与 HTML 回放（JSONL 导出 + 自足 HTML 页面，TUI + HTTP 端点）
 - [ ] 包管理器（安装/卸载 Skills/Tools）
 - [x] 可持续子 Agent（常驻 worker + 双向 send_message，取代单向 report）
   - [x] 基础设施 P0–P3（manager/句柄/邮箱/消息唤醒/父端工具/信任 per-session/文档）
-  - [x] 二期 P4–P7（SessionLoop 统一回合层 / resumeSession 重启恢复 / REPL 集成 / 跨进程 ACP 桥 RemoteSubAgentHandle）
-  - [x] 演进：send_message 对齐 dsh（父端更名 + subagent_reply + respond 状态感知——空闲/未等待 = follow-up 唤醒）、REPL `/subagent start --remote`、空闲回收（`idleTimeoutSec` 可配默认关）
+  - [x] 二期 P4–P7（SessionLoop 统一回合层 / resumeSession 重启恢复 / 交互前端集成 / 跨进程 ACP 桥 RemoteSubAgentHandle）
+  - [x] 演进：send_message 对齐 dsh（父端更名 + subagent_reply + respond 状态感知——空闲/未等待 = follow-up 唤醒）、TUI `/subagent start --remote`、空闲回收（`idleTimeoutSec` 可配默认关）
   - [ ] 候选/边界见下方「候选演进清单（待对账）」
 - [x] HTTP 信任管理端点（`/trust` POST，支持 get/set/reset）
 - [x] HTTP 会话管理端点（`/sessions` 列表 + `/session/fork` 克隆）
 - [x] 信任提示/申请流程（TrustDecision 三态 + ask_user 三选）
 - [x] 用户交互工具
   - [x] `ask_user` 内置工具：AI 主动向用户提问，runtime 暂停等待回答
-  - [x] REPL 交互支持（暂停 → 显示问题 → 获取输入 → 恢复）
+  - [x] 交互前端支持（暂停 → 显示问题 → 获取输入 → 恢复）
   - [x] HTTP 端点支持（SSE `user_input_request` 事件 + `/agent/input` 端点）
 
 ### Phase 5：ACP 接入（Agent 侧）
@@ -1075,9 +1075,9 @@ public interface Hook {
 
 | 候选 | 状态 | 触发 / 再评估条件 |
 |---|---|---|
-| 父自动开回合（受控版：子来信 → 父下一回合注入，一次来信一回合） | 候选 | 出现「父长期 idle、需自动应答子 done」真实场景（现：原语 + REPL 回合边界展示 + 手动 poll/respond/subagent_reply） |
-| SessionLoop 迁移 REPL 主循环 | 暂缓 | REPL `oldMsgs` 差集落库语义冲突解决 / 出现多宿主统一输入语义需求（回归风险 > 收益） |
-| 统一 SessionRunner（输入源可插拔，REPL/HTTP/ACP 共用） | 后续演进 | 第三个会话宿主形态出现时再抽象 |
+| 父自动开回合（受控版：子来信 → 父下一回合注入，一次来信一回合） | 候选 | 出现「父长期 idle、需自动应答子 done」真实场景（现：原语 + TUI 回合边界展示 + 手动 poll/respond/subagent_reply） |
+| SessionLoop 迁移 TUI 主循环 | 暂缓 | `oldMsgs` 差集落库语义冲突解决 / 出现多宿主统一输入语义需求（回归风险 > 收益） |
+| 统一 SessionRunner（输入源可插拔，TUI/HTTP/ACP 共用） | 后续演进 | 第三个会话宿主形态出现时再抽象 |
 | detach 成全局后台 agent | 后置不做 | 无明确场景 |
 | 跨进程子 waitReply 回合内插话 | 协议限制 | ACP v2 回合内消息能力落地（现降级：分回合问答，文档明示） |
 | 子主动唤醒空闲父（ACP 桥） | 协议限制 | ACP v1 无 agent 主动发起；本地子不受限（await/watch） |

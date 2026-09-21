@@ -45,7 +45,7 @@ func formatElapsed(ms: Int64): String {
  *
  * 两个消费者共用同一份归约：
  * - TUI：整帧重绘，用 {@link snapshotLines} 取当前状态；
- * - REPL：只追加，用 {@link drainNewLines} 取本次新增的行。
+ * - 只追加的场景（一次性运行 / 未来的流式前端）：用 {@link drainNewLines} 取新增行。
  *
  * 事件由回合线程写入、界面线程读取，内部加锁；快照返回副本，调用方拿到即可安全渲染。
  */
@@ -139,7 +139,7 @@ public class TurnActivity {
         }
     }
 
-    /** 取走本次新增的进度行（REPL 这类只追加的呈现用）。 */
+    /** 取走本次新增的进度行（只追加的呈现用）。 */
     public func drainNewLines(): ArrayList<String> {
         synchronized(this.lock) {
             let out = ArrayList<String>()
@@ -182,11 +182,11 @@ public class TurnActivity {
 }
 
 /**
- * 边等边把进度行交给 `sink`，流收敛后返回（REPL / 一次性运行共用）。
+ * 边等边把进度行交给 `sink`，流收敛后返回。
  *
  * 事件不会因此丢失：调用方随后照常 `stream.result()` 取消息。
- * sink 的目标由调用方决定——REPL 打到 stdout（与对话同流），
- * 一次性运行打到 stderr（stdout 留给答案，便于管道）。
+ * sink 的目标由调用方决定——当前 `cli.app run` 打到 stderr
+ * （stdout 留给答案，便于管道）。
  */
 public func pumpProgress(stream: LoopEventStream, sink: (String) -> Unit): Unit {
     let activity = TurnActivity()

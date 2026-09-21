@@ -126,7 +126,7 @@ struct SessionEnvironment {
 会话的 `directory` 决定工具执行的工作目录：
 
 ```bash
-# REPL 指定工作目录
+# TUI（或 CLI）指定工作目录
 cli.app repl --workdir /home/user/project
 
 # HTTP API
@@ -173,7 +173,7 @@ user_role = admin
 支持导出为 JSONL 和 HTML 回放：
 
 ```bash
-# REPL 导出
+# TUI 内导出
 /session export <id> jsonl
 /session export <id> html
 

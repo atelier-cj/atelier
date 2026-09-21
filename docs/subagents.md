@@ -98,13 +98,13 @@ match (h.recv(timeout: 5 * Duration.minute)) {
 - **回合执行统一**：本地子 worker 与 ACP 会话桥均基于 `SessionLoop`（同一回合语义：历史装载/事件消费/取消/落库）。
 - **回合外消息可见**：宿主输入循环可用 `manager.pollChildren(parentSessionId)` / `handle.pollOnce()`
   非阻塞查看子来信（真正「父被唤醒开新回合」由宿主按自身输入模型决定；`awaitChildren` 提供阻塞原语）。
-- **REPL**（进程内父宿主）：
+- **TUI**（进程内父宿主）：
   - 回合内工具：`send_message / subagent_start / subagent_reply / subagent_await / subagent_watch / subagent_close`（自动注册）
   - `/subagent list | poll | start [--remote] <agent> <prompt> | send <id> <text> | respond <id> <text> | close <id>`
   - `start` 默认本地子；`start --remote` 以当前进程（`/proc/self/exe`）启动独立 `cli.app acp`
     子进程，数据隔离于 `<sessionDir>/remote-sub/<childId>`（不与父会话共享 bstorm/映射）
   - 每回合收尾自动展示该父子的未读消息（poll 结果）
-- **跨进程子（ACP 桥）在 REPL 的兼容**：`/subagent list/send/close` 对远程句柄同样有效
+- **跨进程子（ACP 桥）在 TUI 的兼容**：`/subagent list/send/close` 对远程句柄同样有效
   （send=一次远程自主回合）；`respond` 对远程子 = follow-up 追问（新回合）——
   回合内插话（waitReply 即时解锁）受 ACP v1 限制，跨进程退化为分回合问答。
 
@@ -132,7 +132,7 @@ match (h.recv(timeout: 5 * Duration.minute)) {
 
 ## 与其它形态的关系
 
-- REPL/HTTP/ACP 会话循环当前仍由各自宿主驱动；`awaitChildren` 与父工具为宿主集成提供
+- TUI/HTTP/ACP 会话循环当前仍由各自宿主驱动；`awaitChildren` 与父工具为宿主集成提供
   「子消息唤醒父」的阻塞原语（宿主输入循环可轮询），统一 SessionRunner（输入源可插拔）属后续演进。
 ## 跨进程子 Agent（ACP 桥）
 
@@ -140,7 +140,7 @@ match (h.recv(timeout: 5 * Duration.minute)) {
 子 Agent 运行在独立 `cli.app acp <agent> <sessionDir>` 进程（同一可执行文件），协议经 acp-cj
 `AcpClient` 桥接——句柄语义与本地子一致（done/reply/recv/close），**send = 一次子自主回合**。
 
-- sessionDir：子进程独立会话/映射目录（勿与父共享，父若为 REPL/HTTP/ACP 会同目录争用 bstorm）
+- sessionDir：子进程独立会话/映射目录（勿与父共享，父若为 TUI/HTTP/ACP 会同目录争用 bstorm）
 - 验证：`scripts/remote_subagent_e2e.sh`（隔离 HOME + echo 模式跑条件 e2e：握手→首回合 done→续聊 reply→close）
 - **限制（ACP v1）**：回合内 waitReply 不可跨进程（子以分回合提问表达）；子无法主动唤醒空闲父
   （父在自身回合内 await/watch 不受影响——本地子全能力保留）
