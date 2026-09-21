@@ -4,6 +4,8 @@ import ystyle::xisp.terminal.*
 import cjterm_stream.*
 import opencj::ulid.nextId
 import std.core.Duration
+import std.core.sleep
+import std.sync.*
 import std.env.*
 import std.collection.*
 import std.fs.*
@@ -398,6 +400,61 @@ private func appendBodyLines(out: ArrayList<String>, body: String, width: Int64)
     }
 }
 
+// ═══════ 信任闸门询问：交给主线程读答案 ═══════════════════════
+// agent 回合跑在另一个线程里，它不能自己读 stdin——主线程的 readKey 正在读同一个
+// fd，两边抢输入会让答案永远读不到；也不能自己写提示后调 render——那会被随后的
+// 整帧重绘覆盖。因此把询问投递给主线程，由它在正常的输入行里收答案，
+// 运行线程在这里等待。
+
+/**
+ * 审批状态行文本。
+ *
+ * 询问本身是多行的（首行是对象，后面逐条列选项），而状态行只有一行；这里取首行
+ * 并自述选项，用户不必看到被截断的后半段就知道该按什么。
+ */
+public func approvalStatusText(question: String): String {
+    let lines = question.split("\n")
+    let firstLine = if (lines.size > 0) { lines[0].trimAscii() } else { question.trimAscii() }
+    "等待确认（y=本次 / a=总是 / n=拒绝，回车提交）: " + firstLine
+}
+
+/** 一次待回答的信任闸门询问。 */
+public class ApprovalRequest {
+    public let question: String
+    private var answer: Option<String> = None
+    private let lock = Mutex()
+
+    public init(question: String) {
+        this.question = question
+    }
+
+    /** 主线程回填答案；幂等，重复调用只保留第一次。 */
+    public func resolve(text: String): Unit {
+        synchronized(this.lock) {
+            if (this.answer.isNone()) {
+                this.answer = Some(text)
+            }
+        }
+    }
+
+    /** 运行线程等待答案；50ms 轮询，对人工交互足够。 */
+    public func waitAnswer(): String {
+        var received: Option<String> = None
+        while (received.isNone()) {
+            synchronized(this.lock) {
+                received = this.answer
+            }
+            if (received.isNone()) {
+                sleep(Duration.millisecond * 50)
+            }
+        }
+        match (received) {
+            case Some(text) => text
+            case None => ""
+        }
+    }
+}
+
 // ═══════ 聊天 TUI ══════════════════════════════════════════
 
 // raw mode + ANSI。输入侧复用 xisp 的 terminal（POSIX 已实测；Windows 实现存在但未验证）；
@@ -418,7 +475,9 @@ public class ChatTui {
     private let sessionDir: String
     private var sessionId: String
     private var messages: ArrayList<Message>
-    private var input: ArrayList<Rune>
+    // input / busy / submit / runCommand 为包内可见：TUI 的驱动入口是按键循环，
+    // 交互式回合无法从外部同步驱动，测试需要在包内直接提交并等待回合结束。
+    var input: ArrayList<Rune>
     private var scroll: Int64
     private var status: String
     private var running: Bool
@@ -429,6 +488,11 @@ public class ChatTui {
     private var pickerKind: String
     private var helpMode: Bool
     private var out: AutoStream
+    /** 待回答的信任闸门询问；非空时输入行的回车作为答案而不是新消息。 */
+    private var pendingApproval: ?ApprovalRequest = None
+    private let approvalLock = Mutex()
+    /** 回合是否在后台线程里进行中（防止并发提交写同一份历史）。 */
+    let busy = AtomicBool(false)
 
     public init(agentName: String, registry: SlashCommandRegistry, agentConfig: AgentConfig,
         provider: Provider, toolRegistry: ToolRegistry, sessionStore: SessionStore,
@@ -499,6 +563,13 @@ public class ChatTui {
                 }
             }
         } finally {
+            // 退出前等后台回合收尾，否则这一轮的落库可能还没发生就退出了。
+            // 有上限：卡在询问上的回合不该把退出也一起卡住。
+            var guard = 0
+            while (this.busy.load() && guard < 150) {
+                sleep(Duration.millisecond * 20)
+                guard = guard + 1
+            }
             this.writeRaw("\u{1b}[?25h")
             this.writeRaw("\u{1b}[?1049l")
             t.disableRawMode()
@@ -580,7 +651,7 @@ public class ChatTui {
         // 状态行（净化：换行拍平 + 截断）
         sb.append(csiMove(0, r - 2))
         sb.append("\u{1b}[2K")
-        if (this.status.startsWith("Error") || this.status.startsWith("[atelier]")) {
+        if (this.hasPendingApproval() || this.status.startsWith("Error") || this.status.startsWith("[atelier]")) {
             sb.append(colorize(flattenStatus(this.status, c - 2), C_ERROR))
         } else {
             sb.append(colorize(flattenStatus(this.status, c - 2), C_STATUS))
@@ -659,7 +730,16 @@ public class ChatTui {
                     this.input.remove(this.input.size - 1..this.input.size)
                     this.renderInputOnly(t)
                 }
-            case KeyCode.Enter => this.submit(t)
+            case KeyCode.Enter =>
+                match (this.takePendingApproval()) {
+                    case Some(request) =>
+                        // 有待审批的询问：本次回车是回答，不是新消息
+                        let answer = String(this.input)
+                        this.input = ArrayList<Rune>()
+                        request.resolve(answer)
+                        this.render(t)
+                    case None => this.submit(t)
+                }
             case KeyCode.Up =>
                 match (this.hist.up(String(this.input))) {
                     case Some(text) => this.input = toRunes(text); this.renderInputOnly(t)
@@ -679,7 +759,7 @@ public class ChatTui {
         }
     }
 
-    private func submit(t: Terminal): Unit {
+    func submit(t: Terminal): Unit {
         let line = String(this.input)
         this.input = ArrayList<Rune>()
         if (line == "") { return }
@@ -689,63 +769,83 @@ public class ChatTui {
             this.render(t)
             return
         }
-
-        this.messages.add(UserMessage(ContentList.ofText(line), 0))
-        this.status = "生成中…"
-        this.render(t)
-        let runtime = this.makeRuntime(t)
-        let stream = runtime.chatWithSessionId(this.sessionId, this.messages, SessionEnvironment())
-        // 带超时轮询：每 500ms 显示一次生成秒数（"生成中… (Ns)"），避免阻塞无反馈
-        // 像"回车没效果"；收尾哨兵（isClosed）收敛循环，也为后续流式渲染留位。
-        var waited: Int64 = 0
-        var done = false
-        while (!done) {
-            match (stream.receive(500 * Duration.millisecond)) {
-                case Some(_) => ()
-                case None =>
-                    if (stream.isClosed()) {
-                        done = true
-                    } else {
-                        waited = waited + 1
-                        this.status = "生成中… (" + Int64(waited / 2).toString() + "s)"
-                        this.render(t)
-                    }
-            }
-        }
-        let allMsgs = try {
-            stream.result()
-        } catch (e: Exception) {
-            this.status = "Error: " + e.message
+        if (this.busy.load()) {
+            // 回合仍在进行：并发提交会让两个回合写同一份历史
+            this.status = "上一轮仍在进行中（等它结束，或 Ctrl+C 退出）"
             this.render(t)
             return
         }
-        // 分层：运行时会把系统提示（UserMessage）注入工作列表头部——显示与落库都不该
-        // 包含它。会话 = 旧消息 + 本轮新增（复用存储层 extractNewMessages 语义）。
-        let oldMsgs = this.messages
-        let turnNew = extractNewMessages(oldMsgs, allMsgs)
-        this.messages = ArrayList<Message>()
-        for (m in oldMsgs) { this.messages.add(m) }
-        for (m in turnNew) { this.messages.add(m) }
-        this.persistTurn(oldMsgs)
-        // 子 Agent 状态回报（与 REPL 同语义）
-        let pending = this.subMgr.pollChildren(this.sessionId)
-        if (pending.size > 0) {
-            let sb = StringBuilder()
-            for (i in 0..pending.size) {
-                if (i > 0) { sb.append("  ") }
-                let m = pending[Int64(i)]
-                sb.append("[subagent:${m.from}] ${m.kind}: ${m.text}")
-            }
-            this.status = sb.toString()
-        } else {
-            let subCount = this.subMgr.activeCountFor(this.sessionId)
-            if (subCount > 0) {
-                this.status = "[subagent] " + subCount.toString() + " 个子 Agent 运行中 —— /subagent list 查看"
-            } else {
-                this.status = ""
-            }
-        }
+
+        this.messages.add(UserMessage(ContentList.ofText(line), 0))
+        this.status = "生成中…"
+        this.busy.store(true)
         this.render(t)
+        let oldMsgs = this.messages
+        let sessionId = this.sessionId
+        // 回合跑在后台线程：主线程必须继续读键盘，否则信任闸门的询问永远等不到回答
+        // （readKey 是阻塞读，主线程一旦进入等待循环就再也不处理输入）
+        spawn { this.runTurn(t, sessionId, oldMsgs) }
+    }
+
+    /** 后台回合：等待流收敛、收尾、落库、重绘。 */
+    private func runTurn(t: Terminal, sessionId: String, oldMsgs: ArrayList<Message>): Unit {
+        try {
+            let runtime = this.makeRuntime(t)
+            let stream = runtime.chatWithSessionId(sessionId, oldMsgs, SessionEnvironment())
+            var waited: Int64 = 0
+            var done = false
+            while (!done) {
+                match (stream.receive(500 * Duration.millisecond)) {
+                    case Some(_) => ()
+                    case None =>
+                        if (stream.isClosed()) {
+                            done = true
+                        } else {
+                            waited = waited + 1
+                            // 有待回答的询问时不要用读秒覆盖它——那正是用户此刻唯一要看的信息
+                            if (!this.hasPendingApproval()) {
+                                this.status = "生成中… (" + Int64(waited / 2).toString() + "s)"
+                            }
+                            this.render(t)
+                        }
+                }
+            }
+            let allMsgs = try {
+                stream.result()
+            } catch (e: Exception) {
+                this.status = "Error: " + e.message
+                this.render(t)
+                return
+            }
+            // 分层：运行时会把系统提示（UserMessage）注入工作列表头部——显示与落库都不该
+            // 包含它。会话 = 旧消息 + 本轮新增（复用存储层 extractNewMessages 语义）。
+            let turnNew = extractNewMessages(oldMsgs, allMsgs)
+            this.messages = ArrayList<Message>()
+            for (m in oldMsgs) { this.messages.add(m) }
+            for (m in turnNew) { this.messages.add(m) }
+            this.persistTurn(oldMsgs)
+            // 子 Agent 状态回报（与 REPL 同语义）
+            let pending = this.subMgr.pollChildren(sessionId)
+            if (pending.size > 0) {
+                let sb = StringBuilder()
+                for (i in 0..pending.size) {
+                    if (i > 0) { sb.append("  ") }
+                    let m = pending[Int64(i)]
+                    sb.append("[subagent:${m.from}] ${m.kind}: ${m.text}")
+                }
+                this.status = sb.toString()
+            } else {
+                let subCount = this.subMgr.activeCountFor(sessionId)
+                if (subCount > 0) {
+                    this.status = "[subagent] " + subCount.toString() + " 个子 Agent 运行中 —— /subagent list 查看"
+                } else {
+                    this.status = ""
+                }
+            }
+            this.render(t)
+        } finally {
+            this.busy.store(false)
+        }
     }
 
     private func makeRuntime(t: Terminal): AgentRuntime {
@@ -774,20 +874,41 @@ public class ChatTui {
             ptcMaxSubCalls: this.agentConfig.ptcMaxSubCalls)
         AgentRuntime(cfg, this.provider, this.toolRegistry, this.sessionStore,
             this.trustManager, this.skillRegistry, this.agentRegistry, this.providerRegistry,
-            ArrayList<Hook>(), { q =>
-                // 信任闸门提问：退 raw、显示问题、读一行、恢复 raw（在运行时子线程内执行）
-                this.writeRaw("\u{1b}[?25h")
-                this.writeRaw(csiMove(0, 0))
-                this.writeRaw("\u{1b}[2K")
-                this.writeRaw("[Ask User] " + q)
-                this.status = "等待确认: " + q
-                this.render(t)
-                t.disableRawMode()
-                let answer = readLine()
-                t.enableRawMode()
-                this.writeRaw("\u{1b}[?25l")
-                answer
-            }, this.mcpManager)
+            ArrayList<Hook>(), { q => this.askForApproval(t, q) }, this.mcpManager)
+    }
+
+    /**
+     * 信任闸门询问。
+     *
+     * 本方法跑在 agent 回合的线程上：只登记询问、重绘一次让提示可见，然后等待——
+     * 答案由主线程在正常的输入行里收取（见 handleKey 的回车分支）。
+     */
+    private func askForApproval(t: Terminal, question: String): String {
+        let request = ApprovalRequest(question)
+        synchronized(this.approvalLock) {
+            this.pendingApproval = request
+        }
+        this.status = approvalStatusText(question)
+        this.render(t)
+        let answer = request.waitAnswer()
+        synchronized(this.approvalLock) {
+            this.pendingApproval = None
+        }
+        this.status = ""
+        this.render(t)
+        answer
+    }
+
+    private func hasPendingApproval(): Bool {
+        synchronized(this.approvalLock) {
+            this.pendingApproval.isSome()
+        }
+    }
+
+    private func takePendingApproval(): ?ApprovalRequest {
+        synchronized(this.approvalLock) {
+            this.pendingApproval
+        }
     }
 
     // 单落库：与 REPL 的 persistCurrentSession 同语义（appendBranch，末 entry 作父叶）
@@ -884,7 +1005,7 @@ public class ChatTui {
 
     // ═══ 斜杠命令（与 REPL 同命令面；输出统一进状态行）═══
 
-    private func runCommand(line: String): Unit {
+    func runCommand(line: String): Unit {
         if (line == "/models") { this.handleModelsCommand(); return }
         // /new 别名：新建会话
         if (line == "/new") {
