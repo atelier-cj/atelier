@@ -16,6 +16,7 @@ import atelier.context.validateSummary
 import atelier.context.compactWithSummary
 import atelier.context.CompactionConfig
 import atelier.context.estimateTokens
+import atelier.ptc.*
 import atelier.event.EventStream
 import std.io.InputStream
 import jsonvalue.*
@@ -163,8 +164,9 @@ public open class AgentRuntime {
                 let hookState = HookState()
                 callHooks("beforeRun", 0, hookState)
 
-                // 系统提示词独立通道（不再注入为消息）；初始消息 = 历史
-                let systemText = ctxBuilder.buildSystemText(
+                // 系统提示词独立通道（不再注入为消息）；初始消息 = 历史。
+                // PTC 的 SDK 段随「本轮可见工具」变化，因此在循环内拼接（见下）。
+                let baseSystemText = ctxBuilder.buildSystemText(
                     this.config.systemPrompt, this.config.skills)
                 var currentMessages = ArrayList<Message>()
                 for (m in messages) { currentMessages.add(m) }
@@ -185,7 +187,16 @@ public open class AgentRuntime {
 
                     this.emit(stream, MessageStartEvent(currentMessages[0]))
                     let actualModel = this.pickModel(this.config.model)
-                    let tools = this.resolveTools()
+                    // 先解析可见工具，再据此生成 SDK 段：两处必须来自同一次解析，
+                    // 否则模型看到的绑定会与程序实际能调用的能力分叉
+                    let visible = this.resolveVisibleTools()
+                    let tools = this.resolveTools(visible, ctx, stream, cancelFlag,
+                        hookState, turnCount)
+                    let systemText = if (this.config.toolPresentation == ToolPresentationMode.Native) {
+                        baseSystemText
+                    } else {
+                        baseSystemText + "\n\n" + PtcSdkRenderer.render(visible)
+                    }
                     var chatReq = ctxBuilder.buildChatRequest(actualModel, systemText, currentMessages,
                         Float64(this.config.temperature), Int64(this.config.maxOutputTokens),
                         this.config.thinkingLevel, tools)
@@ -510,8 +521,15 @@ public open class AgentRuntime {
         "gpt-4o"
     }
 
-    private func resolveTools(): ArrayList<OpenAITool> {
-        let result = ArrayList<OpenAITool>()
+    /**
+     * 解析本轮**可见的工具对象**。
+     *
+     * 与投影（怎么通告给模型）分开：PTC 模式需要工具对象本身来构造绑定，
+     * 而 native 模式只需要它们的 schema。两者必须来自同一次解析，
+     * 否则模型看到的可用能力会与程序能调用的能力分叉。
+     */
+    private func resolveVisibleTools(): ArrayList<Tool> {
+        let result = ArrayList<Tool>()
         for (name in this.config.tools) {
             if (name.startsWith("agent_")) {
                 let agentName = name[6..]
@@ -524,7 +542,7 @@ public open class AgentRuntime {
                             this.agentRegistry, this.providerRegistry,
                             this.mcpManager)
                         this.toolRegistry.register(tool)
-                        result.add(OpenAITool(tool.name(), tool.description(), tool.schema()))
+                        result.add(tool)
                     case None => ()
                 }
             } else if (name.endsWith("_*")) {
@@ -534,18 +552,132 @@ public open class AgentRuntime {
                         if (!this.mcpManager.isActiveTool(t.name(), this.config.mcpCooldownTurns)) {
                             continue
                         }
-                        result.add(OpenAITool(t.name(), t.description(), t.schema()))
+                        result.add(t)
                     }
                 }
             } else {
                 match (this.toolRegistry.get(name)) {
                     case Some(t) =>
-                        result.add(OpenAITool(t.name(), t.description(), t.schema()))
+                        result.add(t)
                     case None => ()
                 }
             }
         }
         result
+    }
+
+    /**
+     * 按呈现模式把可见工具投影成协议工具列表。
+     *
+     * `Native`：逐个通告原生 schema（现网行为）。
+     * `Ptc`：只通告 `run_xisp`，其余能力经 SDK 绑定暴露。
+     * `Both`：两者并存（提示词成本翻倍）。
+     */
+    private func resolveTools(
+        visible: ArrayList<Tool>,
+        ctx: ToolContext,
+        stream: EventStream<AgentEvent, ArrayList<Message>>,
+        cancelFlag: AtomicBool,
+        hookState: HookState,
+        turnCount: Int64
+    ): ArrayList<OpenAITool> {
+        let result = ArrayList<OpenAITool>()
+        let native = this.config.toolPresentation == ToolPresentationMode.Native
+        let programmatic = this.config.toolPresentation != ToolPresentationMode.Native
+
+        if (native || this.config.toolPresentation == ToolPresentationMode.Both) {
+            for (t in visible) {
+                result.add(OpenAITool(t.name(), t.description(), t.schema()))
+            }
+        }
+        if (programmatic) {
+            let authorizer: PtcAuthorizer = { tool, args =>
+                this.authorizeSubCall(tool, args, ctx, hookState, turnCount)
+            }
+            let emit: (PtcEvent) -> Unit = { event => this.emitPtcEvent(stream, event) }
+            let env = PtcRunEnv(ctx.workDir, ctx.sessionId,
+                { => cancelFlag.load() }, emit, authorizer,
+                maxSubCalls: Int64(this.config.ptcMaxSubCalls),
+                timeout: Some(Duration.second * Int64(this.config.ptcTimeoutSeconds)))
+            let tool = RunXispTool(visible, env)
+            // 注册进注册表：分发链路按名字查找，因此必须与其它工具同样可见
+            this.toolRegistry.register(tool)
+            result.add(OpenAITool(tool.name(), tool.description(), tool.schema()))
+        }
+        result
+    }
+
+    /**
+     * 子调用的授权：信任闸门 → 交互审批 → `beforeTool` 钩子。
+     *
+     * 与模型直调走同一套判定（见工具批次组装处的同名逻辑），因此 PTC
+     * 不会成为绕过闸门的通道；钩子改写参数在这里同样生效。
+     */
+    private func authorizeSubCall(
+        tool: Tool,
+        args: JsonValue,
+        ctx: ToolContext,
+        hookState: HookState,
+        turnCount: Int64
+    ): PtcAuthDecision {
+        match (shouldAllowFor(tool, ctx.workDir, this.trustManager, ctx.sessionId)) {
+            case TrustDecision.Denied =>
+                return PtcAuthDecision.Deny("Tool not allowed: workDir is untrusted")
+            case TrustDecision.NeedsApproval =>
+                if (!this.approveSubCall(tool, args, ctx)) {
+                    return PtcAuthDecision.Deny("Tool not allowed: user denied approval")
+                }
+            case TrustDecision.Allowed => ()
+        }
+        // callId 在此尚未生成，审批与钩子都不依赖它
+        let (replaced, skipMessage) = this.decideToolCall(hookState, turnCount,
+            ToolCallBlock("", tool.name(), args))
+        match (replaced) {
+            case Some(newArgs) => PtcAuthDecision.AllowWith(newArgs)
+            case None => PtcAuthDecision.Deny(skipMessage ?? "Tool blocked by hook")
+        }
+    }
+
+    /** 交互审批；与模型直调的审批分支保持同样的回答语义。 */
+    private func approveSubCall(tool: Tool, args: JsonValue, ctx: ToolContext): Bool {
+        let log = getGlobalLogger([("name", "AgentRuntime")])
+        let call = ToolCallBlock("", tool.name(), args)
+        let answer = match (this.toolApprovalFn) {
+            case Some(f) => f(call, ctx.workDir)
+            case None =>
+                this.askUser(
+                    "Tool '" + tool.name() + "' needs your approval.\n" +
+                    "  y  — allow this once (session only)\n" +
+                    "  a  — always allow this directory\n" +
+                    "  n  — deny")
+        }
+        if (answer == "a" || answer == "always" || answer == "yes") {
+            this.trustManager.setTrust(ctx.workDir, TrustState.Trusted)
+            log.info("sub-call ${tool.name()} always approved for ${ctx.workDir}", Array<Attr>())
+            return true
+        }
+        if (answer == "y" || answer == "once") {
+            this.trustManager.setSessionTrust(ctx.sessionId, ctx.workDir, TrustState.Trusted)
+            log.info("sub-call ${tool.name()} approved for session", Array<Attr>())
+            return true
+        }
+        log.warn("sub-call ${tool.name()} denied by user", Array<Attr>())
+        false
+    }
+
+    /** 把 PTC 事件翻译成宿主可见的 AgentEvent。 */
+    private func emitPtcEvent(
+        stream: EventStream<AgentEvent, ArrayList<Message>>,
+        event: PtcEvent
+    ): Unit {
+        match (event) {
+            case PtcEvent.DispatchStart(callId, name) =>
+                this.emit(stream, ToolExecutionStartEvent(callId, name))
+            case PtcEvent.DispatchEnd(callId, _, text, isError) =>
+                this.emit(stream, ToolExecutionEndEvent(callId, text, isError))
+            // 脚本输出随最终结果一起返回，不额外占用事件流
+            case PtcEvent.Log(_) => ()
+        }
     }
 
     private func resolveSubProvider(cfg: AgentConfig): Provider {
