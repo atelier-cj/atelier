@@ -17,11 +17,14 @@ import ystyle::xisp.bridge.Bridge
 class LogCollector {
     let logs = ArrayList<String>()
     private let limit: Int64
+    /** 实时出口：与 logs 内容一致，便于宿主边跑边展示。 */
+    private let sink: (String) -> Unit
     private var chars: Int64 = 0
     private var truncated: Bool = false
 
-    init(limit: Int64) {
+    init(limit: Int64, sink: (String) -> Unit) {
         this.limit = limit
+        this.sink = sink
     }
 
     func accept(text: String): Unit {
@@ -31,9 +34,12 @@ class LogCollector {
         this.chars = this.chars + Int64(text.size)
         if (this.chars > this.limit) {
             this.truncated = true
-            this.logs.add("\n[output truncated: exceeded ${this.limit} characters]\n")
+            let notice = "\n[output truncated: exceeded ${this.limit} characters]\n"
+            this.logs.add(notice)
+            this.sink(notice)
         } else {
             this.logs.add(text)
+            this.sink(text)
         }
     }
 }
@@ -73,7 +79,7 @@ public class XispRuntime {
      * 任何失败都以 `PtcRunResult.error` 返回，不抛异常——报告失败是调用方的职责。
      */
     public func run(request: PtcRunRequest): PtcRunResult {
-        let collector = LogCollector(request.maxLogChars)
+        let collector = LogCollector(request.maxLogChars, request.onLog)
         let stop = RunStop()
         let started = MonoTime.now()
 

@@ -147,4 +147,68 @@ public class JsonBridge {
             case _ => false
         }
     }
+
+    /** 渲染嵌套深度上限：完成值可能来自工具，结构不可控。 */
+    private static let MAX_RENDER_DEPTH: Int64 = 32
+
+    /**
+     * 把 JSON 值渲染成单行文本，供工具结果卡片展示。
+     *
+     * 自带深度上限：完成值的结构来自模型或工具，不受本仓控制，
+     * 未加限制的递归渲染会被深层嵌套打爆栈。
+     */
+    public static func render(value: JsonValue): String {
+        renderAt(value, 0)
+    }
+
+    private static func renderAt(value: JsonValue, depth: Int64): String {
+        if (depth > MAX_RENDER_DEPTH) {
+            return "…"
+        }
+        match (value) {
+            case JsonValue.Null => "null"
+            case JsonValue.Boolean(b) => if (b) { "true" } else { "false" }
+            case JsonValue.Number(n) => renderNumber(n)
+            case JsonValue.String(s) => "\"${escape(s)}\""
+            case JsonValue.Array(items) =>
+                let parts = ArrayList<String>()
+                for (item in items) {
+                    parts.add(renderAt(item, depth + 1))
+                }
+                "[${String.join(parts.toArray(), delimiter: ", ")}]"
+            case JsonValue.Map(m) =>
+                let parts = ArrayList<String>()
+                for ((k, v) in m) {
+                    parts.add("\"${escape(k)}\": ${renderAt(v, depth + 1)}")
+                }
+                "{${String.join(parts.toArray(), delimiter: ", ")}}"
+        }
+    }
+
+    /** 整数值不带小数尾巴：脚本返回 3 时展示 3 而不是 3.0。 */
+    private static func renderNumber(n: Float64): String {
+        if (n >= -9223372036854775808.0 && n <= 9223372036854775807.0) {
+            let asInt = Int64(n)
+            if (Float64(asInt) == n) {
+                return asInt.toString()
+            }
+        }
+        n.toString()
+    }
+
+    /** 最小转义：引号、反斜杠与控制字符。 */
+    private static func escape(text: String): String {
+        let sb = StringBuilder()
+        for (r in text.toRuneArray()) {
+            match (r) {
+                case r'"' => sb.append("\\\"")
+                case r'\\' => sb.append("\\\\")
+                case r'\n' => sb.append("\\n")
+                case r'\r' => sb.append("\\r")
+                case r'\t' => sb.append("\\t")
+                case _ => sb.append(r.toString())
+            }
+        }
+        sb.toString()
+    }
 }

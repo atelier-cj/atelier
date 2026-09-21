@@ -3,6 +3,7 @@ package atelier.ptc
 import jsonvalue.*
 import std.collection.*
 import std.time.*
+import atelier.tool.*
 
 /**
  * 工具呈现模式。
@@ -171,5 +172,85 @@ public struct PtcRunResult {
     /** 是否运行成功。 */
     public func isOk(): Bool {
         this.error.isNone()
+    }
+}
+
+/**
+ * 子调用事件。
+ *
+ * 运行时把它翻译成 `AgentEvent` 再交给宿主。本包因此不必依赖 agent 包——
+ * agent 包要在 `resolveTools()` 里构造 `RunXispTool`，反向依赖会成环。
+ */
+public enum PtcEvent <: ToString {
+    /** 子调用开始。 */
+    | DispatchStart(String, String)
+    /** 子调用结束：callId、工具名、结果文本、是否失败。 */
+    | DispatchEnd(String, String, String, Bool)
+    /** 脚本输出片段（实时，与最终 logs 内容一致）。 */
+    | Log(String)
+
+    public func toString(): String {
+        match (this) {
+            case DispatchStart(callId, name) => "dispatch_start(${callId}, ${name})"
+            case DispatchEnd(callId, name, _, isError) => "dispatch_end(${callId}, ${name}, error=${isError})"
+            case Log(text) => "log(${text})"
+        }
+    }
+}
+
+/**
+ * 授权一次子调用：`None` 放行，`Some(reason)` 拒绝。
+ */
+public type PtcAuthorizer = (Tool, JsonValue) -> Option<String>
+
+/**
+ * 一次 `run_xisp` 的执行环境。
+ *
+ * 由运行时在每轮组装工具时构造：闭包捕获该回合的取消标志、事件出口与授权逻辑。
+ * 因此一个 `RunXispTool` 实例只在构造它的那一轮内有效，不跨回合复用。
+ */
+public struct PtcRunEnv {
+    /** 工作目录（子调用据此解析相对路径）。 */
+    public let workDir: String
+    /** 所属会话 id。 */
+    public let sessionId: String
+    /** 外层调用的 callId；子调用编号以它为前缀。 */
+    public let parentCallId: String
+    /** 外层取消检查。 */
+    public let cancelled: () -> Bool
+    /** 子调用与脚本输出的事件出口。 */
+    public let emit: (PtcEvent) -> Unit
+    /**
+     * 子调用授权。实现方应复用与模型直调相同的策略链：
+     * 信任闸门 → 交互审批 → `beforeTool` 钩子。
+     */
+    public let authorize: PtcAuthorizer
+    /** 单次程序的子调用上限。 */
+    public let maxSubCalls: Int64
+    /** 经过时间预算；None 用配置缺省值。 */
+    public let timeout: Option<Duration>
+    /** 日志累计上限（字符数）。 */
+    public let maxLogChars: Int64
+
+    public init(
+        workDir: String,
+        sessionId: String,
+        parentCallId: String,
+        cancelled: () -> Bool,
+        emit: (PtcEvent) -> Unit,
+        authorize: PtcAuthorizer,
+        maxSubCalls!: Int64 = 64,
+        timeout!: Option<Duration> = None,
+        maxLogChars!: Int64 = 32768
+    ) {
+        this.workDir = workDir
+        this.sessionId = sessionId
+        this.parentCallId = parentCallId
+        this.cancelled = cancelled
+        this.emit = emit
+        this.authorize = authorize
+        this.maxSubCalls = maxSubCalls
+        this.timeout = timeout
+        this.maxLogChars = maxLogChars
     }
 }
