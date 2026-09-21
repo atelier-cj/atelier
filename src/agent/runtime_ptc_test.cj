@@ -141,3 +141,162 @@ func runtime_ptcRegistersRunXispForDispatch() {
 
     @Assert(toolReg.get("run_xisp").isSome())
 }
+
+// ==================== 端到端：模型发 run_xisp → 分发 → 程序内派发工具 ====================
+
+/** 记录调用次数的可见工具；声明 Parallel 以免子调用再触发一次交互审批。 */
+class RecordingTool <: Tool {
+    private let toolName: String
+    public var calls: Int64 = 0
+
+    public init(name: String) { this.toolName = name }
+    public func name(): String { this.toolName }
+    public func description(): String { "recording tool" }
+
+    public func schema(): JsonValue {
+        let pathField = HashMap<String, JsonValue>()
+        pathField.add("type", JsonValue.String("string"))
+        let props = HashMap<String, JsonValue>()
+        props.add("path", JsonValue.Map(pathField))
+        let required = ArrayList<JsonValue>()
+        required.add(JsonValue.String("path"))
+        let m = HashMap<String, JsonValue>()
+        m.add("type", JsonValue.String("object"))
+        m.add("properties", JsonValue.Map(props))
+        m.add("required", JsonValue.Array(required))
+        JsonValue.Map(m)
+    }
+
+    public func execute(ctx: ToolContext, args: JsonValue): ToolResult {
+        this.calls = this.calls + 1
+        ToolResult("content-of-a.cj", None, false, false)
+    }
+
+    public func executionMode(): ToolExecutionMode { ToolExecutionMode.Parallel }
+}
+
+/** 首回合请求 run_xisp，次回合收尾。 */
+class ProgramProvider <: Provider {
+    private var calls: Int64 = 0
+    private let program: String
+
+    public init(program: String) { this.program = program }
+    public func name(): String { "program-provider" }
+
+    public func chat(req: ChatRequest): ChatResponse {
+        ChatResponse(AssistantMessage(ContentList.ofText("done"), "", "",
+            StopReason.EndTurn, TokenUsage(0, 0), 0))
+    }
+
+    public func chatStreaming(req: ChatRequest): EventStream<ChatDelta, AssistantMessage> {
+        this.calls = this.calls + 1
+        let stream = EventStream<ChatDelta, AssistantMessage>()
+        if (this.calls == Int64(1)) {
+            let args = HashMap<String, JsonValue>()
+            args.add("code", JsonValue.String(this.program))
+            args.add("description", JsonValue.String("integration"))
+            let blocks = ArrayList<ContentBlock>()
+            blocks.add(ContentBlock.ToolCall(ToolCallBlock("call_1", "run_xisp", JsonValue.Map(args))))
+            let msg = AssistantMessage(ContentList(blocks), "", "", StopReason.ToolUse, TokenUsage(0, 0), 0)
+            stream.emit(ChatDelta("", "", Some(msg.stopReason)))
+            stream.setResult(msg)
+        } else {
+            let msg = AssistantMessage(ContentList.ofText("done"), "", "",
+                StopReason.EndTurn, TokenUsage(0, 0), 0)
+            stream.emit(ChatDelta("", "", Some(msg.stopReason)))
+            stream.setResult(msg)
+        }
+        stream
+    }
+}
+
+func textOfContent(list: ContentList): String {
+    let sb = StringBuilder()
+    for (block in list.blocks()) {
+        match (block) {
+            case ContentBlock.TextBlock(t) => sb.append(t)
+            case _ => ()
+        }
+    }
+    sb.toString()
+}
+
+func runProgramThroughLoop(program: String): (RecordingTool, ArrayList<Message>) {
+    let recorder = RecordingTool("read_file")
+    let toolReg = ToolRegistry()
+    toolReg.register(recorder)
+
+    let provider = ProgramProvider(program)
+    let providerReg = ProviderRegistry()
+    providerReg.register("default", provider)
+
+    // run_xisp 是 Sequential：workDir 未信任时走交互审批，这里一律放行
+    let runtime = AgentRuntime(ptcRuntimeConfig(ToolPresentationMode.Ptc), provider,
+        toolReg, MemorySessionStore(), TrustManager(), SkillRegistry(), AgentRegistry(),
+        providerReg, ArrayList<Hook>(), { q => "y" }, McpManager())
+
+    let msgs = ArrayList<Message>()
+    msgs.add(UserMessage(ContentList.ofText("go"), 0))
+    (recorder, runtime.chat(msgs).result())
+}
+
+@Test
+func runtime_ptcEndToEndProgramDispatchesVisibleTool() {
+    // 这条覆盖单测覆盖不到的接线：注册表查找 → 分发 → 绑定 → 子调用 → 结果回灌
+    let (recorder, messages) = runProgramThroughLoop("(tools::read_file {:path \"a.cj\"})")
+
+    // 程序真的执行了，并且派发了可见工具
+    @Assert(recorder.calls == 1)
+
+    // 程序输出作为 run_xisp 的工具结果回到会话
+    var sawResult = false
+    for (m in messages) {
+        match (m) {
+            case tr: ToolResultMessage =>
+                if (tr.toolName == "run_xisp") {
+                    sawResult = true
+                    @Assert(!tr.isError)
+                    @Assert(textOfContent(tr.content).contains("content-of-a.cj"))
+                }
+            case _ => ()
+        }
+    }
+    @Assert(sawResult)
+}
+
+@Test
+func runtime_ptcEndToEndProgramCannotReachInvisibleTool() {
+    // 未在 tools 规则里的工具不进环境：程序调用它只会得到未定义函数
+    let (recorder, messages) = runProgramThroughLoop("(tools::hidden_tool {})")
+    @Assert(recorder.calls == 0)
+
+    var sawError = false
+    for (m in messages) {
+        match (m) {
+            case tr: ToolResultMessage =>
+                if (tr.toolName == "run_xisp") {
+                    sawError = tr.isError
+                }
+            case _ => ()
+        }
+    }
+    @Assert(sawError)
+}
+
+@Test
+func runtime_ptcEndToEndLogsReachModel() {
+    let (_, messages) = runProgramThroughLoop("(println \"progress-line\") \"final-value\"")
+    var text = ""
+    for (m in messages) {
+        match (m) {
+            case tr: ToolResultMessage =>
+                if (tr.toolName == "run_xisp") {
+                    text = textOfContent(tr.content)
+                }
+            case _ => ()
+        }
+    }
+    // 日志与完成值都要回到模型：前者是过程，后者是结果
+    @Assert(text.contains("progress-line"))
+    @Assert(text.contains("final-value"))
+}
