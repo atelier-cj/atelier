@@ -168,7 +168,7 @@ func activity_subCallEndKeepsNesting() {
     @Assert(hasLine(lines, "    ✗ glob  (2.1s)"))
 }
 
-// ── 增量（REPL） ─────────────────────────────────────────────
+// ── 增量（只追加的呈现：pumpProgress / 一次性运行） ─────────────
 
 @Test
 func activity_drainNewLinesIsIncremental() {

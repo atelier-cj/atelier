@@ -106,3 +106,44 @@ func slash_registerAndHas() {
         case None => @Fail("expected pong from custom command")
     }
 }
+
+// ── /subagent start 参数解析 ──
+
+@Test
+func parseSubStartArgs_local() {
+    let parts: Array<String> = ["/subagent", "start", "helper", "你好"]
+    let (remote, agent, prompt) = parseSubStartArgs(parts)
+    @Expect(remote, false)
+    @Expect(agent, "helper")
+    @Expect(prompt, "你好")
+}
+
+@Test
+func parseSubStartArgs_remote() {
+    let parts: Array<String> = ["/subagent", "start", "--remote", "helper", "远程", "你好", "世界"]
+    let (remote, agent, prompt) = parseSubStartArgs(parts)
+    @Expect(remote, true)
+    @Expect(agent, "helper")
+    @Expect(prompt, "远程 你好 世界")
+}
+
+@Test
+func parseSubStartArgs_missingAgent() {
+    let parts1: Array<String> = ["/subagent", "start"]
+    let (r1, a1, _) = parseSubStartArgs(parts1)
+    @Expect(r1, false)
+    @Expect(a1, "")
+    let parts2: Array<String> = ["/subagent", "start", "--remote"]
+    let (r2, a2, _) = parseSubStartArgs(parts2)
+    @Expect(r2, true)
+    @Expect(a2, "")
+}
+
+@Test
+func parseSubStartArgs_emptyPromptAllowed() {
+    let parts: Array<String> = ["/subagent", "start", "helper"]
+    let (remote, agent, prompt) = parseSubStartArgs(parts)
+    @Expect(remote, false)
+    @Expect(agent, "helper")
+    @Expect(prompt, "")
+}

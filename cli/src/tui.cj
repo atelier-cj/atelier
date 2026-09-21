@@ -524,7 +524,7 @@ public class ChatTui {
         this.pickerKind = ""
         this.helpMode = false
         this.out = AutoStream.stdout()
-        // 可持续子 Agent：回合内工具 + /subagent 命令（与 REPL 同装配）
+        // 可持续子 Agent：回合内工具 + /subagent 命令
         this.subMgr = SubAgentManager(toolRegistry, trustManager, skillRegistry,
             agentRegistry, providerRegistry, sessionStore, mcpManager)
         registerParentSubagentTools(toolRegistry, this.subMgr)
@@ -847,7 +847,7 @@ public class ChatTui {
             for (m in oldMsgs) { this.messages.add(m) }
             for (m in turnNew) { this.messages.add(m) }
             this.persistTurn(oldMsgs)
-            // 子 Agent 状态回报（与 REPL 同语义）
+            // 子 Agent 状态回报
             let pending = this.subMgr.pollChildren(sessionId)
             if (pending.size > 0) {
                 let sb = StringBuilder()
@@ -934,7 +934,7 @@ public class ChatTui {
         }
     }
 
-    // 单落库：与 REPL 的 persistCurrentSession 同语义（appendBranch，末 entry 作父叶）
+    // 单落库：appendBranch，末 entry 作父叶（差集由 extractNewMessages 给出）
     private func persistTurn(oldMsgs: ArrayList<Message>): Unit {
         let newMsgs = extractNewMessages(oldMsgs, this.messages)
         if (newMsgs.size == 0) { return }
@@ -1026,7 +1026,7 @@ public class ChatTui {
         this.status = "Switched to session: " + targetId + "  Messages: " + this.messages.size.toString()
     }
 
-    // ═══ 斜杠命令（与 REPL 同命令面；输出统一进状态行）═══
+    // ═══ 斜杠命令（输出统一进状态行）═══
 
     func runCommand(line: String): Unit {
         if (line == "/models") { this.handleModelsCommand(); return }

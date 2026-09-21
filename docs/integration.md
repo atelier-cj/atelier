@@ -219,20 +219,20 @@ tools = ["bash", "read_file", "grep", "glob"]
 
 适合开发调试和一次性任务。
 
-### REPL 交互
+### 交互式 TUI
 
 ```bash
-# 启动 REPL（默认 agent）
-cli.app repl
+# 启动 TUI（默认 agent）
+cli.app tui
 
 # 指定 agent
-cli.app repl my-assistant
+cli.app tui my-assistant
 
 # 恢复之前会话
-cli.app repl my-assistant sess_abc123
+cli.app tui my-assistant sess_abc123
 ```
 
-REPL 内支持斜杠命令：
+TUI 内支持斜杠命令：
 
 | 命令 | 说明 |
 |------|------|

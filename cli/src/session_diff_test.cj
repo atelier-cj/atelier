@@ -1,9 +1,12 @@
 package cli
 
+// 会话消息 diff：首轮基线抽取与「同一条消息」判定。
+// 这两个判定同时决定「界面显示什么」与「落库写什么」，两处必须一致——
+// 不一致的表现是「界面有、重启后没有」（或反过来）。
+
 import atelier.message.*
 import atelier.session.{extractNewMessages, sameMessage}
 import std.collection.*
-import std.io.{ByteBuffer, InputStream}
 
 func plain(text: String): Message { UserMessage(ContentList.ofText(text), 0) }
 
@@ -29,6 +32,7 @@ func extractNewMessages_basic() {
 }
 
 // 压缩轮：oldMsgs 尾部消息在 newMsgs 中仍存在（内容比较定位），其后新消息提取正确
+
 @Test
 func extractNewMessages_compactionShift() {
     let oldMsgs = ArrayList<Message>()
@@ -47,6 +51,7 @@ func extractNewMessages_compactionShift() {
 }
 
 // 归档轮：本轮归档产生的 ArchiveMessage 位于旧尾部消息之后，一并提取
+
 @Test
 func extractNewMessages_archiveAfterOldTail() {
     let oldMsgs = ArrayList<Message>()
@@ -68,6 +73,7 @@ func extractNewMessages_archiveAfterOldTail() {
 }
 
 // 重复内容：定位取最后匹配，之后的消息才是新增
+
 @Test
 func extractNewMessages_duplicateTailTakesLastMatch() {
     let oldMsgs = ArrayList<Message>()
@@ -133,6 +139,7 @@ func sameMessage_toolResultById() {
 
 // 归档覆盖旧尾部（start=0 极端场景）：定位失败降级为差集法
 // （newMsgs 中与 oldMsgs 全部不同的消息 = 新消息，防静默丢一轮落库）
+
 @Test
 func extractNewMessages_fallbackDiffWhenTailArchived() {
     let oldMsgs = ArrayList<Message>()
@@ -152,152 +159,4 @@ func extractNewMessages_fallbackDiffWhenTailArchived() {
         case um: UserMessage => @Expect(textOfMsg(um), "c")
         case _ => @Fail("expected c")
     }
-}
-
-// 截断保留窗口外的归档标记（放最前），防绝对序号错位导致 applyArchiveMarks 误跳
-@Test
-func truncateRecent_keepsArchiveMarksBeforeWindow() {
-    let msgs = ArrayList<Message>()
-    msgs.add(ArchiveMessage(0, 2, "旧摘要", 0))
-    for (i in 0..20) { msgs.add(plain("m" + i.toString())) }  // 共 21 条
-    let out = truncateRecent(msgs, 15)
-    @Expect(out.size, 16)
-    match (out[0]) {
-        case am: ArchiveMessage => @Expect(am.summary, "旧摘要")
-        case _ => @Fail("expected archive marker at front")
-    }
-    match (out[1]) {
-        case um: UserMessage => @Expect(textOfMsg(um), "m5")  // 窗口起点 = 21-15 = 6 → 原 index6 = m5
-        case _ => @Fail("expected m5")
-    }
-}
-
-@Test
-func truncateRecent_shortListUnchanged() {
-    let msgs = ArrayList<Message>()
-    for (i in 0..10) { msgs.add(plain("m" + i.toString())) }
-    let out = truncateRecent(msgs, 15)
-    @Expect(out.size, 10)
-}
-
-// ========== /subagent start 解析（本地/远程/缺参/多词 prompt） ==========
-
-@Test
-func parseSubStartArgs_local() {
-    let parts: Array<String> = ["/subagent", "start", "helper", "你好"]
-    let (remote, agent, prompt) = parseSubStartArgs(parts)
-    @Expect(remote, false)
-    @Expect(agent, "helper")
-    @Expect(prompt, "你好")
-}
-
-@Test
-func parseSubStartArgs_remote() {
-    let parts: Array<String> = ["/subagent", "start", "--remote", "helper", "远程", "你好", "世界"]
-    let (remote, agent, prompt) = parseSubStartArgs(parts)
-    @Expect(remote, true)
-    @Expect(agent, "helper")
-    @Expect(prompt, "远程 你好 世界")
-}
-
-@Test
-func parseSubStartArgs_missingAgent() {
-    let parts1: Array<String> = ["/subagent", "start"]
-    let (r1, a1, _) = parseSubStartArgs(parts1)
-    @Expect(r1, false)
-    @Expect(a1, "")
-    let parts2: Array<String> = ["/subagent", "start", "--remote"]
-    let (r2, a2, _) = parseSubStartArgs(parts2)
-    @Expect(r2, true)
-    @Expect(a2, "")
-}
-
-@Test
-func parseSubStartArgs_emptyPromptAllowed() {
-    let parts: Array<String> = ["/subagent", "start", "helper"]
-    let (remote, agent, prompt) = parseSubStartArgs(parts)
-    @Expect(remote, false)
-    @Expect(agent, "helper")
-    @Expect(prompt, "")
-}
-
-// currentExePath：真实解析到当前进程可执行文件（非空即通过；/proc/self/exe 环境自含）
-@Test
-func currentExePath_resolvesNonEmpty() {
-    @Expect(currentExePath() != "", true)
-}
-
-// ========== stdin 行读取：EOF 与空行必须区分（REPL 空转回归） ==========
-//
-// 出过的故障：run() 把 `readLineFrom` 的 EOF 与「空行」都归到 `line == ""` →
-// continue，于是 stdin 一结束（`echo /help | atelier repl`、Ctrl-D）就变成死循环：
-// 每轮刷一个 "> "、100% CPU、永不退出。下面把这条判断钉死。
-
-// 读取结果的可读文本，便于用 @Expect 直接比较（断言留在用例体内）
-func lineText(r: StdinLine): String {
-    match (r) {
-        case StdinLine.Line(l) => "line:" + l
-        case StdinLine.Eof => "eof"
-        case StdinLine.Failed(m) => "failed:" + m
-    }
-}
-
-// 读即抛异常的流：验证「读错」不会被静默当成 EOF（旧代码是 catch (_) { "" }）
-class FailingInputStream <: InputStream {
-    public func read(buffer: Array<Byte>): Int64 {
-        throw Exception("simulated stdin read failure")
-    }
-}
-
-@Test
-func decideLineAction_eofQuitsInsteadOfPrompting() {
-    match (decideLineAction(StdinLine.Eof)) {
-        case LineAction.Quit(_) => ()
-        case _ => @Fail("EOF 必须退出 REPL，不能当空行继续循环（死循环回归）")
-    }
-}
-
-@Test
-func decideLineAction_emptyLineOnlyReprompts() {
-    match (decideLineAction(StdinLine.Line(""))) {
-        case LineAction.Prompt => ()
-        case _ => @Fail("空行应当只重画提示符")
-    }
-}
-
-@Test
-func decideLineAction_lineRuns() {
-    match (decideLineAction(StdinLine.Line("/help"))) {
-        case LineAction.Run(l) => @Expect(l, "/help")
-        case _ => @Fail("普通行应当交给 handleInput")
-    }
-}
-
-@Test
-func decideLineAction_readFailureQuits() {
-    match (decideLineAction(StdinLine.Failed("boom"))) {
-        case LineAction.Quit(reason) => @Expect(reason.contains("boom"), true)
-        case _ => @Fail("读失败必须退出并说明原因")
-    }
-}
-
-// 复刻 `printf 'a\n\nb' | atelier repl`：两行 + 一个空行 + 末行无换行符
-@Test
-func readLineFrom_pipelineInputKeepsEmptyLineAndFinalLine() {
-    let input = ByteBuffer("a\n\nb".toArray())
-    @Expect(lineText(readLineFrom(input)), "line:a")
-    @Expect(lineText(readLineFrom(input)), "line:")     // 空行 ≠ EOF（回归点）
-    @Expect(lineText(readLineFrom(input)), "line:b")    // 末行无 \n 也不能丢
-    @Expect(lineText(readLineFrom(input)), "eof")       // 真 EOF：REPL 由此退出
-}
-
-@Test
-func readLineFrom_emptyStreamIsEof() {
-    let input = ByteBuffer(Array<Byte>(0, repeat: 0))
-    @Expect(lineText(readLineFrom(input)), "eof")
-}
-
-@Test
-func readLineFrom_readErrorIsFailedNotEof() {
-    @Expect(lineText(readLineFrom(FailingInputStream())).startsWith("failed:"), true)
 }
