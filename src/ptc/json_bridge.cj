@@ -148,6 +148,23 @@ public class JsonBridge {
         }
     }
 
+    /**
+     * 取出对象里的字符串字段；缺失或类型不符返回 `None`。
+     *
+     * 工具参数是 JSON 对象，读取其中的字符串字段（如 `code` / `description`）
+     * 在运行期与呈现层都要用，因此放在这里而不是各自的调用点。
+     */
+    public static func stringField(value: JsonValue, name: String): Option<String> {
+        match (value) {
+            case JsonValue.Map(m) =>
+                match (m.get(name)) {
+                    case Some(JsonValue.String(s)) => Some(s)
+                    case _ => None
+                }
+            case _ => None
+        }
+    }
+
     /** 渲染嵌套深度上限：完成值可能来自工具，结构不可控。 */
     private static let MAX_RENDER_DEPTH: Int64 = 32
 

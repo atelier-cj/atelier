@@ -318,3 +318,93 @@ public func config_mcpServerEnvParsing() {
     // headers 不受影响
     @Expect(cfg.headers.size, 0)
 }
+
+// ═══════ PTC 配置：TOML → AgentConfig 的传递链 ═══════════════════════════
+// 这条链有三段（TomlAgent 反序列化 → agentConfigFrom → runtime），任何一段漏字段
+// 都会表现为「配置写了但不生效」，且不会报错——因此逐段都要有用例守住。
+
+@Test
+func tomlAgent_ptcFieldsRoundTrip() {
+    let a = TomlAgent()
+    a.name = "coder"
+    a.toolPresentation = "ptc"
+    a.ptcTimeoutSeconds = 45
+    a.ptcMaxSubCalls = 12
+
+    let dm = a.serialize()
+    // 往返即可覆盖「serialize 漏字段」：漏了 deserialize 会落回默认值，下面的断言会失败
+    let back = TomlAgent.deserialize(dm)
+    @Expect(back.toolPresentation, "ptc")
+    @Expect(back.ptcTimeoutSeconds, Int64(45))
+    @Expect(back.ptcMaxSubCalls, Int64(12))
+}
+
+@Test
+func tomlAgent_missingPtcFieldsUseDefaults() {
+    // 旧配置没有这三个字段：必须照常加载并落到与字段声明一致的默认值
+    let dm = DataModelStruct()
+        .add(field<String>("name", "legacy"))
+        .add(field<String>("model", "gpt-4o"))
+    let a = TomlAgent.deserialize(dm)
+    @Expect(a.name, "legacy")
+    @Expect(a.toolPresentation, "native")
+    @Expect(a.ptcTimeoutSeconds, Int64(30))
+    @Expect(a.ptcMaxSubCalls, Int64(64))
+}
+
+@Test
+func agentConfigFrom_carriesPtcFields() {
+    let a = TomlAgent()
+    a.name = "coder"
+    a.toolPresentation = "ptc"
+    a.ptcTimeoutSeconds = 45
+    a.ptcMaxSubCalls = 12
+
+    let cfg = agentConfigFrom(a)
+    @Expect(cfg.toolPresentation.toString(), "ptc")
+    @Expect(cfg.ptcTimeoutSeconds, UInt32(45))
+    @Expect(cfg.ptcMaxSubCalls, UInt32(12))
+}
+
+@Test
+func agentConfigFrom_defaultsStayNative() {
+    let cfg = agentConfigFrom(TomlAgent())
+    // 缺省必须保持现网行为
+    @Expect(cfg.toolPresentation.toString(), "native")
+    @Expect(cfg.ptcTimeoutSeconds, UInt32(30))
+    @Expect(cfg.ptcMaxSubCalls, UInt32(64))
+}
+
+@Test
+func agentConfigFrom_unknownPresentationFallsBackToNative() {
+    let a = TomlAgent()
+    a.toolPresentation = "PTC"          // 大小写写错
+    @Expect(agentConfigFrom(a).toolPresentation.toString(), "native")
+
+    let b = TomlAgent()
+    b.toolPresentation = "nonsense"
+    @Expect(agentConfigFrom(b).toolPresentation.toString(), "native")
+
+    let c = TomlAgent()
+    c.toolPresentation = "both"
+    @Expect(agentConfigFrom(c).toolPresentation.toString(), "both")
+}
+
+@Test
+func ptcBudget_clampsInvalidValues() {
+    // 配置笔误应退化为默认值，而不是让构造抛异常把整个 Agent 拖垮
+    @Expect(ptcBudget(45, UInt32(30)), UInt32(45))
+    @Expect(ptcBudget(0, UInt32(30)), UInt32(30))
+    @Expect(ptcBudget(-5, UInt32(30)), UInt32(30))
+    @Expect(ptcBudget(4294967296, UInt32(30)), UInt32(30))
+}
+
+@Test
+func agentConfigFrom_invalidBudgetsFallBack() {
+    let a = TomlAgent()
+    a.ptcTimeoutSeconds = 0
+    a.ptcMaxSubCalls = -1
+    let cfg = agentConfigFrom(a)
+    @Expect(cfg.ptcTimeoutSeconds, UInt32(30))
+    @Expect(cfg.ptcMaxSubCalls, UInt32(64))
+}

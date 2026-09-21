@@ -68,14 +68,14 @@ public class RunXispTool <: Tool {
     }
 
     public func execute(ctx: ToolContext, args: JsonValue): ToolResult {
-        let code = match (stringField(args, "code")) {
+        let code = match (JsonBridge.stringField(args, "code")) {
             case Some(value) => value
             case None => return RunXispTool.invalidArg("code")
         }
         if (code.trimAscii() == "") {
             return RunXispTool.invalidArg("code")
         }
-        let description = match (stringField(args, "description")) {
+        let description = match (JsonBridge.stringField(args, "description")) {
             case Some(value) => value
             case None => return RunXispTool.invalidArg("description")
         }
@@ -175,17 +175,5 @@ class RunXispHost <: PtcSubCallHost {
     public func nextCallId(): String {
         this.counter = this.counter + 1
         "${this.parentCallId}:ptc:${this.counter}"
-    }
-}
-
-/** 从工具参数对象里取字符串字段。 */
-func stringField(args: JsonValue, name: String): Option<String> {
-    match (args) {
-        case JsonValue.Map(m) =>
-            match (m.get(name)) {
-                case Some(JsonValue.String(s)) => Some(s)
-                case _ => None
-            }
-        case _ => None
     }
 }
