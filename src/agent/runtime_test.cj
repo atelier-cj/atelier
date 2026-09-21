@@ -898,3 +898,82 @@ public func runtime_openSubclassOverridesEntry() {
     @Expect(rt.chatCalls, Int64(1))
     @Expect(result.size >= Int64(1), true)
 }
+
+// ═══════ 失败路径必须能被消费端看见 ═══════════════════════════════
+// 这两条路径此前只 emit 事件、没把消息放进 currentMessages；消费端只从
+// result() 读消息，于是错误被完全吞掉——交互前端表现为「跑完什么都没显示」。
+
+/** chatStreaming 以错误收场：复刻连接建立失败 / 流读取中断（如 Socket is closed）。 */
+class StubStreamFailingProvider <: Provider {
+    public func name(): String { "stub-stream-failing" }
+
+    public func chat(req: ChatRequest): ChatResponse {
+        throw Exception("stream failed")
+    }
+
+    public func chatStreaming(req: ChatRequest): EventStream<ChatDelta, AssistantMessage> {
+        let stream = EventStream<ChatDelta, AssistantMessage>()
+        stream.setError(Exception("Socket is closed."))
+        stream
+    }
+}
+
+/** 在 beforeTurn 直接短路。 */
+class StubShortCircuitHook <: Hook {
+    public override func beforeTurn(ctx: HookContext, request: ChatRequest): TurnDecision {
+        TurnDecision.ShortCircuit("blocked by policy")
+    }
+}
+
+func assistantTextOf(m: Message): String {
+    match (m) {
+        case am: AssistantMessage =>
+            let sb = StringBuilder()
+            for (b in am.content.blocks()) {
+                match (b) { case ContentBlock.TextBlock(t) => sb.append(t); case _ => () }
+            }
+            sb.toString()
+        case _ => ""
+    }
+}
+
+func anyAssistantTextContains(messages: ArrayList<Message>, needle: String): Bool {
+    for (m in messages) {
+        if (assistantTextOf(m).contains(needle)) { return true }
+    }
+    false
+}
+
+@Test
+func runtime_providerFailureIsVisibleInMessages() {
+    let provider = StubStreamFailingProvider()
+    let providerReg = ProviderRegistry()
+    providerReg.register("default", provider)
+    let runtime = AgentRuntime(mcpRuntimeConfig(), provider, ToolRegistry(),
+        MemorySessionStore(), TrustManager(), SkillRegistry(), AgentRegistry(),
+        providerReg, ArrayList<Hook>(), { q => "" }, McpManager())
+
+    let msgs = ArrayList<Message>()
+    msgs.add(UserMessage(ContentList.ofText("hi"), 0))
+    let result = runtime.chat(msgs).result()
+
+    @Assert(anyAssistantTextContains(result, "Socket is closed"))
+}
+
+@Test
+func runtime_shortCircuitIsVisibleInMessages() {
+    let hooks = ArrayList<Hook>()
+    hooks.add(StubShortCircuitHook())
+    let provider = StubProvider()
+    let providerReg = ProviderRegistry()
+    providerReg.register("default", provider)
+    let runtime = AgentRuntime(mcpRuntimeConfig(), provider, ToolRegistry(),
+        MemorySessionStore(), TrustManager(), SkillRegistry(), AgentRegistry(),
+        providerReg, hooks, { q => "" }, McpManager())
+
+    let msgs = ArrayList<Message>()
+    msgs.add(UserMessage(ContentList.ofText("hi"), 0))
+    let result = runtime.chat(msgs).result()
+
+    @Assert(anyAssistantTextContains(result, "short-circuited"))
+}

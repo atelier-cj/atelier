@@ -210,7 +210,11 @@ public open class AgentRuntime {
                             currentMessages = chatReq.messages
                         case None =>
                             log.info("beforeTurn hook short-circuited run", Array<Attr>())
-                            this.emit(stream, TurnEndEvent(AssistantMessage(ContentList.ofText("[Run short-circuited by hook]"), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0), ArrayList<ToolResultMessage>()))
+                            let shortCircuitMsg = AssistantMessage(ContentList.ofText("[Run short-circuited by hook]"), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0)
+                            // 必须同时进消息列表：消费端只从 result() 读消息，仅 emit 事件
+                            // 等于什么都没发生（交互前端表现为「跑完界面上没有任何输出」）
+                            currentMessages.add(shortCircuitMsg)
+                            this.emit(stream, TurnEndEvent(shortCircuitMsg, ArrayList<ToolResultMessage>()))
                             finished = true
                             break
                     }
@@ -245,7 +249,10 @@ public open class AgentRuntime {
                         if (!aborted) { assistantMsg = chatStream.result() }
                     } catch (e: Exception) {
                         log.error("provider error: ${e.message}", Array<Attr>())
-                        this.emit(stream, TurnEndEvent(AssistantMessage(ContentList.ofText(e.message), "", "", StopReason.Error, TokenUsage(0, 0), 0), ArrayList<ToolResultMessage>()))
+                        let failureMsg = AssistantMessage(ContentList.ofText("[provider error] ${e.message}"), "", "", StopReason.Error, TokenUsage(0, 0), 0)
+                        // 同短路分支：错误必须进消息列表，否则消费端与界面都看不到它
+                        currentMessages.add(failureMsg)
+                        this.emit(stream, TurnEndEvent(failureMsg, ArrayList<ToolResultMessage>()))
                         finished = true
                         break
                     }
