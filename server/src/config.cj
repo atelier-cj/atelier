@@ -244,6 +244,8 @@ public class TomlAgent <: Serializable<TomlAgent> {
     public var ptcTimeoutSeconds: Int64 = 30
     // PTC 单次程序允许的子调用上限
     public var ptcMaxSubCalls: Int64 = 64
+    // 单次工具调用的墙钟预算（秒）；0 = 不限时
+    public var toolTimeout: Int64 = 30
     public var compaction: Option<TomlCompaction> = None
     public init() {}
 
@@ -259,6 +261,7 @@ public class TomlAgent <: Serializable<TomlAgent> {
         sb.add(field<String>("toolPresentation", toolPresentation))
         sb.add(field<Int64>("ptcTimeoutSeconds", ptcTimeoutSeconds))
         sb.add(field<Int64>("ptcMaxSubCalls", ptcMaxSubCalls))
+        sb.add(field<Int64>("toolTimeout", toolTimeout))
         match (this.compaction) {
             case Some(c) => sb.add(Field("compaction", c.serialize()))
             case None => ()
@@ -293,6 +296,7 @@ public class TomlAgent <: Serializable<TomlAgent> {
         r.toolPresentation = match (dms.get("toolPresentation")) { case s: DataModelString => s.getValue(); case _ => "native" }
         r.ptcTimeoutSeconds = match (dms.get("ptcTimeoutSeconds")) { case i: DataModelInt => i.getValue(); case _ => Int64(30) }
         r.ptcMaxSubCalls = match (dms.get("ptcMaxSubCalls")) { case i: DataModelInt => i.getValue(); case _ => Int64(64) }
+        r.toolTimeout = match (dms.get("toolTimeout")) { case i: DataModelInt => i.getValue(); case _ => Int64(30) }
         match (dms.get("compaction")) {
             case s: DataModelStruct => r.compaction = Some(TomlCompaction.deserialize(s))
             case _ => ()
@@ -489,7 +493,8 @@ public func agentConfigFrom(a: TomlAgent): AgentConfig {
         if (a.provider == "") { None } else { Some(a.provider) },
         a.tools, a.skills, a.mcpCooldownTurns,
         UInt32(20), Float32(0.7), UInt32(4096), None,
-        true, UInt32(16384), UInt32(20000), compactionCfg, UInt32(50), UInt32(30), UInt32(0),
+        true, UInt32(16384), UInt32(20000), compactionCfg, UInt32(50),
+        toolBudgetSeconds(a.toolTimeout, UInt32(30)), UInt32(0),
         ArrayList<String>(), None, 0, 0,
         toolPresentation: ToolPresentationMode.fromString(a.toolPresentation),
         ptcTimeoutSeconds: ptcBudget(a.ptcTimeoutSeconds, UInt32(30)),
@@ -505,6 +510,19 @@ public func agentConfigFrom(a: TomlAgent): AgentConfig {
  */
 func ptcBudget(value: Int64, fallback: UInt32): UInt32 {
     if (value <= 0 || value > 4294967295) {
+        return fallback
+    }
+    UInt32(value)
+}
+
+/**
+ * 工具预算秒数：与 {@link ptcBudget} 同样是收束，但 **0 是合法值**（不限时）。
+ *
+ * 不限时是使用者的显式选择，不能被「像笔误就回落」的规则悄悄改掉；
+ * 这里只挡负数与溢出。
+ */
+func toolBudgetSeconds(value: Int64, fallback: UInt32): UInt32 {
+    if (value < 0 || value > 4294967295) {
         return fallback
     }
     UInt32(value)

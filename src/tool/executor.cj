@@ -13,12 +13,19 @@ import jsonvalue.*
  * - Consecutive Parallel tools run concurrently (via spawn).
  * - If any tool returns terminate=true, remaining sequential tools are skipped
  *   (parallel tools already running may still complete).
+ *
+ * Every call is bounded by [toolTimeout] (0/None = unbounded) unless the tool
+ * declares its own budget; see {@link executeTool} for what "timeout" means for
+ * a synchronous tool.
  */
 public class ToolExecutor {
     let registry: ToolRegistry
+    /** 框架级工具预算；None 或不足 1ms = 不限时。 */
+    let toolTimeout: Option<Duration>
 
-    public init(registry: ToolRegistry) {
+    public init(registry: ToolRegistry, toolTimeout!: Option<Duration> = None) {
         this.registry = registry
+        this.toolTimeout = toolTimeout
     }
 
     /**
@@ -28,7 +35,7 @@ public class ToolExecutor {
         let maybeTool = this.registry.get(name)
         match (maybeTool) {
             case Some(tool) =>
-                return tool.execute(ctx, args)
+                return executeTool(tool, ctx, args, toolBudget(tool, this.toolTimeout))
             case None =>
                 return ToolResult("Tool not found: ${name}", None, true, false)
         }
@@ -60,7 +67,8 @@ public class ToolExecutor {
                     match (tool.executionMode()) {
                         case ToolExecutionMode.Sequential =>
                             // Run sequential tool directly
-                            let result = tool.execute(ctx, args)
+                            let result = executeTool(tool, ctx, args,
+                                toolBudget(tool, this.toolTimeout))
                             resultMap[i] = result
                             if (result.terminate) {
                                 // Mark remaining as skipped
@@ -103,7 +111,8 @@ public class ToolExecutor {
                                     case None => continue
                                 }
                                 let future = spawn {
-                                    let r = innerTool.execute(pctx, pargs)
+                                    let r = executeTool(innerTool, pctx, pargs,
+                                        toolBudget(innerTool, this.toolTimeout))
                                     (idx, r)
                                 }
                                 futures.add(future)

@@ -3,6 +3,7 @@ package atelier.ptc
 import std.unittest.*
 import std.unittest.testmacro.*
 import std.collection.*
+import std.sync.*
 import std.time.*
 import jsonvalue.*
 import atelier.tool.*
@@ -23,7 +24,8 @@ class RunXispTestHelpers {
         events: ArrayList<PtcEvent>,
         denyReason: Option<String>,
         maxSubCalls!: Int64 = 10,
-        timeout!: Option<Duration> = None
+        timeout!: Option<Duration> = None,
+        toolTimeout!: Option<Duration> = None
     ): PtcRunEnv {
         let auth: PtcAuthorizer = { _, _ =>
             match (denyReason) {
@@ -36,7 +38,8 @@ class RunXispTestHelpers {
             { e => events.add(e) },
             auth,
             maxSubCalls: maxSubCalls,
-            timeout: timeout)
+            timeout: timeout,
+            toolTimeout: toolTimeout)
     }
 
     static func tools(items: Array<Tool>): ArrayList<Tool> {
@@ -312,5 +315,103 @@ class ThrowingTool <: Tool {
 
     public func executionMode(): ToolExecutionMode {
         ToolExecutionMode.Sequential
+    }
+}
+
+/**
+ * 子调用预算：卡住的工具不能把整个脚本拖死，也不能让模型只看到一句
+ * 笼统的「工具超时」——失败要带着原因回到程序（进而回到模型）。
+ */
+class BlockingTool <: Tool {
+    let gate: AtomicBool
+
+    init(gate: AtomicBool) {
+        this.gate = gate
+    }
+
+    public func name(): String {
+        "blocker"
+    }
+
+    public func description(): String {
+        "blocks until released"
+    }
+
+    public func schema(): JsonValue {
+        JsonValue.Map(HashMap<String, JsonValue>())
+    }
+
+    public func execute(ctx: ToolContext, args: JsonValue): ToolResult {
+        var waited: Int64 = 0
+        while (waited < 30000 && !this.gate.load()) {
+            sleep(Duration.millisecond * 10)
+            waited += 10
+        }
+        ToolResult("never-blocked", None, false, false)
+    }
+
+    public func executionMode(): ToolExecutionMode {
+        ToolExecutionMode.Sequential
+    }
+}
+
+@Test
+func runXisp_subCallTimeoutFailsTheProgram() {
+    let gate = AtomicBool(false)
+    let tool = RunXispTool(RunXispTestHelpers.tools([BlockingTool(gate)]),
+        RunXispTestHelpers.makeEnv(ArrayList<PtcEvent>(), None,
+            timeout: Duration.second * 30,
+            toolTimeout: Duration.millisecond * 300))
+
+    let start = MonoTime.now()
+    let result = tool.execute(ToolContext(""),
+        RunXispTestHelpers.toolArgs("(tools::blocker {})", "blocked sub-call"))
+    let elapsed = (MonoTime.now() - start).toMilliseconds()
+    gate.store(true)
+
+    @Assert(result.isError)
+    @Assert(result.text.contains("[tool timeout]"))
+    // 子调用预算 300ms：远早于程序自己的 30s 预算，说明是子调用被兜住，
+    // 而不是整个程序被外层掐断
+    if (elapsed >= 10000) {
+        @Fail("expected the sub-call budget to fire, waited ${elapsed}ms")
+    }
+}
+
+@Test
+func runXisp_timeoutBudgetLeavesRoomForInnerFailure() {
+    // 程序 30s + 一次在途子调用 20s + 宽限：外层必须比内层晚，否则脚本
+    // 永远给不出自己的失败原因
+    let tool = RunXispTool(RunXispTestHelpers.tools([]),
+        RunXispTestHelpers.makeEnv(ArrayList<PtcEvent>(), None,
+            timeout: Duration.second * 30,
+            toolTimeout: Duration.second * 20))
+    match (tool.timeoutBudget()) {
+        case Some(value) =>
+            @Assert(value.toMilliseconds() > 50000)
+            @Expect(value.toMilliseconds(), 55000)
+        case None => @Fail("expected a declared budget")
+    }
+}
+
+@Test
+func runXisp_timeoutBudgetWithoutToolBudgetStillLeavesGrace() {
+    let tool = RunXispTool(RunXispTestHelpers.tools([]),
+        RunXispTestHelpers.makeEnv(ArrayList<PtcEvent>(), None,
+            timeout: Duration.second * 30))
+    match (tool.timeoutBudget()) {
+        case Some(value) => @Expect(value.toMilliseconds(), 35000)
+        case None => @Fail("expected a declared budget")
+    }
+}
+
+@Test
+func runXisp_timeoutBudgetIsNoneWithoutProgramBudget() {
+    // 程序不限时 → 不替它声明外层预算，交回框架配置
+    let tool = RunXispTool(RunXispTestHelpers.tools([]),
+        RunXispTestHelpers.makeEnv(ArrayList<PtcEvent>(), None))
+    match (tool.timeoutBudget()) {
+        case None => ()
+        case Some(_) => @Fail("expected None when the program has no budget")
     }
 }

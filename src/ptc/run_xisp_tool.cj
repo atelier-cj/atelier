@@ -34,6 +34,8 @@ public class RunXispTool <: Tool {
         "(println ...) 的内容会作为日志一并返回。"
     private static let DESC_PARAM_DESCRIPTION: String =
         "本次调用的简短说明，用于界面标注。"
+    /** 外层兜底预算在内层预算之外多给的宽限（毫秒）。 */
+    static let TIMEOUT_GRACE_MS: Int64 = 5000
 
     public init(visibleTools: ArrayList<Tool>, env: PtcRunEnv) {
         this.visibleTools = visibleTools
@@ -65,6 +67,28 @@ public class RunXispTool <: Tool {
      */
     public func executionMode(): ToolExecutionMode {
         ToolExecutionMode.Sequential
+    }
+
+    /**
+     * 外层预算 = 程序自身预算 + 一次在途子调用的最大超出 + 宽限。
+     *
+     * 程序卡在子调用里时，求值器的中断检查拿不到执行权，因此程序真正可能跑到的
+     * 时刻是「程序预算 + 那个子调用剩下的时间」。外层若按程序预算掐断，脚本就
+     * 永远给不出自己的失败原因（只剩一句笼统的工具超时），所以外层放宽到那之后：
+     * 先让内层报错，实在不动了才由外层兜底。
+     */
+    public func timeoutBudget(): Option<Duration> {
+        match (this.env.timeout) {
+            case None => None
+            case Some(program) =>
+                let inFlight = match (this.env.toolTimeout) {
+                    case Some(sub) => sub
+                    case None => Duration.Zero
+                }
+                let ms = program.toMilliseconds() + inFlight.toMilliseconds() +
+                    RunXispTool.TIMEOUT_GRACE_MS
+                Some(Duration.millisecond * ms)
+        }
     }
 
     public func execute(ctx: ToolContext, args: JsonValue): ToolResult {
@@ -163,7 +187,8 @@ class RunXispHost <: PtcSubCallHost {
     public func dispatch(tool: Tool, args: JsonValue, callId: String): ToolResult {
         this.env.emit(PtcEvent.DispatchStart(callId, tool.name()))
         let result = try {
-            tool.execute(this.ctx, args)
+            // 子调用与模型直调受同一个预算约束：卡住的工具不能把整个脚本一起拖死
+            executeTool(tool, this.ctx, args, toolBudget(tool, this.env.toolTimeout))
         } catch (e: Exception) {
             // 工具抛出的异常不能穿过求值器：转成普通的失败结果
             ToolResult("[tool error: ${e.message}]", None, true, false)
