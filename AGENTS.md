@@ -64,6 +64,7 @@ cjpm clean
 | `ystyle::mcp` | MCP 协议层 | 工具发现/调用/传输；注册表 2.3.11（stdlibio env/args 完整注入） |
 | `bstorm` | 会话持久化 | 基于 badger-cj 的 ORM 库 |
 | `acp` | ACP v1 协议层 | 注册表 0.2.2（Agent/Client 双端，acp-cj） |
+| `ystyle::xisp` | PTC 程序执行引擎 | 注册表 0.4.1（`registerPure` 纯函数子集 / 求值中断检查点 / 严格解析；此前为本地 path 依赖） |
 
 ## 项目结构
 
