@@ -15,9 +15,8 @@ server = { path = "../server" }
 "opencj::ulid" = "0.1.2"
 # 工具参数的 JSON 呈现与测试里的 JsonValue 构造需要直接引用该包
 "jsonvalue" = "1.1.0"
-# 与核心库保持同一来源：核心库以 path 依赖 xisp（其 PTC 增强尚未发版），
-# 此处若仍钉中心仓版本会让同一个包出现两个来源。
-"ystyle::xisp" = { path = "../../xisp" }
+# 与核心库保持同一来源：核心库同样依赖 xisp 0.4.1（已发中心仓）
+"ystyle::xisp" = "0.4.1"
 "cjterm_stream" = "0.1.0"
 "pulldown4cj" = "0.1.0"
 
