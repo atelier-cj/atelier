@@ -23,6 +23,7 @@ baseURL = "https://api.openai.com/v1"
 apiKey = "${OPENAI_API_KEY}"   # 支持 ${ENV_VAR} 引用环境变量（ollama 不需要）
 headers = ["x-custom: value"]  # 自定义请求头（可选，Name: value 格式）
 extra = { reasoning_effort = "high" }  # 透传扩展参数（可选，写入请求体）
+skipTlsVerify = false          # 跳过 TLS 证书校验（可选，默认 false；仅在系统 CA 不可得时开启，见 docs/providers.md「TLS 校验」）
 
 [[provider]]
 name = "ollama"
