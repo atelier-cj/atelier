@@ -73,6 +73,52 @@ func toProviderConfig_fieldsCarried() {
     @Expect(cfg.apiKey, "key")
 }
 
+// 默认不跳过 TLS 校验：新增字段不得把既有配置悄悄降级成不校验
+@Test
+func toProviderConfig_skipTlsVerifyDefaultOff() {
+    let tp = makeTomlProvider(DataModelNull())
+    @Expect(toProviderConfig(tp).skipTlsVerify, false)
+}
+
+@Test
+func toProviderConfig_skipTlsVerifyCarried() {
+    let tp = makeTomlProvider(DataModelNull())
+    tp.skipTlsVerify = true
+    @Expect(toProviderConfig(tp).skipTlsVerify, true)
+}
+
+@Test
+func tomlProvider_skipTlsVerifyRoundTrip() {
+    let tp = makeTomlProvider(DataModelNull())
+    tp.skipTlsVerify = true
+    @Expect(TomlProvider.deserialize(tp.serialize()).skipTlsVerify, true)
+}
+
+// 配置文件路径：[[provider]] skipTlsVerify = true 必须一路走到 ProviderConfig
+@Test
+func tomlConfig_skipTlsVerifyFromTomlText() {
+    let content = "[[provider]]\nname = \"win\"\ntype = \"openai\"\n" +
+        "baseURL = \"https://api.deepseek.com\"\napiKey = \"k\"\nskipTlsVerify = true\n"
+    let path = writeTomlTemp(content)
+    let cfg = unmarshal<TomlConfig>(path)
+    remove(Path(path))
+    @Expect(cfg.provider.size, 1)
+    @Expect(cfg.provider[0].skipTlsVerify, true)
+    @Expect(toProviderConfig(cfg.provider[0]).skipTlsVerify, true)
+}
+
+// 配置文件里没写该字段 → 保持系统 CA 校验
+@Test
+func tomlConfig_skipTlsVerifyAbsentStaysOff() {
+    let content = "[[provider]]\nname = \"linux\"\ntype = \"openai\"\n" +
+        "baseURL = \"https://api.deepseek.com\"\napiKey = \"k\"\n"
+    let path = writeTomlTemp(content)
+    let cfg = unmarshal<TomlConfig>(path)
+    remove(Path(path))
+    @Expect(cfg.provider.size, 1)
+    @Expect(cfg.provider[0].skipTlsVerify, false)
+}
+
 @Test
 func tomlProvider_serializeDeserializeRoundTrip() {
     let extra = DataModelStruct()

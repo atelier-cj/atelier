@@ -49,6 +49,28 @@ apiKey = "${OPENAI_API_KEY}"
 | 阿里 Qwen | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen-turbo`, `qwen-max` |
 | 硅基流动 | `https://api.siliconflow.cn/v1` | `Qwen/Qwen2.5-72B-Instruct` |
 
+### TLS 校验
+
+默认用**系统 CA** 校验服务端证书（stdx 的 `Default` 模式）。`skipTlsVerify = true` 时该 Provider
+不校验证书（`TrustAll`）：
+
+```toml
+[[provider]]
+name = "default"
+type = "openai"
+baseURL = "https://api.deepseek.com"
+apiKey = "sk-xxx"
+skipTlsVerify = true   # 仅在系统 CA 不可得时开启
+```
+
+它只解决一类问题：**运行环境取不到系统 CA**，导致任何 https 请求都以 unknown CA 失败。典型场景是
+stdx 在 Windows 上拿不到系统证书库；此时换 HTTP、换服务端、重试都无用，因为问题不在对端，而在客户端
+找不到可用的信任锚。
+
+代价是放弃中间人防护——API Key 与请求体对任何能劫持连接的一方可见。**优先补信任锚**（把自签证书或
+私有 CA 加入系统信任库），确认做不到再用这个开关；它是「环境里没有信任锚」的兜底，不是「https 连不上
+就打开」的开关。
+
 ### 代码创建
 
 ```cangjie

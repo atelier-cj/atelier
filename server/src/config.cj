@@ -317,6 +317,10 @@ public class TomlProvider <: Serializable<TomlProvider> {
     public var apiKey: String = ""
     public var headers: ArrayList<String> = ArrayList()
     public var extra: DataModel = DataModelNull()
+    // 跳过 TLS 证书校验（TrustAll）。仅用于「运行环境取不到系统 CA」的场景
+    // （典型：stdx 在 Windows 上拿不到系统证书库，任何 https 都以 unknown CA 失败）
+    // 与本地抓包/自签调试；默认 false，保持系统 CA 校验。
+    public var skipTlsVerify: Bool = false
     public init() {}
 
     public func serialize(): DataModel {
@@ -327,6 +331,7 @@ public class TomlProvider <: Serializable<TomlProvider> {
             .add(field<String>("apiKey", apiKey))
             .add(field<ArrayList<String>>("headers", headers))
             .add(Field("extra", this.extra))
+            .add(field<Bool>("skipTlsVerify", skipTlsVerify))
     }
 
     public static func deserialize(dm: DataModel): TomlProvider {
@@ -344,6 +349,10 @@ public class TomlProvider <: Serializable<TomlProvider> {
             case _ => ()
         }
         r.extra = dms.get("extra")
+        match (dms.get("skipTlsVerify")) {
+            case b: DataModelBool => r.skipTlsVerify = b.getValue()
+            case _ => ()
+        }
         r
     }
 }
@@ -356,7 +365,7 @@ public func toProviderConfig(tp: TomlProvider): ProviderConfig {
         case _ => ()
     }
     ProviderConfig(tp.providerType, tp.name, tp.baseURL, tp.apiKey,
-        tp.headers, extra)
+        tp.headers, extra, skipTlsVerify: tp.skipTlsVerify)
 }
 
 public class TomlMcpServer <: Serializable<TomlMcpServer> {
