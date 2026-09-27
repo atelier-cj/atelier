@@ -67,16 +67,15 @@ class ImageCapabilityWrapper <: Provider {
     }
 }
 
-// 请求消息中是否含图片块（仅 user 消息携带的图片会发送）
+// 请求消息中是否含图片块（仅 user 消息携带的图片会发送）。
+// 判定走 llm_api 的 isImageBlock：图片有多种形态（内联/URL、带 detail、Files API 引用），
+// 在这里逐个 match 会漏判新形态，而漏判的后果是把图发给不支持视觉的模型。
 func hasImageBlockIn(msgs: ArrayList<Message>): Bool {
     for (m in msgs) {
         match (m) {
             case um: UserMessage =>
                 for (b in um.content.blocks()) {
-                    match (b) {
-                        case ContentBlock.ImageBlock(_, _) => return true
-                        case _ => ()
-                    }
+                    if (isImageBlock(b)) { return true }
                 }
             case _ => ()
         }

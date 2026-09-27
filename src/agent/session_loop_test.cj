@@ -118,8 +118,10 @@ class RecordingImageProvider <: Provider {
             match (m) {
                 case um: UserMessage =>
                     for (b in um.content.blocks()) {
+                        // 用 isImageBlock 而非逐个 match：图片有多种形态（内联/URL、带 detail、
+                        // Files API 引用），漏一种就会让"图片没到协议层"被误判成通过
+                        if (isImageBlock(b)) { this.seenImages++ }
                         match (b) {
-                            case ContentBlock.ImageBlock(_, _) => this.seenImages++
                             case ContentBlock.TextBlock(t) => this.seenTexts.add(t)
                             case _ => ()
                         }
@@ -195,6 +197,63 @@ public func sessionLoop_imageOnlyAttachment_noText() {
         { => false }, { => false }, attachments: att)
     @Expect(provider.seenImages, 1)
     @Expect(provider.seenTexts.size, 0)
+}
+
+// Files API 引用：本地只有 file_id，会话里必须把它存住 —— 丢了 file_id，
+// 重放历史时这张图就彻底消失了（服务端数据没有本地线索可查）
+@Test
+public func sessionLoop_fileRefAttachment_reachesProviderAndPersists() {
+    let provider = RecordingImageProvider()
+    let (loop, store) = makeImageLoop(provider)
+    let att = ArrayList<ContentBlock>()
+    att.add(ContentBlock.ImageFileBlock("file-api-abc123"))
+    loop.run("sess_img_file", "这是什么", subConfig(), provider, None, SessionEnvironment(),
+        { => false }, { => false }, attachments: att)
+    @Expect(provider.seenImages, 1)
+    let msgs = store.load("sess_img_file")
+    var found = false
+    for (m in msgs) {
+        match (m) {
+            case um: UserMessage =>
+                for (b in um.content.blocks()) {
+                    match (b) {
+                        case ContentBlock.ImageFileBlock(f) =>
+                            if (f == "file-api-abc123") { found = true }
+                        case _ => ()
+                    }
+                }
+            case _ => ()
+        }
+    }
+    @Expect(found, true)
+}
+
+// detail 属于"图片怎么被处理"的一部分：不存住，重放历史时会悄悄退回服务端默认粒度
+@Test
+public func sessionLoop_imageDetailSurvivesRoundTrip() {
+    let provider = RecordingImageProvider()
+    let (loop, store) = makeImageLoop(provider)
+    let att = ArrayList<ContentBlock>()
+    att.add(ContentBlock.ImageBlock("aGVsbG8=", "image/png", "low"))
+    loop.run("sess_img_detail", "看图", subConfig(), provider, None, SessionEnvironment(),
+        { => false }, { => false }, attachments: att)
+    @Expect(provider.seenImages, 1)
+    let msgs = store.load("sess_img_detail")
+    var found = false
+    for (m in msgs) {
+        match (m) {
+            case um: UserMessage =>
+                for (b in um.content.blocks()) {
+                    match (b) {
+                        case ContentBlock.ImageBlock(d, _, detail) =>
+                            if (d == "aGVsbG8=" && detail == "low") { found = true }
+                        case _ => ()
+                    }
+                }
+            case _ => ()
+        }
+    }
+    @Expect(found, true)
 }
 
 @Test
