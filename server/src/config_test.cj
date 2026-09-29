@@ -548,3 +548,19 @@ func agentConfigFrom_turnAndOutputBudgets() {
     @Expect(fixed.maxOutputTokens, UInt32(4096))
     @Expect(fixed.maxLengthContinuations, UInt32(3))
 }
+
+// 温度从 TOML 读取（此前硬编码 0.7）：允许 0（确定性），越界回落默认值。
+@Test
+func agentConfigFrom_temperature() {
+    let ta = TomlAgent()
+    ta.temperature = 0.2
+    @Expect(agentConfigFrom(ta).temperature, Float32(0.2))
+
+    let zero = TomlAgent()
+    zero.temperature = 0.0
+    @Expect(agentConfigFrom(zero).temperature, Float32(0.0))
+
+    let bad = TomlAgent()
+    bad.temperature = 3.5
+    @Expect(agentConfigFrom(bad).temperature, Float32(0.7))
+}
