@@ -1,10 +1,12 @@
 [package]
 name = "atelier"
 version = "0.1.0"
+description = "纯仓颉实现的 Agent Harness：把模型变成 Agent 的那层脚手架（工具 / Provider / 会话 / 压缩 / 信任闸门 / ACP）"
 cjc-version = "1.1.0"
 output-type = "static"
 compile-option = "-Woff unused"
 link-option = "-lstdx.crypto.digest"
+include = ["/src", "/LICENSE"]
 license = ["MIT"]
 authors = ["ystyle"]
 repository = "https://atomgit.com/ystyle/atelier"
@@ -24,3 +26,22 @@ repository = "https://atomgit.com/ystyle/atelier"
 
 [profile.test]
 filter = "-ProviderIntegrationTest.*"
+
+# 成员独立构建/发版时生效（工作区内构建由根 cjpm.toml 统一提供，此处为独立场景保留）
+[target.x86_64-unknown-linux-gnu]
+link-option = "-luring"
+[target.x86_64-unknown-linux-gnu.bin-dependencies]
+path-option = ["${CANGJIE_STDX_PATH}"]
+
+[target.aarch64-unknown-linux-gnu.bin-dependencies]
+path-option = ["${CANGJIE_STDX_PATH}"]
+
+[target.x86_64-apple-darwin.bin-dependencies]
+path-option = ["${CANGJIE_STDX_PATH}"]
+[target.aarch64-apple-darwin.bin-dependencies]
+path-option = ["${CANGJIE_STDX_PATH}"]
+
+[target.x86_64-w64-mingw32]
+link-option = "-lcrypt32"
+[target.x86_64-w64-mingw32.bin-dependencies]
+path-option = ["${CANGJIE_STDX_PATH}"]
