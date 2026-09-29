@@ -14,7 +14,7 @@ atelier = "0.1.0"
 server = "0.1.0"
 "opencj::ulid" = "0.1.2"
 # 工具参数的 JSON 呈现与测试里的 JsonValue 构造需要直接引用该包
-"jsonvalue" = "1.1.0"
+"jsonvalue" = "1.1.1"
 # 与核心库保持同一来源：核心库同样依赖 xisp 0.4.1（已发中心仓）
 "ystyle::xisp" = "0.4.1"
 "cjterm_stream" = "0.1.0"
