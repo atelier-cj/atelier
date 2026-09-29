@@ -75,7 +75,10 @@ cli.app acp [agent]
   默认值 = 当前 agent 配置的模型
 - `compaction`（`boolean`）：上下文压缩开关
 
-语义：`session/new` 响应下发初始列表（Client 须声明 `session.configOptions`）；修改经
+语义：`session/new` 响应下发初始列表——Client 显式声明 `session.configOptions` 时下发；
+**Client 完全没声明 session 能力时也下发**（"未知"不等于"不支持"：只声明 `fs`/`terminal`/`auth`
+的 Client 同样可能依赖 config options 选模型）；仅当 Client 声明了 `session` 但明确不含
+`configOptions` 时才不下发。修改经
 `session/set_config_option`（非法 id/值回 `-32602`），响应回完整最新列表；覆盖**只作用于该 ACP 会话**
 （每回合合成生效 config，不改全局 agent 配置）；进程重启后恢复默认。
 

@@ -35,6 +35,22 @@ let MaxAcpLoadMessages: Int64 = 15
 
 // AcpBridge：把 atelier 运行时接入 ACP v1 Agent 侧（stdio）。
 // 组装 AcpAgent + 注册全部生命周期回调 + serve()；一个进程服务一个 agent（启动时选定）。
+/**
+ * 是否向该 Client 下发会话初始配置（config options）。
+ *
+ * - Client 声明了 `session.configOptions` → 下发；
+ * - Client **完全没声明** session 能力 → 仍然下发：这是「未知」，不是「不支持」。
+ *   只声明 fs/terminal/auth 的 Client 同样可能依赖 config options 选模型，
+ *   不下发会让它们完全拿不到模型选择机制；
+ * - Client 声明了 session 但明确不含 configOptions → 不下发（尊重显式声明）。
+ */
+public func shouldSendConfigOptions(caps: ClientCapabilities): Bool {
+    match (caps.session) {
+        case Some(s) => s.configOptions.isSome()
+        case None => true
+    }
+}
+
 public class AcpBridge {
     private let agent: AcpAgent
     private let agentName: String
@@ -154,9 +170,11 @@ public class AcpBridge {
         }
     }
 
-    // session/new 响应：下发会话初始配置（client 未声明 session.configOptions 时不带）
+    // session/new 响应：下发会话初始配置。
+    // 判定见 shouldSendConfigOptions：Client 未声明任何 session 能力时**仍然下发**
+    // （"未知"不等于"不支持"——Harbor 这类 Client 只声明 fs/terminal/auth，却依赖 config options 选模型）。
     private func initialState(req: NewSessionRequest): ?SessionInitialState {
-        if (this.agent.clientCapabilities.session.isNone()) { return None }
+        if (!shouldSendConfigOptions(this.agent.clientCapabilities)) { return None }
         // onNewSession 钩子先于本钩子执行并登记 host（空 id 时 get 亦返回 None）
         let host: ?HostState = synchronized(this.hostsLock) {
             match (this.hosts.get(this.lastNewAcpId)) {
