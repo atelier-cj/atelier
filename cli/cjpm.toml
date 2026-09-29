@@ -10,8 +10,8 @@ authors = ["ystyle"]
 repository = "https://atomgit.com/ystyle/atelier"
 
 [dependencies]
-atelier = { path = ".." }
-server = { path = "../server" }
+atelier = "0.1.0"
+server = "0.1.0"
 "opencj::ulid" = "0.1.2"
 # 工具参数的 JSON 呈现与测试里的 JsonValue 构造需要直接引用该包
 "jsonvalue" = "1.1.0"
@@ -23,20 +23,3 @@ server = { path = "../server" }
 [package.package-configuration."cli.app"]
 output-type = "executable"
 compile-option = "--static -Woff unused"
-
-[target.x86_64-unknown-linux-gnu]
-link-option = "-luring"
-
-[target.x86_64-w64-mingw32]
-link-option = "-lcrypt32"
-
-[target.x86_64-unknown-linux-gnu.bin-dependencies]
-path-option = ["${CANGJIE_STDX_PATH}"]
-[target.aarch64-unknown-linux-gnu.bin-dependencies]
-path-option = ["${CANGJIE_STDX_PATH}"]
-[target.x86_64-apple-darwin.bin-dependencies]
-path-option = ["${CANGJIE_STDX_PATH}"]
-[target.aarch64-apple-darwin.bin-dependencies]
-path-option = ["${CANGJIE_STDX_PATH}"]
-[target.x86_64-w64-mingw32.bin-dependencies]
-path-option = ["${CANGJIE_STDX_PATH}"]

@@ -69,21 +69,22 @@ cli.app run "你好"
 ## 快速开始
 
 ```bash
-# 构建终端 agent（cli.app；产物在 cli/target/release/bin/）
-(cd cli && cjpm build -j 16)
+# 构建整个工作区（atelier 核心库 + server + cli；一条命令覆盖三个成员）
+# 产物：target/release/bin/cli.app
+cjpm build -j 16
 
 # 写入环境变量
 export OPENAI_API_KEY="sk-xxx"
 export OPENAI_BASE_URL="https://api.openai.com/v1"
 
 # 交互式 TUI
-./cli/target/release/bin/cli.app tui
+./target/release/bin/cli.app tui
 
 # 单次对话
-./cli/target/release/bin/cli.app run "你好，介绍一下你自己"
+./target/release/bin/cli.app run "你好，介绍一下你自己"
 
 # 启动 HTTP 服务
-./cli/target/release/bin/cli.app serve 8080
+./target/release/bin/cli.app serve 8080
 
 # 调用 API
 curl http://localhost:8080/agent/run \

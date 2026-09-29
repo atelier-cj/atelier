@@ -7,3 +7,6 @@ target
 # Codewhale 工具工作目录
 .codewhale/
 __pycache__/
+
+# cjpm 构建脚本缓存（构建产物，不进版本库）
+build-script-cache/
