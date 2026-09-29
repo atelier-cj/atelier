@@ -18,6 +18,9 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
     public let maxTurns: UInt32
     public let temperature: Float32
     public let maxOutputTokens: UInt32
+    // 输出被 provider 的 token 上限截断（StopReason.Length）时，同一回合内自动续跑的次数上限。
+    // 0 = 不续跑（截断即回合结束）。默认 3：一次截断不等于任务结束，但也要防止无限续跑。
+    public let maxLengthContinuations: UInt32
     public let thinkingLevel: Option<String>
     public let compactionEnabled: Bool
     public let compactionReserveTokens: UInt32
@@ -61,7 +64,8 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
         toolPresentation!: ToolPresentationMode = ToolPresentationMode.Native,
         ptcTimeoutSeconds!: UInt32 = 30,
         ptcMaxSubCalls!: UInt32 = 64,
-        sideEffectToolTimeout!: UInt32 = 300
+        sideEffectToolTimeout!: UInt32 = 300,
+        maxLengthContinuations!: UInt32 = 3
     ) {
         this.name = name; this.description = description
         this.systemPrompt = systemPrompt; this.userPromptTemplate = userPromptTemplate
@@ -83,6 +87,7 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
         this.toolPresentation = toolPresentation
         this.ptcTimeoutSeconds = ptcTimeoutSeconds
         this.ptcMaxSubCalls = ptcMaxSubCalls
+        this.maxLengthContinuations = maxLengthContinuations
     }
 
     public static func default(): AgentConfig {
@@ -102,6 +107,7 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
         w.writeName("maxTurns").writeValue(Int64(this.maxTurns))
         w.writeName("temperature").writeValue(Float64(this.temperature))
         w.writeName("maxOutputTokens").writeValue(Int64(this.maxOutputTokens))
+        w.writeName("maxLengthContinuations").writeValue(Int64(this.maxLengthContinuations))
         w.writeName("compactionEnabled").writeValue(this.compactionEnabled)
         w.writeName("compactionReserveTokens").writeValue(Int64(this.compactionReserveTokens))
         w.writeName("keepRecentTokens").writeValue(Int64(this.keepRecentTokens))
@@ -135,6 +141,7 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
         var tools = ArrayList<String>(); var skills = ArrayList<String>()
         var mcpCooldownTurns = Int64(0)
         var maxTurns = UInt32(20); var temperature = Float32(0.7); var maxOutputTokens = UInt32(4096)
+        var maxLengthContinuations = UInt32(3)
         var thinkingLevel: Option<String> = None
         var compactionEnabled = true
         var compactionReserveTokens = UInt32(16384); var keepRecentTokens = UInt32(20000)
@@ -165,6 +172,7 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
                 case "maxTurns" => maxTurns = UInt32(r.readValue<Int64>())
                 case "temperature" => temperature = Float32(r.readValue<Float64>())
                 case "maxOutputTokens" => maxOutputTokens = UInt32(r.readValue<Int64>())
+                case "maxLengthContinuations" => maxLengthContinuations = UInt32(r.readValue<Int64>())
                 case "thinkingLevel" => thinkingLevel = r.readValue<Option<String>>()
                 case "compactionEnabled" => compactionEnabled = r.readValue<Bool>()
                 case "compactionReserveTokens" => compactionReserveTokens = UInt32(r.readValue<Int64>())
@@ -196,7 +204,8 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
             toolPresentation: toolPresentation,
             ptcTimeoutSeconds: ptcTimeoutSeconds,
             ptcMaxSubCalls: ptcMaxSubCalls,
-            sideEffectToolTimeout: sideEffectToolTimeout)
+            sideEffectToolTimeout: sideEffectToolTimeout,
+            maxLengthContinuations: maxLengthContinuations)
     }
 
     public func toString(): String {

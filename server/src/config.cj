@@ -238,6 +238,12 @@ public class TomlAgent <: Serializable<TomlAgent> {
     public var tools: ArrayList<String> = ArrayList()
     public var skills: ArrayList<String> = ArrayList()
     public var mcpCooldownTurns: Int64 = 0
+    // 单次 run 的最大回合数（每次「模型请求 + 工具批次」记一回合）
+    public var maxTurns: Int64 = 20
+    // 单条回复的最大输出 token 数（撞上限时按 maxLengthContinuations 续跑）
+    public var maxOutputTokens: Int64 = 4096
+    // 输出被 token 上限截断后，同一回合内自动续跑的次数上限；0 = 不续跑（截断即回合结束）
+    public var maxLengthContinuations: Int64 = 3
     // 工具呈现模式：native（默认，逐次 JSON Schema）/ ptc（只暴露 run_xisp）/ both
     public var toolPresentation: String = "native"
     // PTC 单次程序的经过时间预算（秒）
@@ -506,14 +512,15 @@ public func agentConfigFrom(a: TomlAgent): AgentConfig {
         a.model,
         if (a.provider == "") { None } else { Some(a.provider) },
         a.tools, a.skills, a.mcpCooldownTurns,
-        UInt32(20), Float32(0.7), UInt32(4096), None,
+        budgetOrDefault(a.maxTurns, UInt32(20)), Float32(0.7), budgetOrDefault(a.maxOutputTokens, UInt32(4096)), None,
         true, UInt32(16384), UInt32(20000), compactionCfg, UInt32(50),
         toolBudgetSeconds(a.toolTimeout, UInt32(30)), UInt32(0),
         ArrayList<String>(), None, 0, 0,
         toolPresentation: ToolPresentationMode.fromString(a.toolPresentation),
         ptcTimeoutSeconds: ptcBudget(a.ptcTimeoutSeconds, UInt32(30)),
         ptcMaxSubCalls: ptcBudget(a.ptcMaxSubCalls, UInt32(64)),
-        sideEffectToolTimeout: toolBudgetSeconds(a.sideEffectToolTimeout, UInt32(300)))
+        sideEffectToolTimeout: toolBudgetSeconds(a.sideEffectToolTimeout, UInt32(300)),
+        maxLengthContinuations: continuationBudget(a.maxLengthContinuations, UInt32(3)))
 }
 
 /**
@@ -523,6 +530,22 @@ public func agentConfigFrom(a: TomlAgent): AgentConfig {
  * 与 `ToolPresentationMode.fromString` 的态度一致：笔误应当退化为「保持现状」，
  * 不该让整个 Agent 起不来。
  */
+// 与 ptcBudget 同义，名字直白些：<=0 或越界即回落默认值
+func budgetOrDefault(value: Int64, fallback: UInt32): UInt32 {
+    if (value <= 0 || value > 4294967295) {
+        return fallback
+    }
+    UInt32(value)
+}
+
+// 续跑预算允许 0（= 不续跑，保持「截断即回合结束」），只拦负数与越界
+func continuationBudget(value: Int64, fallback: UInt32): UInt32 {
+    if (value < 0 || value > 4294967295) {
+        return fallback
+    }
+    UInt32(value)
+}
+
 func ptcBudget(value: Int64, fallback: UInt32): UInt32 {
     if (value <= 0 || value > 4294967295) {
         return fallback
