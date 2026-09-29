@@ -24,6 +24,7 @@ import std.collection.*
 import std.core.Duration
 import std.core.sleep
 import std.env.getVariable
+import std.fs.{Path, canonicalize}
 import std.sync.*
 import std.time.MonoTime
 import stdx.log.*
@@ -47,6 +48,24 @@ func budgetSeconds(seconds: UInt32): Option<Duration> {
         return None
     }
     Some(Duration.second * Int64(seconds))
+}
+
+/**
+ * 工具工作目录：会话没有指定目录时，取**进程当前目录的绝对路径**。
+ *
+ * 为什么不能留成 `"."`：信任闸门拿 workDir 当信任表的键，且只在文本上沿父目录回退 ——
+ * 相对路径匹配不上任何按绝对路径登记的信任（`/trust <abs>`、`ATELIER_TRUST_DIR`），
+ * 被拒绝时提示里也看不出是哪个目录；而工具实际是相对进程 cwd 解析路径的，两者语义应一致。
+ */
+func resolveWorkDir(se: SessionEnvironment): String {
+    if (se.directory != "") {
+        return se.directory
+    }
+    try {
+        canonicalize(Path(".")).toString()
+    } catch (e: Exception) {
+        "."
+    }
 }
 
 public open class AgentRuntime {
@@ -170,7 +189,7 @@ public open class AgentRuntime {
     private func chatWithEnv(sessionId: String, messages: ArrayList<Message>, sessionEnv: SessionEnvironment): EventStream<AgentEvent, ArrayList<Message>> {
         let stream = EventStream<AgentEvent, ArrayList<Message>>()
         let se = sessionEnv
-        let workDir = if (se.directory != "") { se.directory } else { "." }
+        let workDir = resolveWorkDir(se)
         let ctx = ToolContext(workDir, this.askUser, se.context, sessionId)
         let ctxBuilder = ContextBuilder(this.skillRegistry, se, contributors: this.promptContributors)
 
