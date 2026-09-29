@@ -48,6 +48,7 @@ mcpCooldownTurns = 0           # MCP 冷却卸载轮数（可选，0=不启用�
 maxTurns = 20                  # 单次 run 的最大回合数（可选，默认 20）
 maxOutputTokens = 4096         # 单条回复的最大输出 token（可选，默认 4096）
 maxLengthContinuations = 3     # 输出被截断后同回合自动续跑的次数上限（可选，默认 3；0=截断即结束）
+maxVerifyPasses = 0            # 收尾前自验次数上限（可选，默认 0=关闭；评测/长任务建议 1）
 
 [logging]
 level = "info"                 # 日志级别，覆盖 server.logLevel
@@ -167,6 +168,7 @@ let config = AgentConfig(
 | `temperature` | `Float32` | `0.7` | 生成温度 |
 | `maxOutputTokens` | `UInt32` | `4096` | 最大输出 Token |
 | `maxLengthContinuations` | `UInt32` | `3` | 输出撞 token 上限后同回合自动续跑的次数上限；`0` = 不续跑（截断即回合结束） |
+| `maxVerifyPasses` | `UInt32` | `0` | 收尾前自验次数上限：宣布完成时先要求实操核对再收尾；`0` = 关闭 |
 | `thinkingLevel` | `Option<String>` | `None` | 思考模式（deepseek-reasoner 可用） |
 | `compactionEnabled` | `Bool` | `true` | 启用上下文压缩 |
 | `compactionReserveTokens` | `UInt32` | `16384` | 压缩保留缓冲 |
@@ -194,6 +196,18 @@ let config = AgentConfig(
   避免「模型一直写不完 → 无限续跑」。
 - 续跑只追加一条用户消息，不重复已有内容，因此不会把上下文翻倍。
 - 需要严格「一问一答」的场景（例如把截断本身当作有意义的信号）把它设为 `0`。
+
+### 收尾前自验（`maxVerifyPasses`）
+
+最常见的失败模式不是「做不完」，而是「**模型自认为做完了**」：回合以 `EndTurn` 结束、没有任何
+工具调用，但产物并不满足任务约束。把 `maxVerifyPasses` 设为 `> 0` 后，运行时会在这个时刻插入
+一条「逐条核对任务要求、重新读取/运行产物、确认无误再收尾」的消息，并把自验当作**新回合**
+（消耗 `maxTurns`），最多插入该次数。
+
+- 默认 `0`（关闭）：交互式对话里不会被自动追问打扰；评测/长任务建议设 `1`。
+- 只在「本 run 已经调用过工具」（真的做过事）且回合以 `EndTurn` 正常结束时触发；
+  直接问答式回答不触发。
+- 它是「纪律」而不是「验证器」：只要求模型自己实操核对，判定仍由外部（人/验证器）完成。
 
 ### 工具预算（`toolTimeout` / `sideEffectToolTimeout`）
 

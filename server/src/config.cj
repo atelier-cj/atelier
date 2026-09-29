@@ -246,6 +246,8 @@ public class TomlAgent <: Serializable<TomlAgent> {
     public var maxOutputTokens: Int64 = 4096
     // 输出被 token 上限截断后，同一回合内自动续跑的次数上限；0 = 不续跑（截断即回合结束）
     public var maxLengthContinuations: Int64 = 3
+    // 收尾前自验次数上限（0 = 关闭）；模型宣布完成时先让它实操核对再收尾
+    public var maxVerifyPasses: Int64 = 0
     // 工具呈现模式：native（默认，逐次 JSON Schema）/ ptc（只暴露 run_xisp）/ both
     public var toolPresentation: String = "native"
     // PTC 单次程序的经过时间预算（秒）
@@ -522,7 +524,8 @@ public func agentConfigFrom(a: TomlAgent): AgentConfig {
         ptcTimeoutSeconds: ptcBudget(a.ptcTimeoutSeconds, UInt32(30)),
         ptcMaxSubCalls: ptcBudget(a.ptcMaxSubCalls, UInt32(64)),
         sideEffectToolTimeout: toolBudgetSeconds(a.sideEffectToolTimeout, UInt32(300)),
-        maxLengthContinuations: continuationBudget(a.maxLengthContinuations, UInt32(3)))
+        maxLengthContinuations: continuationBudget(a.maxLengthContinuations, UInt32(3)),
+        maxVerifyPasses: continuationBudget(a.maxVerifyPasses, UInt32(0)))
 }
 
 /**

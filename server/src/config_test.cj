@@ -564,3 +564,17 @@ func agentConfigFrom_temperature() {
     bad.temperature = 3.5
     @Expect(agentConfigFrom(bad).temperature, Float32(0.7))
 }
+
+// 收尾前自验：TOML 可配（0 = 关闭，负数回落 0）。
+@Test
+func agentConfigFrom_verifyPasses() {
+    let ta = TomlAgent()
+    ta.maxVerifyPasses = 2
+    @Expect(agentConfigFrom(ta).maxVerifyPasses, UInt32(2))
+
+    @Expect(agentConfigFrom(TomlAgent()).maxVerifyPasses, UInt32(0))
+
+    let bad = TomlAgent()
+    bad.maxVerifyPasses = -1
+    @Expect(agentConfigFrom(bad).maxVerifyPasses, UInt32(0))
+}
