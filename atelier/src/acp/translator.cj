@@ -4,6 +4,9 @@ import std.collection.*
 import acp.types.*
 import atelier.agent.*
 import atelier.message.AssistantMessage
+import atelier.message.StopReason
+// ACP 侧也有 ContentBlock，取别名避免歧义
+import atelier.message.ContentBlock as MsgContentBlock
 
 // 把 atelier 运行时事件翻译为 ACP session/update 通知。
 // per-ACP-session 单实例：内部维护回合计数与「当前 assistant 文本消息」的 messageId，
@@ -30,7 +33,31 @@ public class AcpTranslator {
                 // 新回合：先前回合的文本消息闭合
                 this.turnNo++
                 this.openMessageId = None
-            case _: TurnEndEvent => ()
+            case te: TurnEndEvent =>
+                // 异常回合（如 provider 报错）：文本增量可能一条都没发过，而 ACP 侧只拿得到
+                // 一个无理由的 stopReason。这里把失败消息作为可见的 agent 消息推出去，
+                // 宿主（评测框架/日志）才有办法定位；正常回合不重复推送已发过的增量。
+                match (te.message) {
+                    case am: AssistantMessage =>
+                        let failed = match (am.stopReason) {
+                            case StopReason.Error => true
+                            case _ => false
+                        }
+                        if (failed) {
+                            let sb = StringBuilder()
+                            for (b in am.content.blocks()) {
+                                match (b) {
+                                    case MsgContentBlock.TextBlock(txt) => sb.append(txt)
+                                    case _ => ()
+                                }
+                            }
+                            let text = sb.toString()
+                            if (text != "") {
+                                out.add(SessionUpdate.agentMessage(text, messageId: Some(this.currentMessageId())))
+                            }
+                        }
+                    case _ => ()
+                }
             case _: CompactionEvent => ()
             case u: MessageUpdateEvent =>
                 if (u.delta != "") {

@@ -243,3 +243,25 @@ func translator_turnWithTextThenTools() {
     @Expect(calls.size, 1)
     @Expect(calls[0].sessionUpdate, "tool_call")
 }
+
+// 异常回合（provider 报错）必须把失败文本作为可见消息推给宿主：
+// 否则 ACP 侧只看到一个无理由的 stopReason: refusal，评测/日志都无从定位。
+@Test
+func translator_errorTurnEmitsVisibleFailureText() {
+    let tr = AcpTranslator()
+    let blocks = ArrayList<ContentBlock>()
+    blocks.add(ContentBlock.TextBlock("[provider error] HTTP 429"))
+    let failed = AssistantMessage(ContentList(blocks), "", "", StopReason.Error, TokenUsage(0, 0), 0)
+    let ups = tr.translate(TurnEndEvent(failed, ArrayList<ToolResultMessage>()))
+    @Expect(ups.size, 1)
+}
+
+// 正常回合不重复推送（文本增量已经逐条发过）。
+@Test
+func translator_normalTurnEndEmitsNothing() {
+    let tr = AcpTranslator()
+    let blocks = ArrayList<ContentBlock>()
+    blocks.add(ContentBlock.TextBlock("正常回答"))
+    let ok = AssistantMessage(ContentList(blocks), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0)
+    @Expect(tr.translate(TurnEndEvent(ok, ArrayList<ToolResultMessage>())).size, 0)
+}
