@@ -333,9 +333,9 @@ class EventStream<T, R> {
 │  │  │  └────────────────────────────────────────────────┘  │  │ │
 │  │  │  ┌────────────────────────────────────────────────┐  │  │ │
 │  │  │  │  4. Check Stop Reason                          │  │  │ │
-│  │  │  │     ├─ end_turn → exit inner loop              │  │  │ │
+│  │  │  │     ├─ end_turn → 自验/收尾                     │  │  │ │
 │  │  │  │     ├─ tool_use → execute tools                │  │  │ │
-│  │  │  │     ├─ length → retry with shorter request     │  │  │ │
+│  │  │  │     ├─ length → 同回合追加续跑（预算内）          │  │  │ │
 │  │  │  │     └─ error/aborted → terminate run           │  │  │ │
 │  │  │  └────────────────────────────────────────────────┘  │  │ │
 │  │  │  ┌────────────────────────────────────────────────┐  │  │ │
@@ -387,6 +387,25 @@ Tool Executor ──► MCPToolWrapper ──► mcp-cj McpClient ──► MCP 
 - `MCPToolWrapper` 实现 `Tool` 接口，适配 mcp-cj 的 `McpClient`
 - 支持 stdio、SSE、Streamable HTTP 三种传输
 - 工具列表在连接时通过 `tools/list` 获取，缓存在本地注册表
+
+### 4.5 消息历史不变式（tool_call 配对）
+
+发往 provider 的历史必须满足：**assistant 带 `tool_calls` 的消息，后面紧跟每个 call 各一条工具结果**。
+OpenAI 兼容接口对违反者的回复是 400（`An assistant message with 'tool_calls' must be followed by
+tool messages responding to each 'tool_call_id'`），而 400 重试也不会好 —— 整轮作废。
+
+能破坏该不变式的路径不止一条，故**不要求每条路径各自维护**，而是在发请求前统一收口
+（`ensureToolCallResults`，`agent/history_invariant.cj`）：
+
+| 路径 | 处理 |
+|---|---|
+| 工具批次整体抛异常 | 兜底为**每个 call 各回一条**失败结果（不是一条 id 为空的） |
+| 执行器少给结果 | 缺的那条回显式失败，不静默跳过 |
+| 非工具回合却带着 tool_call（截断 / 终止原因缺失或未识别 / provider 异常） | 调用不执行（回复是半截的），但补「未执行」占位结果再追加续跑或自验消息 |
+| 上下文压缩改写历史 | 切点配对保护（`context/compaction.cj`），发请求前的收口再兜一层 |
+| Provider 侧 | 带了 tool_call 就不收成 `EndTurn`（`llm_api` 的 `effectiveStopReason`），显式 `length` 仍保持 `Length` 交给续跑 |
+
+收口函数幂等、O(n)，补齐时按非 0 打警告 —— 占位是兜底，出现即说明上游有路径破坏了不变式。
 
 ---
 
