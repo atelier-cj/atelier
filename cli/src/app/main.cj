@@ -92,6 +92,16 @@ main(): Int64 {
         mcpMgr.addServer(toolReg, cfg)
     }
 
+    // 非交互信任通道：CI / 评测框架等没有审批应答通道的调用方，用环境变量显式声明可信工作目录。
+    // 未声明时保持原样（未决定 → 询问），TUI 的交互审批不受影响。
+    let trustFromEnv = match (getVariable("ATELIER_TRUST_DIR")) {
+        case Some(v) => v; case None => ""
+    }
+    let trustLog = getGlobalLogger([("name", "atelier")])
+    for (d in applyTrustFromEnv(trustMgr, trustFromEnv)) {
+        trustLog.info("trusted work dir (ATELIER_TRUST_DIR): ${d}", Array<Attr>())
+    }
+
     match (cmd) {
         case "serve" =>
             let port = if (args.size > 2) { args[2] } else { serverCfg.port.toString() }

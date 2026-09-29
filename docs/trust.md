@@ -71,6 +71,22 @@ Tool 'bash' needs your approval.
 /untrust /home/user/project   # 取消信任
 ```
 
+## 非交互授权（headless）
+
+TUI 之外没有回答询问的地方：`run` / `serve` / `acp` 子命令若无人注入审批回调，默认 askUser
+返回空串，`NeedsApproval` 一律按拒绝处理 —— `bash` / `write_file` / `edit_file` 全部不可用。
+CI、评测框架、批处理等调用方用启动期声明的环境变量显式授权：
+
+```bash
+# 冒号分隔；只认真实存在的目录；启动时置为持久信任（子目录沿父目录继承）
+ATELIER_TRUST_DIR=/tmp/hb_sandbox_task1:/work/repo cli.app run "修掉这个 bug"
+```
+
+- 语义等同 TUI 里回答 `a`（`setTrust(path, Trusted)`），作用范围是所有子命令；
+- 未设置该变量时行为不变（仍走交互询问）；
+- 这是**启动者的授权声明**：只有拉起进程的一方能给出，Agent 自身无法自我授权；
+- 传给子进程（远程子 Agent 由父进程拉起）时会随环境继承 —— 同一工作目录，语义一致。
+
 ## HTTP API
 
 ```bash

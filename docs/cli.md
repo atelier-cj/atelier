@@ -88,6 +88,26 @@ cli.app run code-assistant "审查 src/main.cj"
 
 如果第一个参数匹配已注册的 agent 名称，则作为 agent 名；否则作为 prompt 并使用 default agent。
 
+### 非交互（headless）
+
+`run` 不读 stdin，工具审批也没有回答通道。无人值守的调用方（CI、评测框架、批处理）用
+环境变量在启动期声明可信工作目录，否则 `bash` / `write_file` / `edit_file` 会被信任闸门
+一律拒绝（详见 [信任闸门](trust.md) 的「非交互授权」）：
+
+```bash
+ATELIER_TRUST_DIR="$PWD" cli.app run "跑一遍测试并修掉失败项"
+```
+
+未配置的 agent 会退化成空配置（**没有任何工具**）。headless 使用需要在 `~/.atelier.toml`
+里显式声明 agent 与 `tools`，例如：
+
+```toml
+[[agent]]
+name = "default"
+model = "gpt-4o"
+tools = ["read_file", "write_file", "edit_file", "bash", "grep", "glob", "todo"]
+```
+
 ## 配置文件
 
 | 路径 | 说明 |
