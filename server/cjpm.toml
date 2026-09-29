@@ -9,6 +9,6 @@ authors = ["ystyle"]
 repository = "https://atomgit.com/ystyle/atelier"
 
 [dependencies]
-atelier = "0.1.0"
+atelier = "0.1.2"
 jsonvalue = "1.1.1"
 tomlcj = "1.0.0"

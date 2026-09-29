@@ -212,14 +212,24 @@ public open class AgentRuntime {
                 for (m in messages) { currentMessages.add(m) }
                 var turnCount: Int64 = 0
                 var toolCallCount: Int64 = 0
+                // 本回合内因输出被 token 上限截断而自动续跑的次数（每次续跑仍算同一个循环轮次）
+                var lengthContinuations: Int64 = 0
+                // 本次迭代是「上一回合因截断而续跑」：不计新回合、不重置续跑预算、
+                // 不推进 MCP 冷却回合（continue 会重新走一遍循环体顶部，副作用必须在这里挡住）
+                var resumingSameTurn = false
                 var lastToolTime: MonoTime = MonoTime.now()
                 var finished = false
 
                 while (!finished && !cancelFlag.load() && turnCount < Int64(this.config.maxTurns)) {
-                    this.emit(stream, TurnStartEvent())
-                    turnCount++
-                    this.mcpManager.advanceTurn()
-                    log.info("turn ${turnCount} start", Array<Attr>())
+                    if (!resumingSameTurn) {
+                        this.emit(stream, TurnStartEvent())
+                        turnCount++
+                        // 续跑预算按回合重置：每回合最多因截断续跑 maxLengthContinuations 次
+                        lengthContinuations = 0
+                        this.mcpManager.advanceTurn()
+                        log.info("turn ${turnCount} start", Array<Attr>())
+                    }
+                    resumingSameTurn = false
                     // 顺序：历史归档标记在前（处理 store 加载的历史 ArchiveMessage），
                     // 本轮调用对在后（产生的 ArchiveMessage 位于 index==startIndex，不能被标记跳过）
                     currentMessages = ctxBuilder.applyArchiveMarks(currentMessages)
@@ -458,6 +468,24 @@ public open class AgentRuntime {
                                 this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
                                 finished = true
                                 break
+                            }
+                            // 输出撞到 provider 的 token 上限（StopReason.Length）只说明「这一条没写完」，
+                            // 不代表任务结束：同一回合内追加一条续跑消息再请求一次，而不是把半截结果交给宿主。
+                            // 预算按回合计（maxLengthContinuations = 0 时保持旧的「截断即结束」行为）。
+                            // 仓颉的枚举没有内置 == ：用模式匹配取出「是否被截断」
+                            let truncated = match (assistantMsg.stopReason) {
+                                case StopReason.Length => true
+                                case _ => false
+                            }
+                            if (truncated && lengthContinuations < Int64(this.config.maxLengthContinuations)) {
+                                lengthContinuations++
+                                log.warn("response truncated by token limit, continue in same turn (${lengthContinuations}/${this.config.maxLengthContinuations})", Array<Attr>())
+                                currentMessages.add(UserMessage(ContentList.ofText(lengthContinuationPrompt()), 0))
+                                resumingSameTurn = true
+                                continue
+                            }
+                            if (truncated) {
+                                log.warn("response truncated and continuation budget exhausted (${this.config.maxLengthContinuations}), end turn", Array<Attr>())
                             }
                             log.info("turn finished", Array<Attr>())
                             let turnUpdate = runAfterTurnHooks(hookState, turnCount)
@@ -892,4 +920,10 @@ func plainTextOf(m: Message): String {
         }
     }
     sb.toString()
+}
+
+// 输出被 token 上限截断时的续跑提示：要求「接着写」而不是重头再来（重复内容会白烧上下文）。
+func lengthContinuationPrompt(): String {
+    "（系统提示）你上一条回复因为输出长度上限被截断了，这不是回合结束。" +
+    "请从被截断处继续，不要重复已经写过的内容；若要写长文件或长脚本，请拆成更小的片段分多次写入。"
 }

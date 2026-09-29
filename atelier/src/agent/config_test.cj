@@ -299,3 +299,22 @@ func config_supportsVision_oldJsonDefaultsFalse() {
     @Expect(back.name, "legacy")
     @Expect(back.model, "m")
 }
+
+// 截断续跑预算：默认 3（不再把「输出被 token 上限截断」当回合结束）；
+// 显式 0 = 保持旧行为（截断即结束）；JSON 往返必须保真。
+@Test
+func config_maxLengthContinuations_defaultAndRoundTrip() {
+    let base = AgentConfig.default()
+    @Expect(base.maxLengthContinuations, UInt32(3))
+    @Expect(fromJsonString<AgentConfig>(toJsonString(base)).maxLengthContinuations, UInt32(3))
+
+    let zero = AgentConfig(base.name, base.description, base.systemPrompt, base.userPromptTemplate,
+        base.model, base.provider, base.tools, base.skills, base.mcpCooldownTurns,
+        base.maxTurns, base.temperature, base.maxOutputTokens, base.thinkingLevel,
+        base.compactionEnabled, base.compactionReserveTokens, base.keepRecentTokens,
+        base.compaction, base.maxToolCalls, base.toolTimeout, base.minToolInterval,
+        base.tags, base.createdBy, base.createdAt, base.updatedAt,
+        maxLengthContinuations: 0)
+    @Expect(zero.maxLengthContinuations, UInt32(0))
+    @Expect(fromJsonString<AgentConfig>(toJsonString(zero)).maxLengthContinuations, UInt32(0))
+}

@@ -510,3 +510,41 @@ func agentConfigFrom_invalidBudgetsFallBack() {
     @Expect(cfg.ptcTimeoutSeconds, UInt32(30))
     @Expect(cfg.ptcMaxSubCalls, UInt32(64))
 }
+
+// 回合/输出预算从 TOML 配置读取（此前硬编码 20 轮 / 4096 token，长任务被截断却调不了）；
+// maxLengthContinuations 允许显式 0（= 截断即结束），负数与越界回落默认值。
+@Test
+func agentConfigFrom_turnAndOutputBudgets() {
+    let ta = TomlAgent()
+    ta.name = "budget"
+    ta.model = "deepseek-chat"
+    ta.maxTurns = 60
+    ta.maxOutputTokens = 8192
+    ta.maxLengthContinuations = 5
+
+    let cfg = agentConfigFrom(ta)
+    @Expect(cfg.maxTurns, UInt32(60))
+    @Expect(cfg.maxOutputTokens, UInt32(8192))
+    @Expect(cfg.maxLengthContinuations, UInt32(5))
+
+    // 默认值：未配置时保持 20 轮 / 4096 token / 续跑 3 次
+    let def = agentConfigFrom(TomlAgent())
+    @Expect(def.maxTurns, UInt32(20))
+    @Expect(def.maxOutputTokens, UInt32(4096))
+    @Expect(def.maxLengthContinuations, UInt32(3))
+
+    // 显式 0：不续跑
+    let off = TomlAgent()
+    off.maxLengthContinuations = 0
+    @Expect(agentConfigFrom(off).maxLengthContinuations, UInt32(0))
+
+    // 笔误（负数）回落默认值，不让 Agent 起不来
+    let bad = TomlAgent()
+    bad.maxTurns = -1
+    bad.maxOutputTokens = 0
+    bad.maxLengthContinuations = -3
+    let fixed = agentConfigFrom(bad)
+    @Expect(fixed.maxTurns, UInt32(20))
+    @Expect(fixed.maxOutputTokens, UInt32(4096))
+    @Expect(fixed.maxLengthContinuations, UInt32(3))
+}

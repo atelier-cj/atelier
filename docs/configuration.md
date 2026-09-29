@@ -45,6 +45,9 @@ systemPrompt = "你是一个有用的助手"
 tools = ["bash", "read_file", "mcp_*"]  # 可用工具列表（mcp_* 通配暴露已激活的 MCP 工具）
 skills = ["code_review"]       # Skill 列表（可选）
 mcpCooldownTurns = 0           # MCP 冷却卸载轮数（可选，0=不启用默认；>0=N 轮未用自动卸载）
+maxTurns = 20                  # 单次 run 的最大回合数（可选，默认 20）
+maxOutputTokens = 4096         # 单条回复的最大输出 token（可选，默认 4096）
+maxLengthContinuations = 3     # 输出被截断后同回合自动续跑的次数上限（可选，默认 3；0=截断即结束）
 
 [logging]
 level = "info"                 # 日志级别，覆盖 server.logLevel
@@ -163,6 +166,7 @@ let config = AgentConfig(
 | `maxTurns` | `UInt32` | `20` | 最大推理轮次 |
 | `temperature` | `Float32` | `0.7` | 生成温度 |
 | `maxOutputTokens` | `UInt32` | `4096` | 最大输出 Token |
+| `maxLengthContinuations` | `UInt32` | `3` | 输出撞 token 上限后同回合自动续跑的次数上限；`0` = 不续跑（截断即回合结束） |
 | `thinkingLevel` | `Option<String>` | `None` | 思考模式（deepseek-reasoner 可用） |
 | `compactionEnabled` | `Bool` | `true` | 启用上下文压缩 |
 | `compactionReserveTokens` | `UInt32` | `16384` | 压缩保留缓冲 |
@@ -178,6 +182,18 @@ let config = AgentConfig(
 | `createdBy` | `Option<String>` | `None` | 创建者 |
 | `createdAt` | `Int64` | `0` | 创建时间戳 |
 | `updatedAt` | `Int64` | `0` | 更新时间戳 |
+
+### 输出截断的自动续跑（`maxLengthContinuations`）
+
+模型单条回复撞到 `maxOutputTokens` 上限时，provider 返回的是**被截断的半截回复**
+（`StopReason.Length`，ACP 侧呈现为 `stopReason: max_tokens`）。这不等于任务结束：
+运行时会自动追加一条「从截断处继续、不要重复已写内容」的消息，并在**同一回合内**再请求一次，
+最多续跑 `maxLengthContinuations` 次（默认 `3`；`0` = 保持旧行为，截断即回合结束）。
+
+- 续跑**不消耗**回合数（`maxTurns`）；但同一回合的续跑次数用尽后仍会收尾，
+  避免「模型一直写不完 → 无限续跑」。
+- 续跑只追加一条用户消息，不重复已有内容，因此不会把上下文翻倍。
+- 需要严格「一问一答」的场景（例如把截断本身当作有意义的信号）把它设为 `0`。
 
 ### 工具预算（`toolTimeout` / `sideEffectToolTimeout`）
 
