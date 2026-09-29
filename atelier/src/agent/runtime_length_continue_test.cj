@@ -187,3 +187,105 @@ func runtime_verifyBeforeFinish_skipsWhenNoWork() {
     let result = runScripted(withVerify(AgentConfig.default(), 1), provider)
     @Expect(provider.callCount, 1)
 }
+
+// ---- 历史的 tool_call 配对（provider 判 400 的那条不变式）----
+//
+// 记录每次请求真正发出去的历史：消息对象会被后续回合改写，故按值快照一份。
+class RecordingMsgProvider <: Provider {
+    public var responses: ArrayList<AssistantMessage>
+    public var callCount: Int64 = 0
+    public var requests: ArrayList<ArrayList<Message>> = ArrayList<ArrayList<Message>>()
+    public init(responses: ArrayList<AssistantMessage>) { this.responses = responses }
+    public func name(): String { "fake" }
+    public func chat(req: ChatRequest): ChatResponse { ChatResponse(this.responses[0]) }
+    public func chatStreaming(req: ChatRequest): EventStream<ChatDelta, AssistantMessage> {
+        let snapshot = ArrayList<Message>()
+        for (m in req.messages) { snapshot.add(m) }
+        this.requests.add(snapshot)
+        let stream = EventStream<ChatDelta, AssistantMessage>()
+        let idx = this.callCount % this.responses.size
+        this.callCount++
+        let msg = this.responses[idx]
+        stream.emit(ChatDelta("", "", Some(msg.stopReason)))
+        stream.setResult(msg)
+        stream
+    }
+}
+
+func runRecording(config: AgentConfig, provider: Provider): ArrayList<Message> {
+    let toolReg = ToolRegistry()
+    toolReg.register(NoopTool())
+    let providerReg = ProviderRegistry()
+    providerReg.register("default", provider)
+    let runtime = AgentRuntime(config, provider, toolReg, MemorySessionStore(), TrustManager(),
+        SkillRegistry(), AgentRegistry(), providerReg, ArrayList<Hook>(), { q => "" }, McpManager())
+    let msgs = ArrayList<Message>()
+    msgs.add(UserMessage(ContentList.ofText("把大文件写完"), 0))
+    runtime.chat(msgs).result()
+}
+
+// 截断（Length）的回复里可能已经带上完整 tool_call：这条消息不是纯工具回合，
+// 但它带的调用**必须**有配对结果，否则下一次请求被判 400，整轮作废。
+@Test
+func runtime_truncatedWithToolCalls_sendsOnlyPairedHistory() {
+    let calls = ArrayList<(String, String)>()
+    calls.add(("c1", "noop"))
+    calls.add(("c2", "noop"))
+    let truncated = assistantWithCallsRaw("我打算跑两个命令", calls, StopReason.Length)
+    let responses = ArrayList<AssistantMessage>()
+    responses.add(truncated)
+    responses.add(endTurnMsg("续跑后收尾"))
+    let provider = RecordingMsgProvider(responses)
+    runRecording(withContinuations(AgentConfig.default(), 1), provider)
+    @Expect(provider.callCount, 2)
+    // 第二次请求发出的历史里，两个调用都要有结果
+    let sent = provider.requests[1]
+    var gotC1 = false
+    var gotC2 = false
+    for (m in sent) {
+        match (m) {
+            case tr: ToolResultMessage =>
+                if (tr.toolCallId == "c1") { gotC1 = true }
+                if (tr.toolCallId == "c2") { gotC2 = true }
+            case _ => ()
+        }
+    }
+    @Expect(gotC1, true)
+    @Expect(gotC2, true)
+}
+
+// 终止原因缺失被 provider 归成 EndTurn、却带了 tool_call：同样不能漏配对结果。
+// 场景对齐真实失败：前面回合调过工具（toolCallCount > 0），这一条带着调用报回合结束，
+// 自验把回合续下去 —— 续下去的那次请求必须已经补好配对结果。
+@Test
+func runtime_endTurnWithToolCalls_sendsOnlyPairedHistory() {
+    let calls = ArrayList<(String, String)>()
+    calls.add(("d1", "noop"))
+    let responses = ArrayList<AssistantMessage>()
+    responses.add(toolUseMsg("先做点事", "noop", "call_1"))
+    responses.add(assistantWithCallsRaw("这条消息带着调用却报了回合结束", calls, StopReason.EndTurn))
+    responses.add(endTurnMsg("收尾"))
+    let provider = RecordingMsgProvider(responses)
+    runRecording(withVerify(AgentConfig.default(), 1), provider)
+    @Expect(provider.callCount, 3)
+    var gotD1 = false
+    for (m in provider.requests[2]) {
+        match (m) {
+            case tr: ToolResultMessage => if (tr.toolCallId == "d1") { gotD1 = true }
+            case _ => ()
+        }
+    }
+    @Expect(gotD1, true)
+}
+
+// provider 报了工具回合却没给任何调用：不能空转（每轮请求都一样会把回合预算烧光）
+@Test
+func runtime_toolUseWithoutCalls_endsTurnInsteadOfSpinning() {
+    let empty = assistantWithCallsRaw("忘了放调用", ArrayList<(String, String)>(), StopReason.ToolUse)
+    let responses = ArrayList<AssistantMessage>()
+    responses.add(empty)
+    responses.add(endTurnMsg("不应该被请求"))
+    let provider = RecordingMsgProvider(responses)
+    runRecording(AgentConfig.default(), provider)
+    @Expect(provider.callCount, 1)
+}
