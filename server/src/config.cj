@@ -239,6 +239,8 @@ public class TomlAgent <: Serializable<TomlAgent> {
     public var skills: ArrayList<String> = ArrayList()
     public var mcpCooldownTurns: Int64 = 0
     // 单次 run 的最大回合数（每次「模型请求 + 工具批次」记一回合）
+    // 采样温度（0 = 确定性输出；评测场景建议调低以降低拒答/漂移方差）
+    public var temperature: Float64 = 0.7
     public var maxTurns: Int64 = 20
     // 单条回复的最大输出 token 数（撞上限时按 maxLengthContinuations 续跑）
     public var maxOutputTokens: Int64 = 4096
@@ -512,7 +514,7 @@ public func agentConfigFrom(a: TomlAgent): AgentConfig {
         a.model,
         if (a.provider == "") { None } else { Some(a.provider) },
         a.tools, a.skills, a.mcpCooldownTurns,
-        budgetOrDefault(a.maxTurns, UInt32(20)), Float32(0.7), budgetOrDefault(a.maxOutputTokens, UInt32(4096)), None,
+        budgetOrDefault(a.maxTurns, UInt32(20)), temperatureOrDefault(a.temperature, Float32(0.7)), budgetOrDefault(a.maxOutputTokens, UInt32(4096)), None,
         true, UInt32(16384), UInt32(20000), compactionCfg, UInt32(50),
         toolBudgetSeconds(a.toolTimeout, UInt32(30)), UInt32(0),
         ArrayList<String>(), None, 0, 0,
@@ -536,6 +538,14 @@ func budgetOrDefault(value: Int64, fallback: UInt32): UInt32 {
         return fallback
     }
     UInt32(value)
+}
+
+// 温度允许 0（确定性输出），只拦负数与超出常见上限（2.0）的笔误
+func temperatureOrDefault(value: Float64, fallback: Float32): Float32 {
+    if (value < 0.0 || value > 2.0) {
+        return fallback
+    }
+    Float32(value)
 }
 
 // 续跑预算允许 0（= 不续跑，保持「截断即回合结束」），只拦负数与越界
