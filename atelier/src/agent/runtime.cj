@@ -271,6 +271,14 @@ public open class AgentRuntime {
                             break
                     }
 
+                    // 发请求前的唯一收口：assistant 带 tool_calls 的消息必须跟齐每个 call 的结果，
+                    // 否则 provider 判 400（不可重试）→ 整轮作废。历史改写路径不止一条
+                    // （压缩、钩子、批次异常兜底、截断回复里已带的 tool_call），故在此统一兜底。
+                    let patched = ensureToolCallResults(chatReq.messages)
+                    if (patched > 0) {
+                        log.warn("history had ${patched} tool call(s) without results; inserted placeholders to keep the request valid", Array<Attr>())
+                    }
+
                     let chatStream = this.provider.chatStreaming(chatReq)
                     var contentBuilder = StringBuilder()
                     var assistantMsg = AssistantMessage(ContentList.ofText(""), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0)
@@ -322,6 +330,14 @@ public open class AgentRuntime {
                                 break
                             }
                             let toolCalls = assistantMsg.toolCalls()
+                            if (toolCalls.size == 0) {
+                                // provider 报了工具回合却没给任何调用：空批次会让循环原地空转
+                                // （每轮请求都一样），按回合结束收尾
+                                log.warn("stop reason is ToolUse but the message carries no tool call; finish the turn", Array<Attr>())
+                                this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
+                                finished = true
+                                break
+                            }
                             log.info("tool calls: ${toolCalls.size}", Array<Attr>())
                             let maxCalls = Int64(this.config.maxToolCalls)
                             if (toolCallCount >= maxCalls) {
@@ -434,7 +450,17 @@ public open class AgentRuntime {
                                 this.toolExecutor.executeBatch(batch)
                             } catch (e: Exception) {
                                 log.error("tool execute error: ${e.message}", Array<Attr>())
-                                currentMessages.add(ToolResultMessage("", "", ContentList.ofText("[Tool error: ${e.message}]"), true, 0))
+                                // 整批失败也必须**每个 call 各回一条**结果：只回一条（且 id 为空）
+                                // 会让历史里 assistant(tool_calls=N) 对不上结果，下一次请求被 provider 判 400
+                                for (i in 0..toolCalls.size) {
+                                    let tc = toolCalls[Int64(i)]
+                                    let text = match (skipResults.get(Int64(i))) {
+                                        case Some(msg) => msg
+                                        case None => "[Tool error: ${e.message}]"
+                                    }
+                                    currentMessages.add(ToolResultMessage(tc.id, tc.name,
+                                        ContentList.ofText(text), true, 0))
+                                }
                                 this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
                                 continue
                             }
@@ -456,6 +482,12 @@ public open class AgentRuntime {
                                             currentMessages.add(tr)
                                             callAfterToolHooks(hookState, turnCount, tc, tr)
                                             resIdx++
+                                        } else {
+                                            // 执行器少给了结果：静默跳过会让这条 call 永远没有配对结果，
+                                            // 下一次请求直接被判 400 —— 宁可回一条显式失败
+                                            log.error("tool executor returned ${results.size} result(s) for ${batch.size} call(s); '${tc.name}' has no result", Array<Attr>())
+                                            currentMessages.add(ToolResultMessage(tc.id, tc.name,
+                                                ContentList.ofText("[Tool error: no result returned by executor]"), true, 0))
                                         }
                                 }
                             }
@@ -470,6 +502,18 @@ public open class AgentRuntime {
                                 this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
                                 finished = true
                                 break
+                            }
+                            // 带 tool_call 却又不是工具回合（输出被截断、终止原因缺失/未识别、
+                            // provider 异常）：这些调用没有执行、也不该执行（回复是半截的），
+                            // 但历史里必须给它们配对结果 —— 否则后面追加 user 消息就等于
+                            // 发出 assistant(tool_calls) 后不跟结果，provider 直接判 400。
+                            let prematureCalls = assistantMsg.toolCalls()
+                            if (prematureCalls.size > 0) {
+                                log.warn("non-tool stop reason carries ${prematureCalls.size} tool call(s); recording them as not executed", Array<Attr>())
+                                for (tc in prematureCalls) {
+                                    currentMessages.add(ToolResultMessage(tc.id, tc.name,
+                                        ContentList.ofText(unansweredToolCallNote(tc.name)), true, 0))
+                                }
                             }
                             // 输出撞到 provider 的 token 上限（StopReason.Length）只说明「这一条没写完」，
                             // 不代表任务结束：同一回合内追加一条续跑消息再请求一次，而不是把半截结果交给宿主。
