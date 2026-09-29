@@ -1,0 +1,17 @@
+# cjpm 工作区产品清单：`cjpm ws` 读取的单一来源。
+# 工具：cjpm-ws（cjpm ws check / sync / bump）
+#
+# 一个 [workspace] 视为一个产品：已发布成员共用 version（lockstep），任一成员有实质变更
+# 即整产品推进一个版本；测试/示例包（*_tests / *_examples）不参与、不发布。
+
+[workspace.package]
+  version = "0.1.0"
+
+# 共享外部依赖：声明一次，sync 只对齐成员**已声明**的同键依赖，不新增依赖。
+[workspace.dependencies]
+  "jsonvalue" = "1.1.0"
+
+# 参与发布的成员。cli / server 是应用与本地服务，不发中心仓。
+[workspace.publish]
+  members = []
+  exclude = ["cli", "server"]

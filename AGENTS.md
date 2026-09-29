@@ -69,25 +69,37 @@ cjpm clean
 ## 项目结构
 
 ```
-atelier/
-├── AGENTS.md          # 本文件
-├── cjpm.toml          # 包管理配置
-├── docs/              # 设计文档
-│   ├── design.md      # 总体设计
-│   └── plans/         # 实现计划
-├── src/
-│   ├── message/       # 消息模型（地基，零外部依赖）
-│   ├── agent/         # Agent 配置/运行时/事件
-│   ├── tool/          # Tool 接口 + 内置工具 + MCP 适配
-│   ├── provider/      # LLM Provider 接口 + OpenAI 实现
-│   ├── session/       # 会话模型 + 存储（内存/bstorm）
-│   ├── context/       # 上下文压缩
-│   ├── trust/         # 信任闸门
-│   ├── acp/           # ACP v1 Agent 侧适配（translator/映射/config options/bridge）
-│   ├── skill/         # Skill 系统（Phase 3）
-│   ├── server/        # HTTP 服务（Phase 2）
-│   └── cli/           # CLI 入口（Phase 3）
+atelier/                     # 仓库根 = cjpm 工作区（[workspace]，产品版本见 workspace.toml）
+├── AGENTS.md                # 本文件
+├── cjpm.toml                # 工作区清单：members = [atelier, server, cli] + 共享平台配置
+├── workspace.toml           # cjpm-ws 产品清单（lockstep 版本 / 发布范围）
+├── target/                  # 工作区共享产物目录（cjpm build 输出：target/release/bin/cli.app）
+├── atelier/                 # 核心库成员（包名 atelier）
+│   ├── cjpm.toml
+│   └── src/
+│       ├── message/         # 消息模型（地基，零外部依赖）
+│       ├── agent/           # Agent 配置/运行时/事件
+│       ├── tool/            # Tool 接口 + 内置工具 + MCP 适配
+│       ├── provider/        # LLM Provider 接口 + OpenAI 实现
+│       ├── session/         # 会话模型 + 存储（内存/bstorm）
+│       ├── context/         # 上下文压缩
+│       ├── trust/           # 信任闸门
+│       ├── acp/             # ACP v1 Agent 侧适配（translator/映射/config options/bridge）
+│       ├── skill/           # Skill 系统（Phase 3）
+│       ├── ptc/             # PTC 程序化工具调用
+│       └── util/
+├── server/                  # HTTP 服务成员（包名 server）
+├── cli/                     # CLI 成员（包名 cli）
+├── docs/                    # 设计文档
+│   ├── design.md            # 总体设计
+│   └── plans/               # 实现计划
+└── scripts/                 # e2e / 辅助脚本
 ```
+
+> 工作区语义：根目录 `cjpm build` / `cjpm clean` / `cjpm test` 一条命令覆盖三个成员
+> （不必逐个进成员目录）；成员间依赖写**版本号**（`atelier = "0.1.0"`），由工作区本地解析，不用
+> path 依赖。共享的 `[target.*]`（stdx 二进制依赖、`-luring` / `-lcrypt32` 链接项）集中在根 `cjpm.toml`。
+
 
 ## 核心设计决策
 
