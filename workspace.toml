@@ -5,11 +5,11 @@
 # 即整产品推进一个版本；测试/示例包（*_tests / *_examples）不参与、不发布。
 
 [workspace.package]
-  version = "0.1.0"
+  version = "0.1.1"
 
 # 共享外部依赖：声明一次，sync 只对齐成员**已声明**的同键依赖，不新增依赖。
 [workspace.dependencies]
-  "jsonvalue" = "1.1.0"
+  "jsonvalue" = "1.1.1"
 
 # 参与发布的成员。cli / server 是应用与本地服务，不发中心仓。
 [workspace.publish]
