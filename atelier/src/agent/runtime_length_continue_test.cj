@@ -61,6 +61,16 @@ class ScriptedMsgProvider <: Provider {
     }
 }
 
+func withVerify(base: AgentConfig, n: UInt32): AgentConfig {
+    AgentConfig(base.name, base.description, base.systemPrompt, base.userPromptTemplate,
+        base.model, base.provider, base.tools, base.skills, base.mcpCooldownTurns,
+        base.maxTurns, base.temperature, base.maxOutputTokens, base.thinkingLevel,
+        base.compactionEnabled, base.compactionReserveTokens, base.keepRecentTokens,
+        base.compaction, base.maxToolCalls, base.toolTimeout, base.minToolInterval,
+        base.tags, base.createdBy, base.createdAt, base.updatedAt,
+        maxVerifyPasses: n)
+}
+
 func withContinuations(base: AgentConfig, n: UInt32): AgentConfig {
     AgentConfig(base.name, base.description, base.systemPrompt, base.userPromptTemplate,
         base.model, base.provider, base.tools, base.skills, base.mcpCooldownTurns,
@@ -140,4 +150,40 @@ func runtime_lengthStop_budgetResetsEachTurn() {
     let result = runScripted(withContinuations(AgentConfig.default(), 1), provider)
     @Expect(provider.callCount, 4)
     @Expect(result.size >= 5, true)
+}
+
+// 收尾前自验：模型在「做过事且宣布完成」的回合里，先被要求实操核对再收尾。
+@Test
+func runtime_verifyBeforeFinish_injectsOnePass() {
+    let responses = ArrayList<AssistantMessage>()
+    responses.add(toolUseMsg("先做点事", "noop", "call_1"))
+    responses.add(endTurnMsg("我完成了"))
+    responses.add(endTurnMsg("核对后确认完成"))
+    let provider = ScriptedMsgProvider(responses)
+    let result = runScripted(withVerify(AgentConfig.default(), 1), provider)
+    // 首回合调工具 + 宣布完成 + 自验回合 = 3 次请求
+    @Expect(provider.callCount, 3)
+}
+
+// 默认关闭（0）：交互场景不会被自动追问打扰。
+@Test
+func runtime_verifyBeforeFinish_disabledByDefault() {
+    let responses = ArrayList<AssistantMessage>()
+    responses.add(toolUseMsg("做点事", "noop", "call_1"))
+    responses.add(endTurnMsg("完成"))
+    responses.add(endTurnMsg("不应该被请求"))
+    let provider = ScriptedMsgProvider(responses)
+    let result = runScripted(AgentConfig.default(), provider)
+    @Expect(provider.callCount, 2)
+}
+
+// 没做过任何事（直接聊天式回答）时不触发自验。
+@Test
+func runtime_verifyBeforeFinish_skipsWhenNoWork() {
+    let responses = ArrayList<AssistantMessage>()
+    responses.add(endTurnMsg("你好"))
+    responses.add(endTurnMsg("不应该被请求"))
+    let provider = ScriptedMsgProvider(responses)
+    let result = runScripted(withVerify(AgentConfig.default(), 1), provider)
+    @Expect(provider.callCount, 1)
 }

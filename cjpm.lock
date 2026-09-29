@@ -1,24 +1,24 @@
 version = 0
 
 [requires]
-  jsonvalue = {version = "1.1.0"}
-  cjpminfo = {version = "1.2.0"}
-  mcp = {version = "2.3.14"}
-  "opencj::ulid" = {version = "0.1.2"}
-  sonyflake = {version = "1.0.9"}
-  pulldown4cj_escape = {version = "0.1.0"}
-  snappy = {version = "1.0.1"}
-  llm_api = {version = "1.3.1"}
   gjson = {version = "1.2.1"}
-  "ystyle::crc" = {version = "1.0.0"}
-  acp = {version = "0.2.5"}
-  cjterm_style = {version = "0.1.0"}
-  cjterm_stream = {version = "0.1.0"}
-  "ystyle::xisp" = {version = "0.4.1"}
-  mustache = {version = "1.2.1"}
-  badgercj = {version = "1.6.16"}
-  cjterm_parse = {version = "0.1.0"}
-  tomlcj = {version = "1.0.0"}
-  pulldown4cj = {version = "0.1.0"}
-  "ystyle::jsonrpc" = {version = "0.7.7"}
+  mcp = {version = "2.3.15"}
+  "ystyle::jsonrpc" = {version = "0.7.8"}
   bstorm = {version = "1.4.7"}
+  mustache = {version = "1.2.1"}
+  sonyflake = {version = "1.0.9"}
+  "opencj::ulid" = {version = "0.1.2"}
+  pulldown4cj_escape = {version = "0.1.0"}
+  tomlcj = {version = "1.0.0"}
+  snappy = {version = "1.0.1"}
+  badgercj = {version = "1.6.16"}
+  "ystyle::crc" = {version = "1.0.0"}
+  jsonvalue = {version = "1.1.1"}
+  cjterm_stream = {version = "0.1.0"}
+  cjterm_style = {version = "0.1.0"}
+  llm_api = {version = "1.3.2"}
+  cjterm_parse = {version = "0.1.0"}
+  cjpminfo = {version = "1.2.0"}
+  pulldown4cj = {version = "0.1.0"}
+  acp = {version = "0.2.6"}
+  "ystyle::xisp" = {version = "0.4.1"}

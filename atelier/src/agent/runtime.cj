@@ -214,6 +214,8 @@ public open class AgentRuntime {
                 var toolCallCount: Int64 = 0
                 // 本回合内因输出被 token 上限截断而自动续跑的次数（每次续跑仍算同一个循环轮次）
                 var lengthContinuations: Int64 = 0
+                // 收尾前自验已用次数（每次自验按一个新回合计，受 maxTurns 约束）
+                var verifyPasses: Int64 = 0
                 // 本次迭代是「上一回合因截断而续跑」：不计新回合、不重置续跑预算、
                 // 不推进 MCP 冷却回合（continue 会重新走一遍循环体顶部，副作用必须在这里挡住）
                 var resumingSameTurn = false
@@ -486,6 +488,21 @@ public open class AgentRuntime {
                             }
                             if (truncated) {
                                 log.warn("response truncated and continuation budget exhausted (${this.config.maxLengthContinuations}), end turn", Array<Attr>())
+                            }
+                            // 收尾前自验：模型在「没有工具调用」的回合里宣布完成时，先要求它对着任务
+                            // 要求实操核对（读产物 / 跑验证 / 复核约束），确认后再允许收尾。
+                            // 只在真正做过事（toolCallCount > 0）且是正常回合结束时触发；
+                            // 预算是整个 run 的总次数，0 = 关闭。
+                            let announcedDone = match (assistantMsg.stopReason) {
+                                case StopReason.EndTurn => true
+                                case _ => false
+                            }
+                            if (announcedDone && toolCallCount > 0
+                                && verifyPasses < Int64(this.config.maxVerifyPasses)) {
+                                verifyPasses++
+                                log.warn("agent announced completion, run verify pass (${verifyPasses}/${this.config.maxVerifyPasses})", Array<Attr>())
+                                currentMessages.add(UserMessage(ContentList.ofText(verifyBeforeFinishPrompt()), 0))
+                                continue
                             }
                             log.info("turn finished", Array<Attr>())
                             let turnUpdate = runAfterTurnHooks(hookState, turnCount)
@@ -926,4 +943,12 @@ func plainTextOf(m: Message): String {
 func lengthContinuationPrompt(): String {
     "（系统提示）你上一条回复因为输出长度上限被截断了，这不是回合结束。" +
     "请从被截断处继续，不要重复已经写过的内容；若要写长文件或长脚本，请拆成更小的片段分多次写入。"
+}
+
+// 收尾前自验提示：要求「实际核对」而不是凭记忆断言完成（评测里最常见的失败模式是
+// 模型自认为做完、但产物不满足任务约束）。
+func verifyBeforeFinishPrompt(): String {
+    "（系统提示）在宣布任务完成之前，请对着任务要求逐条自验：" +
+    "重新读取或运行你产出的文件与命令，核对是否真的满足每条约束（格式、路径、输出内容、" +
+    "边界情况），而不是凭记忆断言。发现不符就先修正，全部确认无误后再给出结论。"
 }
