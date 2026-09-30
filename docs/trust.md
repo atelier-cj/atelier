@@ -46,23 +46,24 @@ enum TrustDecision {
 
 `shouldAllow(tool, workDir, trustManager)` 返回三态：
 - `Allowed` — 直接执行
-- `NeedsApproval` — 需用户确认（ask_user）
+- `NeedsApproval` — 需用户确认（结构化审批提问）
 - `Denied` — 静默拒绝
 
-## ask_user 交互
+## 审批交互（结构化提问）
 
-`NeedsApproval` 时运行时自动调用 `ask_user`，用户三选：
+`NeedsApproval` 时运行时不打印菜单，而是发出一个**结构化提问**（`UserRequest`，`kind=approval`），
+候选是固定的三项：
 
-```
-Tool 'bash' needs your approval.
-  y  — allow this once (session only)
-  a  — always allow this directory
-  n  — deny
-```
+| 选项 id | 语义 | 效果 |
+|---|---|---|
+| `allow_once` | 允许这一次 | `setSessionTrust(workDir, Trusted)`，仅本次会话 |
+| `allow_always` | 总是允许 | `setTrust(workDir, Trusted)`，永久信任 |
+| `deny` | 拒绝 | 结果标记为 "not allowed" |
 
-- `y` → `setSessionTrust(workDir, Trusted)`，仅本次会话
-- `a` → `setTrust(workDir, Trusted)`，永久信任
-- `n` → 拒绝，结果标记为"not allowed"
+谁问、怎么答由宿主决定：TUI 用候选列表（↑/↓ 选择、回车提交、Esc 取消）；ACP 走 elicitation
+表单；AG-UI 返回 `Pending` —— 本次 run 以中断收尾，答复在下一次输入里带回；一次性端点与
+批处理没有提问通道，提问按「取消」处理（等同拒绝），用 `ATELIER_TRUST_DIR` 预授权。
+宿主给的答复一律过 `validateAnswer`：非法选项按拒绝处理并留痕。
 
 ## 交互命令（TUI）
 

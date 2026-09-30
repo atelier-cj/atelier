@@ -12,16 +12,19 @@ Atelier 是一个纯仓颉实现的 Agent Harness —— 把模型变成 Agent �
 - **多模型**：OpenAI / Anthropic / Ollama 三种 Provider，覆盖绝大多数模型
 - **MCP 工具**：通过 `ystyle::mcp` 接入任意 MCP 服务器（stdio/Streamable HTTP）
 - **树形会话**：Entry + ParentID 树模型，支持 fork/clone/JSONL 持久化
-- **信任闸门**：目录级权限控制，`Undecided` 时自动 ask_user 确认
+- **信任闸门**：目录级权限控制，`Undecided` 时发出结构化审批（允许本次 / 总是允许 / 拒绝）
 - **Skill 系统**：按 AgentSkills 规范的声明式技能注入
 - **上下文压缩**：provider 报告用量 + 本地估算双策略
 - **钩子系统**：6 个生命周期钩子（beforeRun~afterTool）
 - **Agent-as-Tool**：子 Agent 委派模式，同进程隔离上下文
 - **可持续子 Agent**：常驻子 Agent + 双向 send_message（汇报/提问/唤醒取代单向 report）
+- **全功能提问**：审批 / 选择 / 表单统一成一个提问原语（`UserRequest` → `UserAnswer`）；
+  TUI、ACP、AG-UI、HTTP 四端各自接线——可同 run 内等待，也可返回 `Pending` 挂起本次 run、在下一次输入里带答复
 
 ## 安装
 
-仓库为 **monorepo**：`src/`（核心库 `atelier`）+ `cli/`（终端 agent 产品，产物 `cli.app`）+ `server/`（HTTP 服务库 `server`）。
+仓库为 **monorepo**（一个 cjpm 工作区，产品版本 lockstep）：`atelier/`（核心库 `atelier`，发布中心仓）
++ `cli/`（终端 agent 产品，产物 `cli.app`）+ `server/`（HTTP 服务库 `server`）。
 
 ```bash
 git clone https://atomgit.com/ystyle/atelier
@@ -41,7 +44,9 @@ cjpm build -j 16
 
 ```cangjie
 import atelier.*
-let runtime = AgentRuntime(config, provider, toolReg, ...)
+// askFn：(UserRequest) -> UserAnswer —— 审批/选择/表单的宿主侧入口
+// 不传 = 没有提问通道：需要用户拍板的地方按「取消」处理（等同拒绝）
+let runtime = AgentRuntime(config, provider, toolReg, ..., ask: Some(askFn))
 let stream = runtime.chat(messages)
 for (event in stream) { ... }
 ```
@@ -124,7 +129,7 @@ command = "npx @playwright/mcp"
 | [集成指南](docs/integration.md) | 库模式 / HTTP 挂载 / CLI / Docker |
 | [配置参考](docs/configuration.md) | TOML 配置 + AgentConfig 字段 |
 | [消息模型](docs/messages.md) | 4 种角色 + ContentBlock |
-| [事件流](docs/events.md) | 11 种事件 + EventStream |
+| [事件流](docs/events.md) | 12 种事件（含 Suspend 挂起）+ EventStream |
 | [工具开发](docs/tools.md) | 内置工具 + 自定义 + MCP |
 | [Provider](docs/providers.md) | OpenAI / 自定义 Provider |
 | [会话管理](docs/sessions.md) | 树模型 + 持久化 |

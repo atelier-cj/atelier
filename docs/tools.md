@@ -48,7 +48,7 @@ enum ToolExecutionMode {
 | `grep` | Parallel | 放行 | 正则搜索文件内容 |
 | `glob` | Parallel | 放行 | 文件模式匹配，支持 gitignore |
 | `todo` | Sequential | 放行 | 待办列表管理（有状态） |
-| `ask_user` | Parallel | 放行 | AI 向用户提问，暂停等待回答 |
+| `ask_user` | Parallel | 放行 | AI 向用户提问（纯提问 / 选择 / 表单三形态）；宿主可同 run 等待，也可返回 `Pending` 挂起本次 run |
 
 ### 注册内置工具
 

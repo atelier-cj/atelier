@@ -227,13 +227,14 @@ interface AgentEvent {
 }
 ```
 
-**11 种事件**，按层级嵌套组织：
+**12 种事件**，按层级嵌套组织：
 
 ```
 Agent (start / end)
   └── Turn (start / end)
        ├── Message (start / update / end)
        └── ToolExecution (start / update / end)
+Suspend (挂起：本次 run 到此为止，等外部结果)
 Compaction (独立事件)
 ```
 
@@ -251,6 +252,7 @@ Compaction (独立事件)
 | `ToolExecutionStartEvent` | `toolCallId`, `toolName` | 工具开始执行 |
 | `ToolExecutionUpdateEvent` | `toolCallId`, `progress` | 工具执行进度 |
 | `ToolExecutionEndEvent` | `toolCallId`, `result`, `isError` | 工具执行完成 |
+| `SuspendEvent` | `requests`（`ExternalRequest` 列表） | 本次 run 挂起，等外部结果；带结果发起下一次 run 继续 |
 | `CompactionEvent` | `reason`, `tokensBefore`, `tokensAfter` | 上下文压缩已发生 |
 
 **EventStream 泛型**：事件通过 `EventStream<T, R>` 传递，T 是事件类型，R 是流终结时的结果：
@@ -480,7 +482,6 @@ server.serve()
 | :--- | :--- | :--- |
 | `POST` | `/v1/chat/completions` | 兼容 OpenAI Chat API |
 | `POST` | `/ag-ui/agent` | **AG-UI 协议**（对外前端协议）：`RunAgentInput` → SSE 事件流 |
-| `POST` | `/ag-ui/input` | AG-UI 回传通道：等外部输入（提问/前端工具结果）时用 |
 | `POST` | `/agent/run` | 运行 Agent（自有格式） |
 | `GET` | `/agent/stream` | SSE 流式交互 |
 | `POST` | `/agent/config` | 动态创建 Agent 配置 |
@@ -516,7 +517,7 @@ curl -X POST http://localhost:8080/agent/run \
 | 思维链 | `REASONING_START` → `REASONING_MESSAGE_START/CONTENT/END` → `REASONING_END`（独立消息 id） |
 | 工具调用 | `TOOL_CALL_START` + `TOOL_CALL_ARGS`（全量参数）+ `TOOL_CALL_END`；执行完 `TOOL_CALL_RESULT` |
 | 工具进度 / 上下文压缩 | `CUSTOM`（`tool_progress` / `compaction`） |
-| 提问（审批/选择/表单） | `CUSTOM`（`tool_progress` 类之外的提问随挂起走）→ `RUN_FINISHED{outcome=interrupt}`，客户端在下一次 `resume[]` 里带答复 |
+| 提问（审批/选择/表单） | `RUN_FINISHED{outcome=interrupt}`（`reason` 随提问类型：`confirmation` / `input_required` / `tool_call`）→ 客户端在下一次 `RunAgentInput.resume[]` 里带答复 |
 | 前端工具 | `TOOL_CALL_*` → `CUSTOM`（`client_tool_request`）→ **挂起** |
 | 正常结束 / provider 失败 | `RUN_FINISHED`（`outcome=success` + `result.stopReason/turns`）/ `RUN_ERROR` |
 | 挂起（等外部结果） | `MESSAGES_SNAPSHOT`（恢复所需状态）→ `RUN_FINISHED`（`outcome.type="interrupt"`） |
@@ -552,8 +553,9 @@ ACP），也可以返回 `Pending` 让本次 run 以中断收尾（AG-UI），�
 - **`threadId` 就是 atelier 会话 id**：同一 threadId 的多次 run 共享会话上下文，前端不必回传历史；
   会话为空时前端可以带完整上下文开一个新 thread（那时的历史会一起落进会话）。
 - **`tools` 里的工具是前端实现的**：为本次 run 单独建工具注册表（base ∪ 客户端 shim），
-  模型调用时服务端发 `client_tool_request` 并等 `/ag-ui/input` 回传结果
-  （同 run 内等待；中断-恢复模型见 `docs/plans/2026-09-30-ag-ui-endpoint.md` §六）。
+  模型调用时服务端以 `RUN_FINISHED{outcome=interrupt}` 结束本次 run（`reason=tool_call`），
+  客户端执行后在 `RunAgentInput.resume[]` 里带回结果（中断-恢复模型见
+  `docs/plans/2026-09-30-ag-ui-endpoint.md` §六）。
   工具可见性由配置决定，因此按请求**派生**一份配置（`AgentConfig.withTools`），不改共享配置。
 - `system` / `developer` 角色消息与 `context` 条目是"本轮指令"，走**系统提示通道**
   （`PromptSegmentContributor`），不混进消息历史。
@@ -1128,9 +1130,9 @@ public interface Hook {
   - [ ] 候选/边界见下方「候选演进清单（待对账）」
 - [x] HTTP 信任管理端点（`/trust` POST，支持 get/set/reset）
 - [x] HTTP 会话管理端点（`/sessions` 列表 + `/session/fork` 克隆）
-- [x] 信任提示/申请流程（TrustDecision 三态 + ask_user 三选）
+- [x] 信任提示/申请流程（TrustDecision 三态 + 结构化审批：allow_once / allow_always / deny）
 - [x] 用户交互工具
-  - [x] `ask_user` 内置工具：AI 主动向用户提问，runtime 暂停等待回答
+  - [x] `ask_user` 内置工具：三形态（纯提问 / 选择 / 表单）统一走结构化提问；宿主可同 run 等待，也可返回 `Pending` 挂起本次 run
   - [x] 交互前端支持（暂停 → 显示问题 → 获取输入 → 恢复）
   - [x] HTTP 端点支持（SSE `user_request` 帧 + `/agent/input` 按 requestId 回传结构化答复）
 
@@ -1162,7 +1164,7 @@ public interface Hook {
 | 跨进程子 waitReply 回合内插话 | 协议限制 | ACP v2 回合内消息能力落地（现降级：分回合问答，文档明示） |
 | 子主动唤醒空闲父（ACP 桥） | 协议限制 | ACP v1 无 agent 主动发起；本地子不受限（await/watch） |
 | config_option_update 主动推送 | fallback 未启用 | 出现需要 agent 主动改会话配置的宿主（现 set_config_option 响应式已覆盖） |
-| elicitation 结构化多字段 schema（工具层暴露） | 候选 | 出现多字段采集场景（现单字段表单，URL 模式未启用） |
+| elicitation 用 enum/array 属性（现为字符串 property + 提示正文） | 候选 | 确认 `ElicitationPropertySchema` 的 enum/array 构造入口（现由 `validateAnswer` 保证选项合法） |
 | session/list 元数据（title/updatedAt） | 候选 | ACP Client 需要列表元数据展示 |
 | MCP over ACP 透传（非代管形态） | 不做 | 出现「agent 远程调用宿主侧 MCP」需求再评（现宿主代管已覆盖主要场景） |
 | ACP v2（2026-07 Draft）/ HTTP-WS 传输 | 不追 | 官方 v1/v2 并行期结束 / 宿主普遍切 v2 / transports WG draft 落地 |
@@ -1271,7 +1273,10 @@ Atelier 是一个**面向业务集成的 Agent Harness**，其核心价值在于
 ### 扩展点（2026-09-05 新增，均默认关/空 = 零行为变化）
 
 - `Message.metadata!: HashMap<String,String>`（llm_api）：宿主业务元数据随消息持久化 roundtrip；
-  不参与语义比较/文本提取/LLM 协议 JSON；空不序列化（旧数据兼容）
+  不参与语义比较/文本提取/LLM 协议 JSON；空不序列化（旧数据兼容）。
+  **提问答复也走这条通道**：挂起后宿主在下一次输入的消息上带 `ask.*` 元数据（`ask.id` /
+  `ask.status` / `ask.selected` / `ask.text` / `ask.values` / `ask.editedArgs`），运行时的重放
+  先查它、命中就不再问宿主——因此不必改 llm_api 的密封 `Message` 接口
 - `PromptSegmentContributor`（atelier.context）：自定义系统提示段（租户/合规/元数据），
   追加于 [Session Context] 后；AgentRuntime/SessionLoop 构造注入
 - `ProviderMiddleware`（atelier.agent）：请求级中间件链包 Provider（重试/路由/限流/观测），

@@ -21,6 +21,12 @@ interface Message {
 }
 ```
 
+消息还带一个 `metadata: HashMap<String,String>` 扩展通道（来自 llm_api）：宿主业务元数据随
+消息持久化 roundtrip，不参与语义比较与 LLM 协议 JSON。**提问答复就走这条通道**——挂起后
+宿主在下一次输入的消息上带 `ask.*` 键（`ask.id` / `ask.status` / `ask.selected` / `ask.text` /
+`ask.values` / `ask.editedArgs`），运行时重放时先查它、命中就不再问宿主（见
+[事件流](events.md) 的 `SuspendEvent`）。
+
 ## 4 种消息类型
 
 ### UserMessage

@@ -48,9 +48,9 @@ cli.app acp [agent]
 | `session/set_config_option` | ✅ | 见下「Session Config Options」 |
 | `session/set_mode` | ❌ | 旧 Modes API 未实现（config options 已覆盖；支持 config options 的 Client 会忽略 modes） |
 | `authenticate` / `logout` | ❌（默认关） | 协议级认证未启用（`authRequired=false`） |
-| `session/request_permission`（Agent→Client） | ✅ | 信任闸门 `NeedsApproval` → 授权弹窗（allow once / always / deny）；10 分钟等待 |
+| `session/request_permission`（Agent→Client） | ❌（未使用） | 审批统一走 elicitation 表单，不再反向调用本方法 |
 | `terminal/*` `fs/*`（Agent→Client） | ❌ | 未使用（atelier 工具在本地执行，不委托 Client 侧能力） |
-| `elicitation/create`（form） | ✅ | client 声明 form 时 `ask_user` 工具经单字段表单向用户提问（accept 答案回流回合；decline/cancel/未声明 → 拒绝语义）；URL 模式未启用（无敏感采集场景） |
+| `elicitation/create`（form） | ✅ | client 声明 form 时，审批/选择/表单都经 elicitation 表单向用户提问（每个字段一个字符串 property，候选值写进提示正文）；accept → 答复回流回合，decline/cancel/失败/未声明 → `Cancelled` + 留痕；URL 模式未启用（无敏感采集场景） |
 | prompt 图片/音频/内嵌上下文 | ❌ | 未声明（`promptCapabilities` 默认 false，Client 不会发送） |
 | MCP over ACP（宿主代管） | ✅ | `session/new.mcpServers` → McpManager 注册（与本地 `[[mcpServer]]` 并集、同 on-demand 门控；stdio/streamable-http 形态；stdio env 支持 `env` 注入；sse 形态不支持） |
 
@@ -107,7 +107,7 @@ python3 scripts/acp_e2e.py
 ## 已知边界
 
 - 取消为协作式：正在执行的工具不强制中断，取消延迟上界 ≈ 当前工具最长执行时间 + 轮询间隔
-- `ask_user` 走 Elicitation 表单（单字段）；需要结构化多字段采集可扩展 schema（工具层暂未暴露多字段参数）
+- 提问走 Elicitation 的**字符串属性**通道（每字段一个 property，候选 id/说明写进提示正文）：不直接映射 enum/array 属性（构造入口尚未确认）；答复合法性由 runtime 的 `validateAnswer` 把关，字符串通道不会放过非法选项
 - 会话映射的 config options 覆盖状态不跨进程持久化（重连后恢复 agent 默认）
 - `session/list` 不带 title/updatedAt 元数据（可选字段）
 - 协议层演进：ACP v1 稳定；v2（2026-07 Draft）不追，官方要求 v1/v2 并行期以 v1 为主

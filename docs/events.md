@@ -12,13 +12,14 @@ interface AgentEvent {
 }
 ```
 
-## 11 种事件
+## 12 种事件
 
 ```
 Agent (start / end)
   └── Turn (start / end)
        ├── Message (start / update / end)
        └── ToolExecution (start / update / end)
+Suspend (挂起：本次 run 到此为止，等外部结果)
 Compaction (独立事件)
 ```
 
@@ -99,6 +100,18 @@ Compaction (独立事件)
 | `isError` | `Bool` | 是否错误 |
 
 工具执行完成。
+
+### SuspendEvent
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `requests` | `ArrayList<ExternalRequest>` | 正在等待的外部请求（可多条） |
+
+`ExternalRequest`：`id` / `reason`（`tool_call` 绑定某次调用、`input_required` 要一段结构化输入、`confirmation` 要用户拍板）/ `message`（兜底展示文案）/ `toolCallId`（`reason=tool_call` 时绑定）。
+
+本次运行挂起：需要外部结果（前端执行工具、用户确认/作答）才能继续。**挂起不是失败**——
+历史停在 `assistant(tool_calls)`，调用方带上结果发起下一次 run 即可继续（本次 run 的答复随
+消息 `metadata` 回传，见 [消息模型](messages.md)）；见到本事件后不应再期待后续回合。
 
 ### CompactionEvent
 
