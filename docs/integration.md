@@ -173,6 +173,7 @@ main() {
 | GET | `/sessions` | 会话列表 |
 | POST | `/trust` | 信任管理 |
 | POST | `/v1/chat/completions` | OpenAI 兼容 API |
+| POST | `/ag-ui/agent` | **AG-UI 协议**端点（对外前端协议）：`RunAgentInput` → SSE 事件流 |
 | GET | `/health` | 健康检查 |
 
 ---

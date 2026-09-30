@@ -50,6 +50,16 @@ enum ToolExecutionMode {
 | `todo` | Sequential | 放行 | 待办列表管理（有状态） |
 | `ask_user` | Parallel | 放行 | AI 向用户提问（纯提问 / 选择 / 表单三形态）；宿主可同 run 等待，也可返回 `Pending` 挂起本次 run |
 
+### 路径与通配语义
+
+所有内置工具的路径参数走同一套解析（`atelier.tool.builtin.resolveToolPath`）：
+
+- **绝对路径原样使用**（不会被拼到工作目录后面报"文件不存在"）；相对路径一律相对 `ctx.workDir` 解析；
+- `write_file` **自动创建缺失的父目录**；
+- `glob` 的通配支持 `*`（段内任意字符）、`?`（段内单字符）、`**`（跨任意层目录）、`{a,b}`（择一），
+  且**目录前缀里也可以带通配** —— `src/**/*.cj`、`**/*.mjs` 按字面理解即可，不必把目录部分写成无通配的搜索根；
+  默认尊重 `.gitignore`（`noIgnore: true` 关闭）。
+
 ### 注册内置工具
 
 ```cangjie

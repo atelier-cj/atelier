@@ -1117,6 +1117,7 @@ public interface Hook {
 - [x] 斜杠命令系统（/help /trust /untrust /session /model /tools /clear /exit）
 - [x] 交互式 TUI（session 持久化 + 恢复 + 模型切换）
 - [x] CLI run 命令（单次执行）
+- [x] 机器可读运行日志（`run --json-events`：stdout 逐行 JSON 事件、进度走 stderr；口径对齐 harness-bench SessionIR）
 - [x] 会话导出（JSONL/HTML）
 
 ### Phase 4：增强

@@ -154,6 +154,35 @@ curl -X POST http://localhost:8080/agent/input \
 - `status` 缺省为 `answered`，另有 `cancelled` / `timed_out` / `pending`；
 - 每次提问只接受一次答复，先到的生效。
 
+## AG-UI 端点
+
+```
+POST /ag-ui/agent
+```
+
+[AG-UI](https://docs.ag-ui.com/) 1.0 协议端点（对外前端协议）：请求体是 `RunAgentInput`
+（`threadId` / `runId` / `messages` / `tools` / `context` / `forwardedProps`），响应是 SSE 事件流。
+
+```bash
+curl -N -X POST http://localhost:8080/ag-ui/agent \
+  -H "Content-Type: application/json" \
+  -d '{"threadId":"t1","runId":"r1",
+       "messages":[{"id":"m1","role":"user","content":"你好"}],
+       "tools":[],"context":[],"forwardedProps":{}}'
+# data: {"type":"RUN_STARTED",...}
+# data: {"type":"STATE_SNAPSHOT",...}
+# data: {"type":"TEXT_MESSAGE_START",...} ... TEXT_MESSAGE_CONTENT/END
+# data: {"type":"RUN_FINISHED",...}
+```
+
+**中断-恢复**：需要外部结果时（前端执行工具、用户拍板），本次 run 以
+`RUN_FINISHED{outcome:{type:"interrupt",interrupts:[...]}}` 收尾；客户端办完后用**同一个 `threadId`**
+发起下一次 run，并在 `resume[]` 里带 `{interruptId,status,payload}`（要覆盖**全部**未决中断）。
+服务端按 `interruptId` 对上恢复内容、补发 `TOOL_CALL_RESULT`，**不重放**已完成的调用。
+
+事件序列与 `CUSTOM` 扩展（`tool_progress` / `compaction` / `client_tool_request`）见
+[架构设计](design.md) 的「AG-UI 端点」节；端到端验收脚本：`scripts/agui-probe.mjs`（零依赖，可直接进 CI）。
+
 ## OpenAI 兼容 API
 
 ```

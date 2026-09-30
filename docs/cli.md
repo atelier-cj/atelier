@@ -91,6 +91,42 @@ cli.app run code-assistant "审查 src/main.cj"
 
 如果第一个参数匹配已注册的 agent 名称，则作为 agent 名；否则作为 prompt 并使用 default agent。
 
+### 机器可读输出（`--json-events`）
+
+```bash
+cli.app run --json-events code-assistant "跑一遍测试并修掉失败项"
+```
+
+stdout 改为**逐行一个 JSON 对象**（JSONL），人类可读的进度继续走 stderr —— 两边各自独立可解析。
+
+| 行型 | 字段 |
+|------|------|
+| `agent_start` | `sessionId` |
+| `turn_start` | — |
+| `message` | `role` / `text` / `stopReason` / `usage{input,output}` |
+| `tool_call` | `id` / `name` / `args`（对象）—— 模型**要求**的调用 |
+| `tool_start` | `id` / `name` —— **实际开始执行** |
+| `tool_result` | `id` / `ok` / `bytes` |
+| `turn_end` | `stopReason` / `usage{input,output}` |
+| `compaction` | `reason` / `tokensBefore` / `tokensAfter` |
+| `agent_end` | — |
+
+消费方注意两点：
+
+- **答案就是最后一条 `message` 行的 `text`**；一条 assistant 消息都没产出时会补发一条兜底
+  `message`，因此消费方总能凭它判断"本轮结束了"；
+- `tool_call` 与实际执行分开发：被钩子拦掉或在预算外放弃的调用**只有** `tool_call`，
+  没有 `tool_start`/`tool_result`（两者一比就知道哪些调用没真正跑）。
+
+字段口径与 harness-bench 的 SessionIR 对齐（`message` / `tool_call` / `tool_result` / `turn_end`），
+停止原因沿用 atelier 自己的命名（`end_turn` / `tool_use` / `length` / `error` / `aborted`）。
+**不加这个开关时 stdout 仍是纯答案文本**，老用法不受影响。
+
+```bash
+# 只看实际执行的工具结果
+cli.app run --json-events "跑测试" | jq -c 'select(.type=="tool_result")'
+```
+
 ### 非交互（headless）
 
 `run` 不读 stdin，也没有提问通道（需要用户拍板的地方一律按「取消」处理，等同拒绝）。无人值守的调用方（CI、评测框架、批处理）用
