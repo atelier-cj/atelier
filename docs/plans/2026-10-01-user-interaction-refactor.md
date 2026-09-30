@@ -235,3 +235,23 @@ public struct ToolContext { ... public let ask: AskFn ... }   // 5 个构造器�
 - 能力未声明 / 传输失败 / 用户拒绝 → 分别返回 `Cancelled`（并留痕），**不再折叠成空串**
 - 接线：`SessionLoop` 增可选 `askFn`（转发给 runtime 的 `ask:`），bridge 传
   `{ req => this.answerUserRequest(acpId, req) }`
+
+## 十、AG-UI 端到端验收（2026-10-01 实跑通过）
+
+工具：`scripts/agui-probe.mjs` —— **零依赖**（fetch + SSE 解析），可直接进 CI：
+
+```shell
+node scripts/agui-probe.mjs http://127.0.0.1:8791 default
+```
+
+跑法（重建 → 起服务 → 探针 → 收尾）见 `.harbor/agui-probe-run.sh`；注意沙箱评测要用
+**cjc 1.2.0 + stdx 1.2.0.1** 构建（1.1.3.1 过不了 srt 的认证代理）。
+
+实测事件序列（真实模型）：
+
+| 趟 | 事件 | 断言 |
+|---|---|---|
+| 1 | `RUN_STARTED → STATE_SNAPSHOT → STEP_STARTED → REASONING_* → TOOL_CALL_START/ARGS/END → CUSTOM → STEP_FINISHED → MESSAGES_SNAPSHOT → RUN_FINISHED{interrupt}` | 挂起 ✓ `reason=tool_call` ✓ 快照在 FINISHED 之前 ✓ |
+| 2 | `RUN_STARTED → STATE_SNAPSHOT → TOOL_CALL_RESULT → STEP_STARTED → TEXT_MESSAGE_* → REASONING_* → STEP_FINISHED → RUN_FINISHED{success}` | 恢复补发 `TOOL_CALL_RESULT`（**不重发** `TOOL_CALL_START`）✓ 正常收尾 ✓ |
+
+这一步同时验证了三件本轮改动：中断边界前给状态、恢复走"补结果"而不是重放整段、挂起期间不重复执行工具。
