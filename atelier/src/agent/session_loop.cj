@@ -5,6 +5,7 @@ import std.core.Duration
 import atelier.message.*
 import atelier.provider.*
 import atelier.tool.*
+import atelier.interaction.*
 import atelier.session.*
 import atelier.trust.*
 import atelier.skill.*
@@ -73,6 +74,7 @@ public class SessionLoop {
         parentSession!: ?String = None,
         approvalFn!: ?(ToolCallBlock, String) -> String = None,
         askUserFn!: (String) -> String = { q => "" },
+        askFn!: Option<AskFn> = None,
         maxLoad!: Int64 = 0,
         attachments!: ArrayList<ContentBlock> = ArrayList()): TurnOutcome {
         let toolRegistry = match (toolRegOverride) {
@@ -94,7 +96,7 @@ public class SessionLoop {
         }
         let runtime = AgentRuntime(config, provider, toolRegistry, this.sessionStore,
             this.trustMgr, this.skillReg, this.agentReg, this.providerReg,
-            ArrayList<Hook>(), askUserFn, env, this.mcpMgr,
+            ArrayList<Hook>(), askUserFn, env, this.mcpMgr, ask: askFn,
             promptContributors: this.promptContributors,
             middlewares: this.middlewares,
             eventBus: this.eventBus)
