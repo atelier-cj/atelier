@@ -196,3 +196,113 @@ func userRequest_toolExecutionKind() {
     @Expect(req.kindName(), "tool_execution")
     @Expect(req.toolCallId, "int-c1")
 }
+
+// ── 答复的持久化编码（恢复的载体）────────────────────────────────────────────
+// 恢复靠"下一次 run 的消息里带着答复"：编码必须无损，坏数据必须能被识别（宁可再问一次，
+// 也不要拿半个答复去执行）。
+
+@Test
+func codec_roundTripApprovalWithEdits() {
+    let edited = JsonValue.Map(HashMap<String, JsonValue>([("cmd", JsonValue.String("ls"))]))
+    let a = UserAnswer("ask:1", UserAnswerStatus.Answered,
+        selected: ArrayList<String>(["allow_once"]), text: "", editedArgs: Some(edited))
+    let back = decodeAnswer(encodeAnswer(a))
+    @Expect(back.isSome(), true)
+    match (back) {
+        case Some(v) =>
+            @Expect(v.requestId, "ask:1")
+            @Expect(v.isAllowOnce(), true)
+            let hasEdited = match (v.editedArgs) { case Some(_) => true; case None => false }
+            @Expect(hasEdited, true)
+        case None => @Fail("应当能还原")
+    }
+}
+
+@Test
+func codec_roundTripFormValues() {
+    let values = HashMap<String, JsonValue>()
+    values["name"] = JsonValue.String("阿特")
+    values["age"] = JsonValue.String("42")
+    values["tags"] = JsonValue.Array(ArrayList<JsonValue>([JsonValue.String("x")]))
+    let a = UserAnswer("ask:2", UserAnswerStatus.Answered, values: values)
+    match (decodeAnswer(encodeAnswer(a))) {
+        case Some(v) =>
+            @Expect(v.values.size, 3)
+            match (v.values.get("name")) {
+                case Some(JsonValue.String(s)) => @Expect(s, "阿特")
+                case _ => @Fail("name 应当还原")
+            }
+            match (v.values.get("tags")) {
+                case Some(JsonValue.Array(items)) => @Expect(items.size, 1)
+                case _ => @Fail("tags 应当还原成数组")
+            }
+        case None => @Fail("应当能还原")
+    }
+}
+
+@Test
+func codec_multiSelectSelectedList() {
+    let a = UserAnswer("ask:3", UserAnswerStatus.Answered,
+        selected: ArrayList<String>(["a", "b", "c"]))
+    match (decodeAnswer(encodeAnswer(a))) {
+        case Some(v) => @Expect(v.selected.size, 3)
+        case None => @Fail("应当能还原")
+    }
+}
+
+@Test
+func codec_statusesPreserved() {
+    // Cancelled / TimedOut 必须能跨 run 传下去：它们与"答了空"是不同语义
+    for (st in [UserAnswerStatus.Cancelled, UserAnswerStatus.TimedOut]) {
+        let a = UserAnswer("ask:4", st)
+        match (decodeAnswer(encodeAnswer(a))) {
+            case Some(v) => @Expect(v.statusName(), a.statusName())
+            case None => @Fail("应当能还原")
+        }
+    }
+}
+
+@Test
+func codec_detectsBrokenData() {
+    // 缺 id / 坏 JSON / 空 values：一律 None（当作没答复，重新提问）
+    @Expect(encodeAnswer(UserAnswer("", UserAnswerStatus.Answered)).get(ASK_ID), Some(""))
+    let missing = HashMap<String, String>()
+    @Expect(decodeAnswer(missing).isNone(), true)
+    let badJson = HashMap<String, String>()
+    badJson[ASK_ID] = "ask:9"
+    badJson[ASK_VALUES] = "{not json"
+    @Expect(decodeAnswer(badJson).isNone(), true)
+    let badEdited = HashMap<String, String>()
+    badEdited[ASK_ID] = "ask:9"
+    badEdited[ASK_EDITED_ARGS] = "[[["
+    @Expect(decodeAnswer(badEdited).isNone(), true)
+}
+
+@Test
+func codec_isAnswerMetadataRecognisesCarrier() {
+    let m = encodeAnswer(UserAnswer("ask:5", UserAnswerStatus.Pending))
+    @Expect(isAnswerMetadata(m), true)
+    @Expect(isAnswerMetadata(HashMap<String, String>()), false)
+}
+
+// 截断的复合 JSON 不能让解码器崩：实测 JsonValue.fromJson 对 `{not json` 会无限递归到 OOM
+// （不是异常，try/catch 兜不住），所以解码前必须有形状检查
+@Test
+func codec_truncatedCompositeIsRejectedNotCrash() {
+    let truncated = HashMap<String, String>()
+    truncated[ASK_ID] = "ask:1"
+    truncated[ASK_VALUES] = "{not json"
+    @Expect(decodeAnswer(truncated).isNone(), true)
+    let truncated2 = HashMap<String, String>()
+    truncated2[ASK_ID] = "ask:1"
+    truncated2[ASK_EDITED_ARGS] = "[1, 2"
+    @Expect(decodeAnswer(truncated2).isNone(), true)
+    // 完整对象的正常路径不受影响
+    let ok = HashMap<String, String>()
+    ok[ASK_ID] = "ask:1"
+    ok[ASK_VALUES] = "{\"a\":\"b\"}"
+    match (decodeAnswer(ok)) {
+        case Some(v) => @Expect(v.values.size, 1)
+        case None => @Fail("完整对象应当能解析")
+    }
+}
