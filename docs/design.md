@@ -479,6 +479,8 @@ server.serve()
 | 方法 | 路径 | 描述 |
 | :--- | :--- | :--- |
 | `POST` | `/v1/chat/completions` | 兼容 OpenAI Chat API |
+| `POST` | `/ag-ui/agent` | **AG-UI 协议**（对外前端协议）：`RunAgentInput` → SSE 事件流 |
+| `POST` | `/ag-ui/input` | AG-UI 回传通道：等外部输入（提问/前端工具结果）时用 |
 | `POST` | `/agent/run` | 运行 Agent（自有格式） |
 | `GET` | `/agent/stream` | SSE 流式交互 |
 | `POST` | `/agent/config` | 动态创建 Agent 配置 |
@@ -498,6 +500,37 @@ curl -X POST http://localhost:8080/agent/run \
     "stream": true
   }'
 ```
+
+#### AG-UI 端点（对外前端协议）
+
+`/ag-ui/agent` 实现 [AG-UI](https://docs.ag-ui.com/)：请求体是 `RunAgentInput`
+（`threadId` / `runId` / `messages` / `tools` / `context` / `forwardedProps`），
+响应是 `text/event-stream`，逐条 `data: <事件>`。与既有 `/agent/stream`（atelier 私有格式，TUI 在用）
+并存：**对外一律走 AG-UI**，协议字段与生命周期由公开规范约束，前端生态现成。
+
+| atelier 内部事件 | AG-UI 事件 |
+| :--- | :--- |
+| run 开始 | `RUN_STARTED` + `STATE_SNAPSHOT`（agent/model/sessionId/cwd，客户端 `state` 原样回显） |
+| 回合边界 | `STEP_STARTED` / `STEP_FINISHED`（`stepName="turn-N"`） |
+| 文本增量 | `TEXT_MESSAGE_START`（惰性）→ `TEXT_MESSAGE_CONTENT` → `TEXT_MESSAGE_END` |
+| 思维链 | `REASONING_START` → `REASONING_MESSAGE_START/CONTENT/END` → `REASONING_END`（独立消息 id） |
+| 工具调用 | `TOOL_CALL_START` + `TOOL_CALL_ARGS`（全量参数）+ `TOOL_CALL_END`；执行完 `TOOL_CALL_RESULT` |
+| 工具进度 / 上下文压缩 | `CUSTOM`（`tool_progress` / `compaction`） |
+| 提问、前端工具 | `CUSTOM`（`user_input_request` / `client_tool_request`）→ 经 `/ag-ui/input` 回传 |
+| 正常结束 / provider 失败 | `RUN_FINISHED`（`outcome=success` + `result.stopReason/turns`）/ `RUN_ERROR` |
+
+语义要点：
+
+- **`threadId` 就是 atelier 会话 id**：同一 threadId 的多次 run 共享会话上下文，前端不必回传历史；
+  会话为空时前端可以带完整上下文开一个新 thread（那时的历史会一起落进会话）。
+- **`tools` 里的工具是前端实现的**：为本次 run 单独建工具注册表（base ∪ 客户端 shim），
+  模型调用时服务端发 `client_tool_request` 并等 `/ag-ui/input` 回传结果
+  （同 run 内等待；中断-恢复模型见 `docs/plans/2026-09-30-ag-ui-endpoint.md` §六）。
+  工具可见性由配置决定，因此按请求**派生**一份配置（`AgentConfig.withTools`），不改共享配置。
+- `system` / `developer` 角色消息与 `context` 条目是"本轮指令"，走**系统提示通道**
+  （`PromptSegmentContributor`），不混进消息历史。
+- 状态同步只发一次 `STATE_SNAPSHOT`（不发 `STATE_DELTA`/`MESSAGES_SNAPSHOT`）：
+  前端手里就有自己的输入，多发一份是浪费带宽。
 
 ### 5.3 CLI 模式（Phase 3）
 

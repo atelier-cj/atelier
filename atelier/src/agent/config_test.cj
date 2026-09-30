@@ -318,3 +318,31 @@ func config_maxLengthContinuations_defaultAndRoundTrip() {
     @Expect(zero.maxLengthContinuations, UInt32(0))
     @Expect(fromJsonString<AgentConfig>(toJsonString(zero)).maxLengthContinuations, UInt32(0))
 }
+
+// withTools：派生而不是改共享配置——按请求扩大可见工具集合时，不能串到并发中的其它 run
+@Test
+func config_withToolsDerivesWithoutMutatingSource() {
+    let base = AgentConfig.default()
+    let extra = ArrayList<String>(["get_weather", "get_time"])
+    let derived = base.withTools(extra)
+    @Expect(derived.tools.size, base.tools.size + 2)
+    @Expect(derived.tools.contains("get_weather"), true)
+    // 原配置不受影响（共享对象不能被就地改）
+    @Expect(base.tools.contains("get_weather"), false)
+    // 其它字段原样带过去
+    @Expect(derived.name, base.name)
+    @Expect(derived.model, base.model)
+    @Expect(derived.maxTurns, base.maxTurns)
+}
+
+@Test
+func config_withToolsKeepsExistingAndDeduplicates() {
+    let base = AgentConfig.default()
+    let existing = if (base.tools.size > 0) { base.tools[0] } else { "" }
+    let names = ArrayList<String>()
+    if (existing != "") { names.add(existing) }
+    names.add("get_weather")
+    names.add("get_weather")
+    let derived = base.withTools(names)
+    @Expect(derived.tools.size, base.tools.size + 1)
+}

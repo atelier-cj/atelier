@@ -186,11 +186,17 @@ public open class AgentRuntime {
         this.chatWithEnv(sessionId, messages, sessionEnv)
     }
 
+    // 由会话级上下文派生出「本次调用」的上下文：只多一个 toolCallId
+    private func callContext(ctx: ToolContext, toolCallId: String): ToolContext {
+        ToolContext(ctx.workDir, ctx.askUser, ctx.env, ctx.sessionId, toolCallId: toolCallId)
+    }
+
     private func chatWithEnv(sessionId: String, messages: ArrayList<Message>, sessionEnv: SessionEnvironment): EventStream<AgentEvent, ArrayList<Message>> {
         let stream = EventStream<AgentEvent, ArrayList<Message>>()
         let se = sessionEnv
         let workDir = resolveWorkDir(se)
         let ctx = ToolContext(workDir, this.askUser, se.context, sessionId)
+        // 每次工具调用单独一份上下文（带该次调用的 id）：工具要把自己与协议/UI 上的同一次调用对上时用
         let ctxBuilder = ContextBuilder(this.skillRegistry, se, contributors: this.promptContributors)
 
         spawn {
@@ -381,7 +387,7 @@ public open class AgentRuntime {
                                                 let (args, skipMsg) = decideToolCall(hookState, turnCount, tc)
                                                 match (args) {
                                                     case Some(a) =>
-                                                        batch.add((tc.name, ctx, a))
+                                                        batch.add((tc.name, this.callContext(ctx, tc.id), a))
                                                         runCallIds.add(tc.id)
                                                         runNames.add(tc.name)
                                                     case None =>
@@ -404,7 +410,7 @@ public open class AgentRuntime {
                                                     let (args, skipMsg) = decideToolCall(hookState, turnCount, tc)
                                                     match (args) {
                                                         case Some(a) =>
-                                                            batch.add((tc.name, ctx, a))
+                                                            batch.add((tc.name, this.callContext(ctx, tc.id), a))
                                                             runCallIds.add(tc.id)
                                                             runNames.add(tc.name)
                                                         case None =>
@@ -417,7 +423,7 @@ public open class AgentRuntime {
                                                     let (args, skipMsg) = decideToolCall(hookState, turnCount, tc)
                                                     match (args) {
                                                         case Some(a) =>
-                                                            batch.add((tc.name, ctx, a))
+                                                            batch.add((tc.name, this.callContext(ctx, tc.id), a))
                                                             runCallIds.add(tc.id)
                                                             runNames.add(tc.name)
                                                         case None =>
