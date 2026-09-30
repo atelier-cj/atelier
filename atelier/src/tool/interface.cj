@@ -25,12 +25,17 @@ public struct ToolContext {
     public let env: HashMap<String, String>
     // 当前运行会话 id（无会话上下文时为空 ""）；子 agent 父向调度等场景使用
     public let sessionId: String
+    // 本次工具调用的 id（LLM 侧 tool_call id；无调用上下文时为空 ""）。
+    // 工具要把自己的执行与协议/UI 上的同一次调用对上（进度上报、等外部执行结果）时用得到它：
+    // 一次调用一份上下文，而不是一个会话共用一份。
+    public let toolCallId: String
 
     public init(workDir: String) {
         this.workDir = workDir
         this.askUser = { q => "" }
         this.env = HashMap()
         this.sessionId = ""
+        this.toolCallId = ""
     }
 
     public init(workDir: String, askUser: AskUserFn) {
@@ -38,6 +43,7 @@ public struct ToolContext {
         this.askUser = askUser
         this.env = HashMap()
         this.sessionId = ""
+        this.toolCallId = ""
     }
 
     public init(workDir: String, askUser: AskUserFn, env: HashMap<String, String>) {
@@ -45,13 +51,16 @@ public struct ToolContext {
         this.askUser = askUser
         this.env = env
         this.sessionId = ""
+        this.toolCallId = ""
     }
 
-    public init(workDir: String, askUser: AskUserFn, env: HashMap<String, String>, sessionId: String) {
+    public init(workDir: String, askUser: AskUserFn, env: HashMap<String, String>, sessionId: String,
+        toolCallId!: String = "") {
         this.workDir = workDir
         this.askUser = askUser
         this.env = env
         this.sessionId = sessionId
+        this.toolCallId = toolCallId
     }
 }
 

@@ -56,6 +56,12 @@ public class AtelierHttpHandler {
         distributor.register("/trust", { ctx => h.handleTrust(ctx) })
         distributor.register("/health", { ctx => h.handleHealth(ctx) })
         distributor.register("/v1/chat/completions", { ctx => h.handleV1Chat(ctx) })
+        // AG-UI 对外端点（公开协议）。此处构造：providerRegistry / mcpManager 已由
+        // setXxx 注入完毕（serve() 之前），构造出来的实例持有的都是最终对象。
+        let agUi = AgUiHandler(this.agentRegistry, this.toolRegistry, this.sessionStore,
+            this.trustManager, this.skillRegistry, this.providerRegistry, this.mcpManager)
+        distributor.register("/ag-ui/agent", { ctx => agUi.handleAgent(ctx) })
+        distributor.register("/ag-ui/input", { ctx => agUi.handleInput(ctx) })
     }
 
     private func handleAgentConfig(ctx: HttpContext): Unit {

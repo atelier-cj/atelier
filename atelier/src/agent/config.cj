@@ -95,6 +95,30 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
         this.maxVerifyPasses = maxVerifyPasses
     }
 
+    // 派生一份「额外挂上若干工具名」的配置。
+    // 工具可见性由本配置的 tools 列表决定，而调用方（协议层按请求传入的工具、
+    // 多租户按会话授权的工具）需要在不改共享配置的前提下扩大可见集合 —— 直接往
+    // 共享的 tools 里加会串到并发中的其它 run，所以只做派生。
+    public func withTools(extra: ArrayList<String>): AgentConfig {
+        let merged = ArrayList<String>(this.tools)
+        for (name in extra) {
+            if (!merged.contains(name)) { merged.add(name) }
+        }
+        AgentConfig(this.name, this.description, this.systemPrompt, this.userPromptTemplate,
+            this.model, this.provider, merged, this.skills, this.mcpCooldownTurns,
+            this.maxTurns, this.temperature, this.maxOutputTokens, this.thinkingLevel,
+            this.compactionEnabled, this.compactionReserveTokens, this.keepRecentTokens,
+            this.compaction, this.maxToolCalls, this.toolTimeout, this.minToolInterval,
+            this.tags, this.createdBy, this.createdAt, this.updatedAt,
+            supportsVision: this.supportsVision,
+            toolPresentation: this.toolPresentation,
+            ptcTimeoutSeconds: this.ptcTimeoutSeconds,
+            ptcMaxSubCalls: this.ptcMaxSubCalls,
+            sideEffectToolTimeout: this.sideEffectToolTimeout,
+            maxLengthContinuations: this.maxLengthContinuations,
+            maxVerifyPasses: this.maxVerifyPasses)
+    }
+
     public static func default(): AgentConfig {
         AgentConfig(
             "", None, "", None, "", None,
