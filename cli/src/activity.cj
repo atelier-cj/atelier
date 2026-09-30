@@ -189,11 +189,23 @@ public class TurnActivity {
  * （stdout 留给答案，便于管道）。
  */
 public func pumpProgress(stream: LoopEventStream, sink: (String) -> Unit): Unit {
+    pumpProgress(stream, sink, { _ => () })
+}
+
+/**
+ * 同上，并在消费事件时逐个回调给 `onEvent`（`run --json-events` 用它产出结构化日志）。
+ *
+ * 必须与进度呈现**共用同一个消费循环**：事件流只能被读一次、读到的事件不回放，
+ * 另起一个循环去读就会两边各拿一半事件——JSONL 会缺回合，进度条也会卡住。
+ */
+public func pumpProgress(stream: LoopEventStream, sink: (String) -> Unit,
+    onEvent: (AgentEvent) -> Unit): Unit {
     let activity = TurnActivity()
     var done = false
     while (!done) {
         match (stream.receive(200 * Duration.millisecond)) {
             case Some(e) =>
+                onEvent(e)
                 activity.onEvent(e, MonoTime.now())
                 for (line in activity.drainNewLines()) {
                     sink(line)

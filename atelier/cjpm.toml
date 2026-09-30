@@ -19,7 +19,7 @@ repository = "https://atomgit.com/ystyle/atelier"
 "ystyle::jsonrpc" = "0.7.8"
 "bstorm" = "1.4.7"
 "opencj::ulid" = "0.1.2"
-"llm_api" = "1.3.4"
+"llm_api" = "1.3.5"
 "acp" = "0.2.6"
 # PTC 程序执行引擎（中断检查点 / 纯函数子集 / 严格解析由 xisp 0.4.1 提供）
 "ystyle::xisp" = "0.4.1"
