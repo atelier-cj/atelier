@@ -150,3 +150,40 @@ runtime 据此挂起本次 run（与工具"要外部结果"走同一条路）。
 - 表单/选择的校验放在 runtime 侧（不是前端）：前端只负责渲染，答复一律过校验，
   否则多端（TUI/AG-UI/ACP）行为会分叉
 - `Pending` 与 `Answered` 的分支必须穷举匹配（仓颉枚举穷举 ✓），避免新增 kind 时漏处理
+
+## 九、决策记录：**不做**兼容适配器（2026-10-01）
+
+第 2 步曾把老的 `askUser(String) -> String` 用 `extend ToolContext { ask }` 包成结构化入口，
+让老宿主零改动。**决定去掉这条兼容路径**：宿主本来就要改（第 5 步），留着会出现
+"结构化提问 + 字符串提问"两条并存的路径——正是本次重构要消灭的东西。
+
+改法：`ask` 从"方法适配器"升级为 `ToolContext` 的**一等字段**：
+
+```cangjie
+public type AskFn = (UserRequest) -> UserAnswer
+public struct ToolContext { ... public let ask: AskFn ... }   // 5 个构造器同步加参数
+```
+
+宿主的改法都是**显式**的（不再有隐藏转换），各成员一次性改完，避免"一半结构化一半字符串"：
+
+| 文件 | 改动 |
+|---|---|
+| `atelier/src/tool/interface.cj` | `askUser` 字段 → `ask: AskFn`；删掉 `extend ToolContext { ask }` 适配器；5 个构造器同步 |
+| `atelier/src/tool/builtin/ask_user.cj` | 工具升级三形态（`question` / `options` / `fields`），直接构造 `UserRequest` |
+| `atelier/src/agent/runtime.cj` | 构造参数 `askUser` → `ask`；`askHost` 的兜底从 `ctx.ask` 改为 `this.ask` |
+| `atelier/src/agent/session_loop.cj` | `askUserFn` → `askFn`（默认 = 取消，而不是空串） |
+| `atelier/src/acp/bridge.cj` | Approval → ACP permission 请求；Choice/Form → elicitation（表单桥） |
+| `cli/src/app/main.cj`、`cli/src/shared.cj`、`cli/src/tui.cj` | 终端提问：渲染 `message` + `options`/`fields`，答复结构化 |
+| `server/src/handler.cj`、`server/src/ag_ui_handler.cj` | AG-UI 侧：见下 |
+
+### 两个必须先定的宿主行为
+
+1. **AG-UI 的 `ask` 返回 `Pending`（挂起）还是沿用阻塞 `/ag-ui/input`？**
+   建议 `Pending`（第 5 步）——理由：绑定 AG-UI 的 interrupt 契约后，前端渲染的是
+   `RUN_FINISHED.outcome.interrupts`，私有 `CUSTOM user_input_request` + `/ag-ui/input` 都可以删掉；
+   阻塞式通道留着的唯一好处是"不用等前端重放"，但那条通道标准前端根本不会用。
+2. **ACP 表单桥**：`session/request_permission` 只适合审批（是/否），
+   选择与表单需要走 elicitation 的多字段表单——需要确认 ACP 客户端（Zed 等）的 elicitation
+   支持到什么程度，否则选择/表单在 ACP 端只能降级为"文本输入"。
+
+在这两条定下来之前，**不启动这次删除**：否则宿主要改两遍（先适配字符串→结构化，再适配阻塞→挂起）。
