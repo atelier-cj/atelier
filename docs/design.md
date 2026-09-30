@@ -516,7 +516,7 @@ curl -X POST http://localhost:8080/agent/run \
 | 思维链 | `REASONING_START` → `REASONING_MESSAGE_START/CONTENT/END` → `REASONING_END`（独立消息 id） |
 | 工具调用 | `TOOL_CALL_START` + `TOOL_CALL_ARGS`（全量参数）+ `TOOL_CALL_END`；执行完 `TOOL_CALL_RESULT` |
 | 工具进度 / 上下文压缩 | `CUSTOM`（`tool_progress` / `compaction`） |
-| 提问（`askUser`） | `CUSTOM`（`user_input_request`）→ 经 `/ag-ui/input` 回传（同 run 内等待） |
+| 提问（审批/选择/表单） | `CUSTOM`（`tool_progress` 类之外的提问随挂起走）→ `RUN_FINISHED{outcome=interrupt}`，客户端在下一次 `resume[]` 里带答复 |
 | 前端工具 | `TOOL_CALL_*` → `CUSTOM`（`client_tool_request`）→ **挂起** |
 | 正常结束 / provider 失败 | `RUN_FINISHED`（`outcome=success` + `result.stopReason/turns`）/ `RUN_ERROR` |
 | 挂起（等外部结果） | `MESSAGES_SNAPSHOT`（恢复所需状态）→ `RUN_FINISHED`（`outcome.type="interrupt"`） |
@@ -537,8 +537,8 @@ curl -X POST http://localhost:8080/agent/run \
 - 本 run **补发** `TOOL_CALL_RESULT`（绑定原 `toolCallId`），随后继续跑到答复
 
 未决中断登记在服务端内存（单进程服务）；跨重启无法关联时按协议回 `RUN_ERROR`。
-`askUser`（信任闸门等）仍是"同 run 内等待"：它由运行时回调发起、不产生工具调用，
-要挂起需要核心为"等外部输入"发事件，留作后续。
+信任闸门与 `ask_user` 的提问走同一条结构化通道（`AskFn`）：宿主可以**同 run 内等待**（TUI、
+ACP），也可以返回 `Pending` 让本次 run 以中断收尾（AG-UI），答复在下一次输入里带回来。
 
 ##### 会话持久化与工具调用
 
@@ -1132,7 +1132,7 @@ public interface Hook {
 - [x] 用户交互工具
   - [x] `ask_user` 内置工具：AI 主动向用户提问，runtime 暂停等待回答
   - [x] 交互前端支持（暂停 → 显示问题 → 获取输入 → 恢复）
-  - [x] HTTP 端点支持（SSE `user_input_request` 事件 + `/agent/input` 端点）
+  - [x] HTTP 端点支持（SSE `user_request` 帧 + `/agent/input` 按 requestId 回传结构化答复）
 
 ### Phase 5：ACP 接入（Agent 侧）
 
@@ -1144,7 +1144,7 @@ public interface Hook {
 - [x] 会话全能力（list/load 重放/resume/delete/close）+ 工具授权（request_permission）
 - [x] e2e 线协议验证（离线 echo provider，38 断言）
 - [x] 发版衔接：`acp` 0.2.2 / `mcp` 2.3.7 注册表版本，依赖切回注册表
-- [x] Elicitation ask_user 表单桥（accept 答案回流回合 / decline/cancel/未声明 → 拒绝语义）
+- [x] Elicitation 提问桥（审批/选择/表单 → 单字段字符串表单；decline/cancel/未声明 → `Cancelled` + 留痕）
 - [x] additionalDirectories 附加工作区（会话级预信任，cwd 维持审批）
 - [x] MCP over ACP：宿主代管（session/new.mcpServers → 本地 McpManager 注册；stdio env 注入；http → streamable-http）
 
@@ -1257,7 +1257,7 @@ Atelier 是一个**面向业务集成的 Agent Harness**，其核心价值在于
 
 ### 注入点（函数/回调）
 
-- 用户问答：`AskUserFn`（runtime 构造）；`SessionLoop.run(askUserFn!)`；工具级授权 `toolApprovalFn` / `approvalFn!`
+- 用户提问：`AskFn`（`AgentRuntime(..., ask: Some(f))` / `SessionLoop.run(askFn!)`）—— 审批、选择、表单同一入口
 - 回合控制：`SessionLoop.run(requestStop!/requestCancel!/onEvent!/parentSession!/maxLoad!/toolRegOverride!)`
 - 子 Agent：`SendMessageTool` postFn/waitFn 回调注入；`registerParentSubagentTools` 可自选组合
 - 取消：`AgentRuntime.cancelSession` + 检查点（协作式）

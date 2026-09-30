@@ -1,6 +1,7 @@
 package atelier.acp
 
 import std.collection.*
+import atelier.util.toJsonString
 import std.sync.*
 import std.core.Duration
 import std.env.getStdErr
@@ -12,6 +13,7 @@ import acp.transport.StdioTransport
 import atelier.agent.*
 import atelier.provider.*
 import atelier.tool.*
+import atelier.interaction.*
 import atelier.session.*
 import atelier.trust.*
 import atelier.skill.*
@@ -342,8 +344,7 @@ public class AcpBridge {
                 { => ctx.isCancelled() },
                 onEvent: { ev => this.pushEvent(acpId, host, ev, model) },
                 parentSession: None,
-                approvalFn: { tc, wd => this.requestToolApproval(acpId, tc) },
-                askUserFn: { q => this.elicitationAsk(acpId, q) },
+                askFn: Some({ req: UserRequest => this.answerUserRequest(acpId, req) }),
                 maxLoad: MaxAcpLoadMessages)
             this.lastStopReason(outcome.messages)
         } catch (e: Exception) {
@@ -432,52 +433,36 @@ public class AcpBridge {
         PromptResponse(StopReasonEndTurn)
     }
 
-    // ===================== 落库（单落库职责，与 REPL 同构） =====================
-    // ===================== 用户提问（Elicitation 表单桥，ask_user 工具用） =====================
+    // ===================== 用户提问（结构化提问 → elicitation） =====================
 
-    // 以单字段表单向 Client 询问用户；能力未声明/decline/cancel/失败返回 ""（兼容文本 askUser 拒绝语义）
-    private func elicitationAsk(acpId: String, question: String): String {
-        let propsArr: Array<(String, ElicitationPropertySchema)> = [("answer", ElicitationPropertySchema.string())]
-        let requiredArr = ArrayList<String>()
-        requiredArr.add("answer")
-        let schema = ElicitationSchema.of(propsArr, required: Some(requiredArr))
-        let req = CreateElicitationRequest.form(acpId, question, schema)
-        match (this.agent.createElicitation(req, timeout: 5 * Duration.minute)) {
-            case Result.Ok(resp) => elicitationAnswerOf(resp.action, resp.content)
-            case Result.Err(e) =>
-                // 通道失败/超时一律降级为「未作答」：不留痕则与「用户拒绝」不可区分
-                eprintln("[atelier-acp] elicitation failed, treated as no answer: ${e.toString()}")
-                ""
+    // ── 结构化提问（审批 / 选择 / 表单）→ ACP elicitation ──────────────────────
+    //
+    // 每个字段落成一个**字符串 property**，候选值写进提示正文：不直接映射成 enum/array 属性，
+    // 因为那些的构造入口尚未确认（见 docs/plans 的 ACP 勘察笔记）；合法性由 runtime 侧的
+    // validateAnswer 把关，因此字符串通道不会放过非法选项。
+    //
+    // 三种失败区分开（旧实现把它们都折叠成空串）：用户拒绝 → Cancelled；
+    // 通道失败/超时/能力未声明 → Cancelled + 留痕（调用方据日志定位，不再"静默未作答"）。
+    private func answerUserRequest(acpId: String, req: UserRequest): UserAnswer {
+        let names = elicitationFieldsOf(req)
+        let props = Array<(String, ElicitationPropertySchema)>(names.size,
+            repeat: ("", ElicitationPropertySchema.string()))
+        let required = ArrayList<String>()
+        for (i in 0..names.size) {
+            props[i] = (names[Int64(i)], ElicitationPropertySchema.string())
+            if (isRequiredField(req, names[Int64(i)])) { required.add(names[Int64(i)]) }
         }
-    }
-
-    // ===================== 工具授权（request_permission 反向调用） =====================
-
-    private func requestToolApproval(acpId: String, tc: ToolCallBlock): String {
-        // 反向调用 client：同步等待授权（超时/失败按拒绝处理）
-        let call = ToolCallUpdate()
-        call.toolCallId = tc.id
-        call.title = Some(tc.name)
-        call.kind = Some(toolKindFor(tc.name))
-        call.status = Some(ToolStatusPending)
-        call.rawInput = Some(tc.args)
-        let options = ArrayList<PermissionOption>()
-        options.add(PermissionOption("allow_once", "允许一次", "allow_once"))
-        options.add(PermissionOption("allow_always", "始终允许（此目录）", "allow_always"))
-        options.add(PermissionOption("reject", "拒绝", "reject_once"))
-        match (this.agent.requestPermission(acpId, call, options, timeout: 10 * Duration.minute)) {
+        let schema = ElicitationSchema.of(props, required: Some(required))
+        let creq = CreateElicitationRequest.form(acpId, elicitationPromptOf(req), schema)
+        match (this.agent.createElicitation(creq, timeout: 5 * Duration.minute)) {
             case Result.Ok(resp) =>
-                match (resp.outcome.optionId) {
-                    case Some(optId) =>
-                        if (optId == "allow_once") { "y" }
-                        else if (optId == "allow_always") { "a" }
-                        else { "" }
-                    case None => ""
+                if (resp.action != ElicitationActionAccept) {
+                    return UserAnswer(req.id, UserAnswerStatus.Cancelled)
                 }
+                return answerFromElicitation(req, resp.content)
             case Result.Err(e) =>
-                // 授权通道失败按拒绝处理（fail-safe 语义不变），但必须留痕：否则「工具为何被拒」无从排查
-                eprintln("[atelier-acp] permission request failed, treated as denied: ${e.toString()}")
-                ""
+                eprintln("[atelier-acp] elicitation failed, treated as cancelled: ${e.toString()}")
+                UserAnswer(req.id, UserAnswerStatus.Cancelled)
         }
     }
 
@@ -505,24 +490,6 @@ public class AcpBridge {
     }
 }
 
-// Elicitation 表单响应 → 答案文本（纯函数，单测重点）。
-// 表单模式：accept 时 content 为符合 schema 的对象（{ answer: "..." }）；
-// decline/cancel/缺失返回空串（与 askUserFn 拒绝语义一致，兼容旧行为）。
-public func elicitationAnswerOf(action: String, content: ?JsonValue): String {
-    if (action != ElicitationActionAccept) { return "" }
-    if (content.isNone()) { return "" }
-    match (content.getOrThrow()) {
-        case JsonValue.Map(m) =>
-            let ans = m.get("answer")
-            if (ans.isNone()) { return "" }
-            match (ans.getOrThrow()) {
-                case JsonValue.String(v) => v
-                case _ => ""
-            }
-        case _ => ""
-    }
-}
-
 // ACP 进程诊断日志：stdout 只允许 ACP 帧，一切日志走 stderr
 func logErr(msg: String): Unit {
     try {
@@ -530,4 +497,131 @@ func logErr(msg: String): Unit {
         err.write((msg + "\n").toArray())
         err.flush()
     } catch (_) { () }
+}
+
+
+// ── 提问 → elicitation 的换算（包级，便于单测）──────────────────────────────
+
+// 需要问哪些字段：审批/选择固定问一个 answer；表单按字段名逐个问
+func elicitationFieldsOf(req: UserRequest): ArrayList<String> {
+    let out = ArrayList<String>()
+    match (req.kind) {
+        case UserRequestKind.Form =>
+            for (f in req.fields) { out.add(f.name) }
+        case _ => out.add("answer")
+    }
+    if (out.size == 0) { out.add("answer") }
+    out
+}
+
+func isRequiredField(req: UserRequest, name: String): Bool {
+    match (req.kind) {
+        case UserRequestKind.Form =>
+            for (f in req.fields) {
+                if (f.name == name) { return f.required }
+            }
+            false
+        case _ => true
+    }
+}
+
+// 提示正文：把候选项/字段说明写清楚（字符串通道下，这里是用户唯一的依据）
+func elicitationPromptOf(req: UserRequest): String {
+    let sb = StringBuilder()
+    sb.append(req.message)
+    if (req.detail != "") { sb.append("\n" + req.detail) }
+    match (req.kind) {
+        case UserRequestKind.Approval =>
+            sb.append("\n可选值：" + optionIdsOf(req))
+        case UserRequestKind.Choice =>
+            if (req.multi) {
+                sb.append("\n可多选，用逗号分隔。候选：" + optionIdsOf(req))
+            } else {
+                sb.append("\n候选：" + optionIdsOf(req))
+            }
+        case UserRequestKind.Form =>
+            for (f in req.fields) {
+                sb.append("\n- " + f.name)
+                if (f.label != f.name) { sb.append("（" + f.label + "）") }
+                let isOptionField = match (f.fieldType) {
+                    case UserFieldType.Select => true
+                    case UserFieldType.MultiSelect => true
+                    case _ => false
+                }
+                if (isOptionField) {
+                    sb.append("，候选：" + optionIdsOf(req, f))
+                }
+            }
+        case UserRequestKind.ToolExecution => ()
+    }
+    sb.toString()
+}
+
+func optionIdsOf(req: UserRequest): String {
+    let sb = StringBuilder()
+    for (i in 0..req.options.size) {
+        if (i > 0) { sb.append(", ") }
+        sb.append(req.options[Int64(i)].id)
+    }
+    sb.toString()
+}
+
+func optionIdsOf(req: UserRequest, f: UserField): String {
+    let sb = StringBuilder()
+    for (i in 0..f.options.size) {
+        if (i > 0) { sb.append(", ") }
+        sb.append(f.options[Int64(i)].id)
+    }
+    sb.toString()
+}
+
+// ACP 答复 → UserAnswer。审批兼容三种历史写法（选项 id / y-a-n / yes-always），
+// 其余一律按选项 id 处理，非法值留给 validateAnswer 判定。
+func answerFromElicitation(req: UserRequest, content: ?JsonValue): UserAnswer {
+    let raw = HashMap<String, String>()
+    match (content) {
+        case Some(JsonValue.Map(m)) =>
+            for (k in m.keys()) {
+                match (m.get(k)) {
+                    case Some(JsonValue.String(s)) => raw[k] = s
+                    case Some(other) => raw[k] = toJsonString(other)
+                    case None => ()
+                }
+            }
+        case _ => ()
+    }
+    match (req.kind) {
+        case UserRequestKind.Approval =>
+            let sel = ArrayList<String>()
+            sel.add(normalizeDecision(raw.get("answer") ?? ""))
+            UserAnswer(req.id, UserAnswerStatus.Answered, selected: sel)
+        case UserRequestKind.Choice =>
+            let sel = ArrayList<String>()
+            let text = raw.get("answer") ?? ""
+            for (part in text.split(",")) {
+                let item = part.trimAscii()
+                if (item != "") { sel.add(item) }
+            }
+            UserAnswer(req.id, UserAnswerStatus.Answered, selected: sel, text: text)
+        case UserRequestKind.Form =>
+            let values = HashMap<String, JsonValue>()
+            for (f in req.fields) {
+                match (raw.get(f.name)) {
+                    case Some(v) => values[f.name] = JsonValue.String(v)
+                    case None => ()
+                }
+            }
+            UserAnswer(req.id, UserAnswerStatus.Answered, values: values)
+        case UserRequestKind.ToolExecution =>
+            UserAnswer(req.id, UserAnswerStatus.Answered, text: raw.get("answer") ?? "")
+    }
+}
+
+func normalizeDecision(raw: String): String {
+    match (raw) {
+        case "a" | "always" | "yes" | "allow_always" => "allow_always"
+        case "y" | "once" | "allow_once" => "allow_once"
+        case "n" | "no" | "reject" | "deny" => "deny"
+        case _ => raw
+    }
 }

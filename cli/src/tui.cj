@@ -20,6 +20,7 @@ import atelier.session.exportToHtml
 import atelier.trust.*
 import atelier.skill.*
 import atelier.ptc.{JsonBridge, RunXispTool}
+import atelier.interaction.*
 
 // ═══════ 纯逻辑（包级，可单测）══════════════════════════════
 
@@ -401,60 +402,11 @@ private func appendBodyLines(out: ArrayList<String>, body: String, width: Int64)
     }
 }
 
-// ═══════ 信任闸门询问：交给主线程读答案 ═══════════════════════
+// ═══════ 提问：交给主线程读答案 ═══════════════════════════════
 // agent 回合跑在另一个线程里，它不能自己读 stdin——主线程的 readKey 正在读同一个
 // fd，两边抢输入会让答案永远读不到；也不能自己写提示后调 render——那会被随后的
-// 整帧重绘覆盖。因此把询问投递给主线程，由它在正常的输入行里收答案，
-// 运行线程在这里等待。
-
-/**
- * 审批状态行文本。
- *
- * 询问本身是多行的（首行是对象，后面逐条列选项），而状态行只有一行；这里取首行
- * 并自述选项，用户不必看到被截断的后半段就知道该按什么。
- */
-public func approvalStatusText(question: String): String {
-    let lines = question.split("\n")
-    let firstLine = if (lines.size > 0) { lines[0].trimAscii() } else { question.trimAscii() }
-    "等待确认（y=本次 / a=总是 / n=拒绝，回车提交）: " + firstLine
-}
-
-/** 一次待回答的信任闸门询问。 */
-public class ApprovalRequest {
-    public let question: String
-    private var answer: Option<String> = None
-    private let lock = Mutex()
-
-    public init(question: String) {
-        this.question = question
-    }
-
-    /** 主线程回填答案；幂等，重复调用只保留第一次。 */
-    public func resolve(text: String): Unit {
-        synchronized(this.lock) {
-            if (this.answer.isNone()) {
-                this.answer = Some(text)
-            }
-        }
-    }
-
-    /** 运行线程等待答案；50ms 轮询，对人工交互足够。 */
-    public func waitAnswer(): String {
-        var received: Option<String> = None
-        while (received.isNone()) {
-            synchronized(this.lock) {
-                received = this.answer
-            }
-            if (received.isNone()) {
-                sleep(Duration.millisecond * 50)
-            }
-        }
-        match (received) {
-            case Some(text) => text
-            case None => ""
-        }
-    }
-}
+// 整帧重绘覆盖。因此把提问投递给主线程，由它在正常的输入行里收答案，
+// 运行线程在这里等待。提问怎么收敛（选项怎么挑、表单怎么填）在 ask.cj，可单测。
 
 // ═══════ 聊天 TUI ══════════════════════════════════════════
 
@@ -475,7 +427,8 @@ public class ChatTui {
     private let mcpManager: McpManager
     private let sessionDir: String
     private var sessionId: String
-    private var messages: ArrayList<Message>
+    // messages 包内可见：测试要断言"提问期间打的字没有变成用户消息"
+    var messages: ArrayList<Message>
     // input / busy / submit / runCommand 为包内可见：TUI 的驱动入口是按键循环，
     // 交互式回合无法从外部同步驱动，测试需要在包内直接提交并等待回合结束。
     var input: ArrayList<Rune>
@@ -489,9 +442,9 @@ public class ChatTui {
     private var pickerKind: String
     private var helpMode: Bool
     private var out: AutoStream
-    /** 待回答的信任闸门询问；非空时输入行的回车作为答案而不是新消息。 */
-    private var pendingApproval: ?ApprovalRequest = None
-    private let approvalLock = Mutex()
+    /** 待回答的提问；非空时按键全部先喂给它（提问是模态，回车不是新消息）。 */
+    private var pendingAsk: ?AskPrompt = None
+    private let askLock = Mutex()
     /** 回合是否在后台线程里进行中（防止并发提交写同一份历史）。 */
     let busy = AtomicBool(false)
     /** 本回合的实时活动（工具/子调用/脚本输出），只在回合进行中显示。 */
@@ -654,7 +607,7 @@ public class ChatTui {
         // 状态行（净化：换行拍平 + 截断）
         sb.append(csiMove(0, r - 2))
         sb.append("\u{1b}[2K")
-        if (this.hasPendingApproval() || this.status.startsWith("Error") || this.status.startsWith("[atelier]")) {
+        if (this.hasPendingAsk() || this.status.startsWith("Error") || this.status.startsWith("[atelier]")) {
             sb.append(colorize(flattenStatus(this.status, c - 2), C_ERROR))
         } else {
             sb.append(colorize(flattenStatus(this.status, c - 2), C_STATUS))
@@ -689,6 +642,12 @@ public class ChatTui {
                 lines.add(line)
             }
         }
+        // 提问面板接在会话末尾：审批要看上下文、选择要看候选，两者都得在同一屏里
+        match (this.pendingAskSnapshot()) {
+            case Some(p) =>
+                for (line in p.panelLines(c)) { lines.add(line) }
+            case None => ()
+        }
         lines
     }
 
@@ -700,6 +659,11 @@ public class ChatTui {
             this.helpMode = false
             this.status = ""
             this.render(t)
+            return
+        }
+        // 提问是模态：在答完之前，按键一律归它 —— 否则用户会在"选择"里打出半条消息
+        if (this.hasPendingAsk()) {
+            this.handleAskKey(ke, t)
             return
         }
         // 会话选择模式优先：↑/↓ 选择、Enter 切换、Esc 取消
@@ -742,15 +706,7 @@ public class ChatTui {
                     this.renderInputOnly(t)
                 }
             case KeyCode.Enter =>
-                match (this.takePendingApproval()) {
-                    case Some(request) =>
-                        // 有待审批的询问：本次回车是回答，不是新消息
-                        let answer = String(this.input)
-                        this.input = ArrayList<Rune>()
-                        request.resolve(answer)
-                        this.render(t)
-                    case None => this.submit(t)
-                }
+                this.submit(t)
             case KeyCode.Up =>
                 match (this.hist.up(String(this.input))) {
                     case Some(text) => this.input = toRunes(text); this.renderInputOnly(t)
@@ -824,7 +780,7 @@ public class ChatTui {
                         } else {
                             waited = waited + 1
                             // 有待回答的询问时不要用读秒覆盖它——那正是用户此刻唯一要看的信息
-                            if (!this.hasPendingApproval()) {
+                            if (!this.hasPendingAsk()) {
                                 this.status = "生成中… (" + Int64(waited / 2).toString() + "s)"
                             }
                             this.render(t)
@@ -898,40 +854,109 @@ public class ChatTui {
             sideEffectToolTimeout: this.agentConfig.sideEffectToolTimeout)
         AgentRuntime(cfg, this.provider, this.toolRegistry, this.sessionStore,
             this.trustManager, this.skillRegistry, this.agentRegistry, this.providerRegistry,
-            ArrayList<Hook>(), { q => this.askForApproval(t, q) }, this.mcpManager)
+            // 提问全部走结构化通道：信任闸门审批、ask_user 的问答都在这里收按键
+            ArrayList<Hook>(), this.mcpManager, ask: Some({ req: UserRequest => this.askHost(t, req) }))
     }
 
     /**
-     * 信任闸门询问。
+     * 提问（信任闸门 / ask_user / 将来的任何提问）。
      *
-     * 本方法跑在 agent 回合的线程上：只登记询问、重绘一次让提示可见，然后等待——
-     * 答案由主线程在正常的输入行里收取（见 handleKey 的回车分支）。
+     * 本方法跑在 agent 回合的线程上：只登记提问、重绘一次让面板与状态行可见，然后等待——
+     * 答案由主线程在输入行里收（见 handleAskKey）。收敛规则在 ask.cj，那里可单测。
+     *
+     * 包内可见：这条路径跨两个线程（回合线程登记并等待、主线程收按键），只能在 TUI 里
+     * 跑到，测试要能直接驱动它（见 tui_test.cj）。
      */
-    private func askForApproval(t: Terminal, question: String): String {
-        let request = ApprovalRequest(question)
-        synchronized(this.approvalLock) {
-            this.pendingApproval = request
+    func askHost(t: Terminal, req: UserRequest): UserAnswer {
+        let prompt = AskPrompt(req)
+        synchronized(this.askLock) {
+            this.pendingAsk = Some(prompt)
         }
-        this.status = approvalStatusText(question)
+        this.status = prompt.statusText()
         this.render(t)
-        let answer = request.waitAnswer()
-        synchronized(this.approvalLock) {
-            this.pendingApproval = None
+        // 初始化即定论（客户端工具、无候选项）时不必等按键：等下去没人会按
+        let answer = if (prompt.done()) {
+            match (prompt.answer()) {
+                case Some(a) => a
+                case None => UserAnswer(req.id, UserAnswerStatus.Cancelled)
+            }
+        } else {
+            prompt.waitAnswer()
+        }
+        synchronized(this.askLock) {
+            this.pendingAsk = None
         }
         this.status = ""
         this.render(t)
         answer
     }
 
-    private func hasPendingApproval(): Bool {
-        synchronized(this.approvalLock) {
-            this.pendingApproval.isSome()
+    /** 提问模态：方向键移动、空格多选、回车提交、Esc 取消、Ctrl+C 退出。包内可见供测试喂按键。 */
+    func handleAskKey(ke: KeyEvent, t: Terminal): Unit {
+        let p = match (this.pendingAskSnapshot()) {
+            case Some(x) => x
+            case None => return
+        }
+        match (ke.code) {
+            case KeyCode.Up => p.moveUp(); this.render(t)
+            case KeyCode.Down => p.moveDown(); this.render(t)
+            case KeyCode.Char(r) =>
+                if (ke.modifiers.contains(KeyModifiers.CONTROL)) {
+                    if (r == Rune(UInt32(99))) { this.running = false }
+                } else if (r == Rune(UInt32(32)) && p.allowsToggle()) {
+                    p.toggle()
+                    this.render(t)
+                } else {
+                    this.input.add(r)
+                    this.renderInputOnly(t)
+                }
+            case KeyCode.Backspace =>
+                if (this.input.size > 0) {
+                    this.input.remove(this.input.size - 1..this.input.size)
+                    this.renderInputOnly(t)
+                }
+            case KeyCode.Enter =>
+                let text = String(this.input)
+                this.input = ArrayList<Rune>()
+                let accepted = p.submit(text)
+                if (p.done()) {
+                    this.finishAsk(t, p)
+                } else {
+                    // 被打回时把原文放回输入行：用户改一个字符就能重来，不必整段重打
+                    if (!accepted && text != "") { this.input = toRunes(text) }
+                    this.status = p.statusText()
+                    this.render(t)
+                }
+            case KeyCode.Esc =>
+                p.cancel()
+                this.finishAsk(t, p)
+            case _ => ()
         }
     }
 
-    private func takePendingApproval(): ?ApprovalRequest {
-        synchronized(this.approvalLock) {
-            this.pendingApproval
+    /** 交出答复并唤醒回合线程：先登记答复再撤下面板，面板消失时回合已经能继续。 */
+    private func finishAsk(t: Terminal, p: AskPrompt): Unit {
+        match (p.answer()) {
+            case Some(a) => p.deliver(a)
+            case None => ()
+        }
+        synchronized(this.askLock) {
+            this.pendingAsk = None
+        }
+        this.status = ""
+        this.render(t)
+    }
+
+    /** 是否正有提问待答（包内可见：测试要等它出现/消失来定位时序）。 */
+    func hasPendingAsk(): Bool {
+        synchronized(this.askLock) {
+            this.pendingAsk.isSome()
+        }
+    }
+
+    private func pendingAskSnapshot(): ?AskPrompt {
+        synchronized(this.askLock) {
+            this.pendingAsk
         }
     }
 

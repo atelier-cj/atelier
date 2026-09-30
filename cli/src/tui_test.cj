@@ -1,6 +1,7 @@
 package cli
 
 import std.collection.*
+import std.sync.*
 import atelier.message.*
 import atelier.agent.*
 import atelier.provider.*
@@ -8,6 +9,7 @@ import atelier.session.*
 import atelier.tool.*
 import atelier.trust.*
 import atelier.skill.*
+import atelier.interaction.*
 import jsonvalue.*
 import atelier.ptc.{JsonBridge, RunXispTool}
 import atelier.event.EventStream
@@ -815,36 +817,168 @@ func decorateMessageLines_runXispResultIsMultiLine() {
     @Assert(lines[0].contains("tool← run_xisp"))
 }
 
-// ═══════ 信任闸门询问：必须能被主线程回答 ═══════════════════════════
+// ═══════ 提问：必须能被主线程回答 ═══════════════════════════════════
 // 此前运行线程自己 readLine，与主线程的 readKey 抢同一个 stdin，提示又被重绘覆盖——
 // 表现为「跑了几分钟没有任何反馈」，实际是在等一个用户看不到的询问。
+// 收敛规则本身（选项/表单/取消）在 ask_test.cj，这里只管跨线程投递。
 
 @Test
-func approvalRequest_waitsUntilResolved() {
-    let request = ApprovalRequest("Tool 'glob' needs your approval.")
-    // 主线程在稍后回填；运行线程在此之前必须阻塞而不是拿到空答案
+func askPrompt_waitsUntilResolved() {
+    let req = approvalRequest("ask:s:1:c:approval", "glob", JsonValue.String("{}"),
+        "Tool 'glob' needs your approval.")
+    let prompt = AskPrompt(req)
+    // 主线程在稍后回填；运行线程在此之前必须阻塞而不是拿到空答复
     spawn {
         sleep(Duration.millisecond * 120)
-        request.resolve("y")
+        prompt.deliver(UserAnswer(req.id, UserAnswerStatus.Answered,
+            selected: ArrayList<String>(["allow_once"])))
     }
-    @Expect(request.waitAnswer(), "y")
+    let ans = prompt.waitAnswer()
+    @Expect(ans.isAllowOnce(), true)
 }
 
 @Test
-func approvalRequest_firstAnswerWins() {
-    let request = ApprovalRequest("q")
-    request.resolve("y")
-    request.resolve("n")            // 重复回填不得覆盖
-    @Expect(request.waitAnswer(), "y")
+func askPrompt_firstAnswerWins() {
+    let req = approvalRequest("ask:s:1:c:approval", "glob", JsonValue.String("{}"), "q")
+    let prompt = AskPrompt(req)
+    prompt.deliver(UserAnswer(req.id, UserAnswerStatus.Answered,
+        selected: ArrayList<String>(["allow_once"])))
+    // 重复回填不得覆盖：第二次是"总是允许"，先到的"本次允许"才是答复
+    prompt.deliver(UserAnswer(req.id, UserAnswerStatus.Answered,
+        selected: ArrayList<String>(["allow_always"])))
+    @Expect(prompt.waitAnswer().isAllowOnce(), true)
 }
 
 @Test
-func approvalStatusText_keepsFirstLineAndStatesOptions() {
-    let q = "Tool 'glob' needs your approval.\n  y  — allow this once (session only)\n  a  — always allow this directory\n  n  — deny"
-    let text = approvalStatusText(q)
-    // 状态行只有一行：保留询问对象，选项自述，多行细节不进状态行
+func askPrompt_statusTextIsOneLineAndSelfDescribing() {
+    let req = approvalRequest("ask:s:1:c:approval", "glob", JsonValue.String("{}"),
+        "Tool 'glob' needs your approval.\n  args: {pattern: **/*}")
+    let text = AskPrompt(req).statusText()
+    // 状态行只有一行：保留提问对象、自述按键，多行细节留给面板
     @Assert(text.contains("glob"))
-    @Assert(text.contains("y=本次"))
-    @Assert(!text.contains("session only"))
+    @Assert(text.contains("↑/↓"))
+    @Assert(text.contains("Esc 取消"))
+    @Assert(!text.contains("pattern"))
     @Assert(!text.contains("\n"))
 }
+
+// ═══════ 提问模态：按键真的路由到提问、答复真的回到回合线程 ═══════════════
+// ask_test.cj 覆盖"答复怎么收敛"，这里覆盖"谁来收"：回合线程登记并等待 →
+// 主线程按键 → 答复回填。这条路径跨两个线程，只有在这里能跑到。
+
+class AnswerBox {
+    private var v: Option<UserAnswer> = None
+    private let lock = Mutex()
+
+    public func put(a: UserAnswer): Unit {
+        synchronized(this.lock) {
+            this.v = Some(a)
+        }
+    }
+
+    public func get(): Option<UserAnswer> {
+        synchronized(this.lock) {
+            this.v
+        }
+    }
+}
+
+func makeAskTui(sessionId: String): ChatTui {
+    let trustMgr = TrustManager()
+    ChatTui("default", SlashCommandRegistry(trustMgr), AgentConfig.default(), StubProvider(),
+        ToolRegistry(), MemorySessionStore(), trustMgr, SkillRegistry(), AgentRegistry(),
+        ProviderRegistry(), sessionId, McpManager(), "/tmp/atelier-tui-test")
+}
+
+/** 等到"有提问"（want=true）或"提问已结束"（want=false）；超时返回 false。 */
+func waitAskState(tui: ChatTui, want: Bool): Bool {
+    var guard = 0
+    while (tui.hasPendingAsk() != want && guard < 200) {
+        sleep(Duration.millisecond * 20)
+        guard = guard + 1
+    }
+    tui.hasPendingAsk() == want
+}
+
+func waitAnswerBox(box: AnswerBox): Option<UserAnswer> {
+    var guard = 0
+    while (box.get().isNone() && guard < 200) {
+        sleep(Duration.millisecond * 20)
+        guard = guard + 1
+    }
+    box.get()
+}
+
+func isCancelledAnswer(a: UserAnswer): Bool {
+    match (a.status) {
+        case UserAnswerStatus.Cancelled => true
+        case _ => false
+    }
+}
+
+@Test
+func chatTui_askModalRoutesKeysAndAnswersTurn() {
+    let tui = makeAskTui("sess_ask_modal")
+    let fake = FakeTerminal(ArrayList<KeyEvent>())
+    let req = approvalRequest("ask:s:1:c:approval", "bash", JsonValue.String("{}"), "批准执行？")
+    let box = AnswerBox()
+    spawn {
+        box.put(tui.askHost(fake, req))
+    }
+    @Expect(waitAskState(tui, true), true)
+    // 模态：方向键移动光标、回车提交 —— 都不会变成新消息
+    tui.handleAskKey(KeyEvent(KeyCode.Down, KeyModifiers()), fake)
+    tui.handleAskKey(KeyEvent(KeyCode.Enter, KeyModifiers()), fake)
+    @Expect(waitAskState(tui, false), true)
+    match (waitAnswerBox(box)) {
+        case Some(a) =>
+            @Expect(a.isAllowAlways(), true)
+            @Expect(askValid(req, a), true)
+        case None => @Fail("turn thread never received an answer")
+    }
+}
+
+@Test
+func chatTui_askModalEscCancelsAndTurnSeesCancelled() {
+    let tui = makeAskTui("sess_ask_modal_esc")
+    let fake = FakeTerminal(ArrayList<KeyEvent>())
+    let req = approvalRequest("ask:s:1:c:approval", "bash", JsonValue.String("{}"), "批准执行？")
+    let box = AnswerBox()
+    spawn {
+        box.put(tui.askHost(fake, req))
+    }
+    @Expect(waitAskState(tui, true), true)
+    tui.handleAskKey(KeyEvent(KeyCode.Esc, KeyModifiers()), fake)
+    @Expect(waitAskState(tui, false), true)
+    match (waitAnswerBox(box)) {
+        // Esc 取消的是这次提问，不是整个程序 —— 回合要能带着"取消"继续
+        case Some(a) => @Expect(isCancelledAnswer(a), true)
+        case None => @Fail("turn thread never received an answer")
+    }
+}
+
+@Test
+func chatTui_askModalSwallowsTypedTextInsteadOfSubmittingMessage() {
+    let tui = makeAskTui("sess_ask_swallow")
+    let fake = FakeTerminal(ArrayList<KeyEvent>())
+    let req = choiceRequest("ask:s:1:c", "选环境", askOpts(["dev", "prod"]))
+    let box = AnswerBox()
+    spawn {
+        box.put(tui.askHost(fake, req))
+    }
+    @Expect(waitAskState(tui, true), true)
+    // 打字进的是输入行（文本字段要用），不是新消息；回车交的是光标处的候选
+    tui.handleAskKey(KeyEvent(KeyCode.Char(Rune(UInt32(120))), KeyModifiers()), fake)
+    @Expect(String(tui.input), "x")
+    tui.handleAskKey(KeyEvent(KeyCode.Enter, KeyModifiers()), fake)
+    @Expect(waitAskState(tui, false), true)
+    match (waitAnswerBox(box)) {
+        case Some(a) =>
+            @Expect(a.selected.size, 1)
+            @Expect(a.selected[0], "dev")
+        case None => @Fail("turn thread never received an answer")
+    }
+    // 提问期间打的那一行没有被当成用户消息提交
+    @Expect(countUserTurns(tui.messages), 0)
+}
+

@@ -1,6 +1,8 @@
 package atelier.tool
 
+import std.collection.*
 import jsonvalue.*
+import atelier.interaction.{UserRequest, UserAnswer, UserAnswerStatus, UserRequestKind}
 import std.collection.HashMap
 
 /**
@@ -17,11 +19,28 @@ public enum ToolExecutionMode {
  * Context passed to tool execution.
  * Provides runtime information such as working directory and user interaction.
  */
-public type AskUserFn = (String) -> String
+
+// 结构化提问（宿主实现它就能回答"审批/选择/表单"，并可用 Pending 表示挂起）。
+// 未提供时一律按"取消"处理 —— 空答复无法与"拒绝/答了个空"区分，不能当默认值用。
+public type AskFn = (UserRequest) -> UserAnswer
+
+/**
+ * 结构化提问入口（审批 / 选择 / 表单）。
+ *
+ * 宿主没给实现时返回 `Cancelled`：这表示"这条通道不存在"，而不是"用户拒绝了"。
+ * 需要交互的宿主（TUI / ACP / AG-UI）各自提供自己的 `askFn`。
+ */
+extend ToolContext {
+    public func ask(req: UserRequest): UserAnswer {
+        match (this.askFn) {
+            case Some(f) => f(req)
+            case None => UserAnswer(req.id, UserAnswerStatus.Cancelled)
+        }
+    }
+}
 
 public struct ToolContext {
     public let workDir: String
-    public let askUser: AskUserFn
     public let env: HashMap<String, String>
     // 当前运行会话 id（无会话上下文时为空 ""）；子 agent 父向调度等场景使用
     public let sessionId: String
@@ -29,38 +48,32 @@ public struct ToolContext {
     // 工具要把自己的执行与协议/UI 上的同一次调用对上（进度上报、等外部执行结果）时用得到它：
     // 一次调用一份上下文，而不是一个会话共用一份。
     public let toolCallId: String
+    // 结构化提问实现（None = 无交互通道，提问即取消）
+    public let askFn: Option<AskFn>
 
     public init(workDir: String) {
         this.workDir = workDir
-        this.askUser = { q => "" }
         this.env = HashMap()
         this.sessionId = ""
         this.toolCallId = ""
+        this.askFn = None
     }
 
-    public init(workDir: String, askUser: AskUserFn) {
+    public init(workDir: String, env: HashMap<String, String>) {
         this.workDir = workDir
-        this.askUser = askUser
-        this.env = HashMap()
-        this.sessionId = ""
-        this.toolCallId = ""
-    }
-
-    public init(workDir: String, askUser: AskUserFn, env: HashMap<String, String>) {
-        this.workDir = workDir
-        this.askUser = askUser
         this.env = env
         this.sessionId = ""
         this.toolCallId = ""
+        this.askFn = None
     }
 
-    public init(workDir: String, askUser: AskUserFn, env: HashMap<String, String>, sessionId: String,
-        toolCallId!: String = "") {
+    public init(workDir: String, env: HashMap<String, String>, sessionId: String,
+        toolCallId!: String = "", ask!: Option<AskFn> = None) {
         this.workDir = workDir
-        this.askUser = askUser
         this.env = env
         this.sessionId = sessionId
         this.toolCallId = toolCallId
+        this.askFn = ask
     }
 }
 

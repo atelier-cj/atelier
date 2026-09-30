@@ -59,7 +59,7 @@ public func eventBus_runtimePublishesLifecycle() {
     let store = MemorySessionStore()
     let mcpMgr = McpManager()
     let runtime = AgentRuntime(subConfig(), inner, toolReg, store, trustMgr,
-        skillReg, agentReg, providerReg, ArrayList<Hook>(), { q => "" },
+        skillReg, agentReg, providerReg, ArrayList<Hook>(),
         SessionEnvironment(), mcpMgr, eventBus: Some(bus))
     let msgs = ArrayList<Message>()
     msgs.add(UserMessage(ContentList.ofText("hi"), 0))

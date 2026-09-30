@@ -17,7 +17,7 @@ interface Tool {
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `workDir` | `String` | 工作目录 |
-| `askUser` | `AskUserFn` | 向用户提问的回调 |
+| `askFn` | `Option<AskFn>` | 提问通道（`ctx.ask(req)`）；不传时提问返回 `Cancelled` |
 
 ### ToolResult
 

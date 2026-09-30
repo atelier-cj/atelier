@@ -4,6 +4,7 @@ import std.fs.*
 import std.collection.*
 import jsonvalue.*
 import atelier.tool.*
+import atelier.interaction.*
 import atelier.skill.*
 
 func makeCtx(): ToolContext {
@@ -263,4 +264,50 @@ func askUserTool_declaresUnboundedBudget() {
         case None => ()
         case Some(_) => @Fail("read-only/side-effect budgets must not apply to ask_user")
     }
+}
+
+// ── ask_user 三形态 ─────────────────────────────────────────────────────────
+// 旧的 ask_user 只能问一句、拿一段字符串；现在同一入口覆盖 纯提问 / 选择 / 表单，
+// 且答复一律过 runtime 侧校验（校验失败时退化为"把原文交给模型并标注降级"，
+// 因为纯文本通道的宿主没有渲染选项/表单的能力）。
+
+@Test
+func askUser_plainQuestionBecomesSingleTextFieldForm() {
+    let args = HashMap<String, JsonValue>()
+    args.add("question", JsonValue.String("你的名字？"))
+    // 纯文本宿主（默认 ToolContext）答空 → 视为取消，工具必须明确报错而不是返回空结果
+    let r = AskUserTool().execute(ToolContext("."), JsonValue.Map(args))
+    @Expect(r.isError, true)
+}
+
+@Test
+func askUser_optionsBuildsChoiceRequest() {
+    // 参数解析：["a","b"] 与 [{id,label}] 两种写法都要收
+    let opts = JsonValue.parse("[\"dev\",{\"id\":\"ops\",\"label\":\"运维\"}]")
+    let parsed = parseOptions(Some(opts))
+    @Expect(parsed.size, 2)
+    @Expect(parsed[0].id, "dev")
+    @Expect(parsed[1].label, "运维")
+}
+
+@Test
+func askUser_fieldsParsesTypesAndRequired() {
+    let raw = JsonValue.parse(
+        "[{\"name\":\"env\",\"type\":\"select\",\"required\":true,\"options\":[\"prod\",\"test\"]}," +
+        "{\"name\":\"count\",\"type\":\"number\"},{\"name\":\"note\"}]")
+    let fields = parseFields(Some(raw))
+    @Expect(fields.size, 3)
+    @Expect(fields[0].required, true)
+    @Expect(fields[0].options.size, 2)
+    let t1 = fieldTypeName(fields[1].fieldType)
+    @Expect(t1, "number")
+    let t2 = fieldTypeName(fields[2].fieldType)
+    @Expect(t2, "text")
+}
+
+@Test
+func askUser_missingQuestionIsAnError() {
+    let r = AskUserTool().execute(ToolContext("."), JsonValue.parse("{}"))
+    @Expect(r.isError, true)
+    @Expect(r.text.contains("question"), true)
 }

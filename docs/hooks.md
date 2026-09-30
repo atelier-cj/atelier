@@ -77,7 +77,7 @@ class AuditHook <: Hook {
 let hooks = ArrayList<Hook>([AuditHook()])
 let runtime = AgentRuntime(config, provider, toolReg,
     sessionStore, trustMgr, skillReg, agentReg, providerReg,
-    hooks, askUserFn)
+    hooks, mcpManager, ask: Some(askFn))   // askFn：宿主提问通道（不传 = 提问即取消）
 ```
 
 ### 拦截型：策略防护

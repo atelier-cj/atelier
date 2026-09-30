@@ -47,16 +47,6 @@ public class AgUiStateSnapshot <: JsonSerializable {
     }
 }
 
-public class AgUiUserInputPayload <: JsonSerializable {
-    public let question: String
-    public init(question: String) { this.question = question }
-    public func toJson(w: JsonWriter): Unit {
-        w.startObject()
-        w.writeName("question").writeValue(this.question)
-        w.endObject()
-    }
-}
-
 public class AgUiClientToolPayload <: JsonSerializable {
     public let toolCallId: String
     public let toolName: String
@@ -143,10 +133,6 @@ public class AgUiTranslator {
     }
 
     // 扩展事件（handler 在等待外部输入时直接发出）
-    public func userInputRequest(question: String): AgUiEvent {
-        CustomEvent("user_input_request", JsonValue.fromObject(AgUiUserInputPayload(question)))
-    }
-
     public func clientToolRequest(toolCallId: String, toolName: String, arguments: String): AgUiEvent {
         CustomEvent("client_tool_request",
             JsonValue.fromObject(AgUiClientToolPayload(toolCallId, toolName, arguments)))

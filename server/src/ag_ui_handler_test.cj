@@ -3,6 +3,7 @@ package server
 import std.collection.*
 import jsonvalue.*
 import atelier.message.*
+import atelier.interaction.*
 import atelier.util.fromJsonString
 
 // 入站转换的几个纯函数：消息历史取舍（重复上下文最伤——会话里已有还再塞一遍，
@@ -130,15 +131,6 @@ func handler_instructionTextJoinsSystemOverrideAndContext() {
 func handler_instructionTextEmptyWhenNothingProvided() {
     let input = inputOf(ArrayList<AgUiMessageDTO>([userMsg("m1", "你好")]))
     @Expect(agUiInstructionText(input), "")
-}
-
-@Test
-func handler_inputKeySeparatesChannels() {
-    @Expect(inputKey(AgUiInputDTO("r", "user_input", "好", "", "", false)), "user")
-    @Expect(inputKey(AgUiInputDTO("r", "tool_result", "", "c1", "ok", false)), "tool:c1")
-    // 工具结果缺 toolCallId 无法归属 → 空键，由调用方报错而不是瞎配对
-    @Expect(inputKey(AgUiInputDTO("r", "tool_result", "", "", "ok", false)), "")
-    @Expect(inputKey(AgUiInputDTO("r", "whatever", "", "", "", false)), "")
 }
 
 @Test
@@ -281,19 +273,64 @@ func handler_resumeUnknownInterruptIsRejected() {
     }
 }
 
-@Test
-func handler_resumeInputRequiredBecomesUserMessage() {
-    let open = ArrayList<AgUiInterrupt>([openOf("int-q", "input_required", "")])
-    let resume = ArrayList<AgUiResumeDTO>([
-        resumeOf("int-q", "resolved", Some(JsonValue.String("Q1")))])
-    let (msgs, err) = agUiResumeToMessages(ArrayList<Message>(), open, resume)
-    @Expect(err.isNone(), true)
-    match (msgs[0]) {
-        case um: UserMessage => @Expect(toText(um.content), "Q1")
-        case _ => @Fail("非工具中断的回应应当是用户消息")
+// Message 是接口：测试里取元数据要按角色匹配
+func metaOf(m: Message): HashMap<String, String> {
+    match (m) {
+        case um: UserMessage => um.metadata
+        case am: AssistantMessage => am.metadata
+        case tm: ToolResultMessage => tm.metadata
+        case cm: CompactionMessage => cm.metadata
+        case am: ArchiveMessage => am.metadata
+        case _ => HashMap<String, String>()
     }
 }
 
+@Test
+func handler_resumeInputRequiredCarriesAnswerMetadata() {
+    // 审批/要输入类中断的答复必须能回到**同一个提问**上（重放时按 requestId 命中），
+    // 所以带答复元数据，而不是一句普通用户消息
+    let open = ArrayList<AgUiInterrupt>([openOf("int-q", "input_required", "")])
+    let payload = JsonValue.Map(HashMap<String, JsonValue>([
+        ("values", JsonValue.Map(HashMap<String, JsonValue>([("city", JsonValue.String("北京"))])))]))
+    let resume = ArrayList<AgUiResumeDTO>([resumeOf("int-q", "resolved", Some(payload))])
+    let (msgs, err) = agUiResumeToMessages(ArrayList<Message>(), open, resume)
+    @Expect(err.isNone(), true)
+    @Expect(msgs.size, 1)
+    match (msgs[0]) {
+        case um: UserMessage =>
+            @Expect(isAnswerMetadata(um.metadata), true)
+            match (decodeAnswer(um.metadata)) {
+                case Some(a) =>
+                    @Expect(a.requestId, "int-q")
+                    match (a.values.get("city")) {
+                        case Some(JsonValue.String(s)) => @Expect(s, "北京")
+                        case _ => @Fail("表单值应当编码进答复")
+                    }
+                case None => @Fail("应当能解码出答复")
+            }
+        case _ => @Fail("应当是承载答复的消息")
+    }
+}
+
+@Test
+func handler_resumeApprovedPayloadBecomesAllowOnce() {
+    // {approved:true} 是最常见的审批载荷：映射成 allow_once，而不是当成一段文本
+    let open = ArrayList<AgUiInterrupt>([openOf("int-a", "confirmation", "call_1")])
+    let payload = JsonValue.Map(HashMap<String, JsonValue>([("approved", JsonValue.Boolean(true))]))
+    let resume = ArrayList<AgUiResumeDTO>([resumeOf("int-a", "resolved", Some(payload))])
+    let (msgs, _) = agUiResumeToMessages(ArrayList<Message>(), open, resume)
+    match (decodeAnswer(metaOf(msgs[0]))) {
+        case Some(a) => @Expect(a.isAllowOnce(), true)
+        case None => @Fail("应当能解码出答复")
+    }
+    let denied = JsonValue.Map(HashMap<String, JsonValue>([("approved", JsonValue.Boolean(false))]))
+    let resume2 = ArrayList<AgUiResumeDTO>([resumeOf("int-a", "resolved", Some(denied))])
+    let (msgs2, _) = agUiResumeToMessages(ArrayList<Message>(), open, resume2)
+    match (decodeAnswer(metaOf(msgs2[0]))) {
+        case Some(a) => @Expect(a.isDenied(), true)
+        case None => @Fail("应当能解码出答复")
+    }
+}
 @Test
 func handler_outMessagesSkipInternalMarkers() {
     let msgs = historyWithToolCall()

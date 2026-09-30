@@ -15,6 +15,23 @@ import atelier.util.{toJsonString, fromJsonString}
 import stdx.encoding.json.stream.{JsonSerializable, JsonDeserializable}
 import stdx.log.*
 import std.collection.concurrent.*
+import atelier.interaction.*
+
+/**
+ * 一条待答提问：请求本体 + 答复队列。
+ *
+ * 请求本体要留着：回传的答复得按字段类型包装（bool/multi_select），还要过 validateAnswer ——
+ * 两件事都需要知道"当初问的是什么"。
+ */
+class PendingAsk {
+    let req: UserRequest
+    let queue: LinkedBlockingQueue<UserAnswer>
+
+    init(req: UserRequest) {
+        this.req = req
+        this.queue = LinkedBlockingQueue<UserAnswer>(1)
+    }
+}
 
 public class AtelierHttpHandler {
     private let agentRegistry: AgentRegistry
@@ -24,7 +41,8 @@ public class AtelierHttpHandler {
     private let skillRegistry: SkillRegistry
     private var providerRegistry: ProviderRegistry
     private var mcpManager: McpManager = McpManager()
-    let pendingInputs = HashMap<String, LinkedBlockingQueue<String>>()
+    // 待答提问：key = UserRequest.id（确定性），答复按 id 精确投递 —— 并发请求下不能"投给任意一个"
+    let pendingAsks = HashMap<String, PendingAsk>()
 
     public init(agentRegistry: AgentRegistry, toolRegistry: ToolRegistry,
         sessionStore: SessionStore, trustManager: TrustManager,
@@ -61,7 +79,6 @@ public class AtelierHttpHandler {
         let agUi = AgUiHandler(this.agentRegistry, this.toolRegistry, this.sessionStore,
             this.trustManager, this.skillRegistry, this.providerRegistry, this.mcpManager)
         distributor.register("/ag-ui/agent", { ctx => agUi.handleAgent(ctx) })
-        distributor.register("/ag-ui/input", { ctx => agUi.handleInput(ctx) })
     }
 
     private func handleAgentConfig(ctx: HttpContext): Unit {
@@ -118,7 +135,10 @@ public class AtelierHttpHandler {
             if (m.role == "user") { msgs.add(UserMessage(ContentList.ofText(m.content), 0)) }
         }
         let provider = resolveProvider(agentCfg.model)
-        let runtime = AgentRuntime(agentCfg, provider, this.toolRegistry, this.sessionStore, this.trustManager, this.skillRegistry, this.agentRegistry, this.providerRegistry, ArrayList<Hook>(), { q => "[User input not available in HTTP mode. Question was: " + q + "]" }, this.mcpManager)
+        // 一次性端点没有回传通道：不带 ask（提问即取消，工具会如实回报"没问到"）
+        let runtime = AgentRuntime(agentCfg, provider, this.toolRegistry, this.sessionStore,
+            this.trustManager, this.skillRegistry, this.agentRegistry, this.providerRegistry,
+            ArrayList<Hook>(), this.mcpManager)
         // sessionId 透传：请求带 sessionId 时事件与请求一致（否则随机 ulid）
         let eventStream = match (dto.sessionId) {
             case Some(sid) => runtime.chatWithSessionId(sid, msgs, SessionEnvironment())
@@ -153,19 +173,25 @@ public class AtelierHttpHandler {
 
         let writer = HttpResponseWriter(ctx)
         let log = getGlobalLogger([("name", "SSE")])
-        let runtime = AgentRuntime(agentCfg, provider, this.toolRegistry, this.sessionStore, this.trustManager, this.skillRegistry, this.agentRegistry, this.providerRegistry, ArrayList<Hook>(), { q =>
-            let data = "data: {\"type\":\"user_input_request\",\"question\":\"" + escapeJson(q) + "\"}\n\n"
+        // 提问通道：整条 UserRequest 推给客户端，答复由 /agent/input 按同一个 id 送回。
+        // 回合线程在这里阻塞等人（人思考多久都不算卡死），答复到达才继续。
+        let askFn: AskFn = { req =>
+            let frame = "data: " + toJsonString(UserRequestFrame(req)) + "\n\n"
             // 写失败则客户端永远看不到提问，而本线程随后阻塞在 queue.remove() 上——必须留痕
-            try { writer.write(data.toArray()) } catch (e: Exception) {
-                eprintln("[atelier] SSE user_input_request write failed: ${e.toString()}")
+            try { writer.write(frame.toArray()) } catch (e: Exception) {
+                eprintln("[atelier] SSE user_request write failed: ${e.toString()}")
             }
-            let queue = LinkedBlockingQueue<String>(1)
-            this.pendingInputs[q] = queue
-            log.info("askUser: waiting for input", Array<Attr>())
-            let answer = queue.remove()
-            log.info("askUser: got answer", Array<Attr>())
-            answer
-        }, this.mcpManager)
+            let pending = PendingAsk(req)
+            this.pendingAsks[req.id] = pending
+            log.info("user request waiting: ${req.id}", Array<Attr>())
+            let ans = pending.queue.remove()
+            this.pendingAsks.remove(req.id)
+            log.info("user request answered: ${req.id}", Array<Attr>())
+            ans
+        }
+        let runtime = AgentRuntime(agentCfg, provider, this.toolRegistry, this.sessionStore,
+            this.trustManager, this.skillRegistry, this.agentRegistry, this.providerRegistry,
+            ArrayList<Hook>(), this.mcpManager, ask: Some(askFn))
         // sessionId 透传：请求带 sessionId 时事件与请求一致（否则随机 ulid）
         let eventStream = match (dto.sessionId) {
             case Some(sid) => runtime.chatWithSessionId(sid, msgs, SessionEnvironment())
@@ -342,8 +368,7 @@ public class AtelierHttpHandler {
         let provider = resolveProvider(agentCfg.model)
         let runtime = AgentRuntime(agentCfg, provider, this.toolRegistry,
             this.sessionStore, this.trustManager, this.skillRegistry,
-            this.agentRegistry, this.providerRegistry, ArrayList<Hook>(),
-            { q => "[User input not available]" }, this.mcpManager)
+            this.agentRegistry, this.providerRegistry, ArrayList<Hook>(), this.mcpManager)
 
         if (dto.stream) {
             doV1ChatStream(ctx, runtime, msgs, dto.model, dto.sessionId)
@@ -420,16 +445,26 @@ public class AtelierHttpHandler {
         let dto = try { readJson<SessionInputDTO>(ctx) } catch (_) {
             jsonResponse(ctx, 400, toJsonString(ErrorResponse("invalid JSON"))); return
         }
-        if (dto.answer == "") {
-            jsonResponse(ctx, 400, toJsonString(ErrorResponse("missing answer"))); return
+        if (dto.requestId == "") {
+            jsonResponse(ctx, 400, toJsonString(ErrorResponse("missing requestId"))); return
         }
-        // Find matching pending input (any will do for now)
-        for ((_, queue) in this.pendingInputs) {
-            // 投递失败 = 用户答案丢失，而等待方仍阻塞在 queue.remove() 上——必须留痕
-            try { queue.add(dto.answer) } catch (e: Exception) {
-                eprintln("[atelier] pending input enqueue failed (answer dropped): ${e.toString()}")
-            }
-            break
+        let pending = match (this.pendingAsks.get(dto.requestId)) {
+            case Some(p) => p
+            case None =>
+                // 对不上任何待答提问：多半是 id 打错或提问已结束。回 404 而不是静默 200 ——
+                // 静默成功会让调用方以为答复已生效，而回合仍在原地等人
+                jsonResponse(ctx, 404,
+                    toJsonString(ErrorResponse("no pending request: " + dto.requestId))); return
+        }
+        let ans = dto.toAnswer(pending.req)
+        match (validateAnswer(pending.req, ans)) {
+            case Some(err) =>
+                jsonResponse(ctx, 400, toJsonString(ErrorResponse("invalid answer: " + err))); return
+            case None => ()
+        }
+        // 投递失败 = 答复丢失，而等待方仍阻塞在 queue.remove() 上——必须留痕
+        try { pending.queue.add(ans) } catch (e: Exception) {
+            eprintln("[atelier] pending answer enqueue failed (answer dropped): ${e.toString()}")
         }
         jsonResponse(ctx, 200, toJsonString(StatusResponse("ok")))
     }

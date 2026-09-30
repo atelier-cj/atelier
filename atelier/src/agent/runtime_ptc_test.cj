@@ -10,6 +10,7 @@ import atelier.tool.*
 import atelier.session.*
 import atelier.trust.*
 import atelier.skill.*
+import atelier.interaction.*
 import atelier.ptc.*
 import atelier.event.EventStream
 
@@ -57,7 +58,7 @@ func runAndCaptureRequest(mode: ToolPresentationMode): CaptureRequestHook {
 
     let runtime = AgentRuntime(ptcRuntimeConfig(mode), StubProvider(), toolReg,
         MemorySessionStore(), TrustManager(), SkillRegistry(), AgentRegistry(),
-        providerReg, hooks, { q => "" }, McpManager())
+        providerReg, hooks, McpManager())
 
     let msgs = ArrayList<Message>()
     msgs.add(UserMessage(ContentList.ofText("hi"), 0))
@@ -135,7 +136,7 @@ func runtime_ptcRegistersRunXispForDispatch() {
     providerReg.register("default", StubProvider())
     let runtime = AgentRuntime(ptcRuntimeConfig(ToolPresentationMode.Ptc), StubProvider(),
         toolReg, MemorySessionStore(), TrustManager(), SkillRegistry(), AgentRegistry(),
-        providerReg, hooks, { q => "" }, McpManager())
+        providerReg, hooks, McpManager())
 
     @Assert(toolReg.get("run_xisp").isNone())
 
@@ -244,11 +245,18 @@ func runProgramWithTool(tool: Tool, program: String, config: AgentConfig): Array
     // run_xisp 是 Sequential：workDir 未信任时走交互审批，这里一律放行
     let runtime = AgentRuntime(config, provider,
         toolReg, MemorySessionStore(), TrustManager(), SkillRegistry(), AgentRegistry(),
-        providerReg, ArrayList<Hook>(), { q => "y" }, McpManager())
+        providerReg, McpManager(), ask: Some({ req: UserRequest => ptcAllowOnce(req) }))
 
     let msgs = ArrayList<Message>()
     msgs.add(UserMessage(ContentList.ofText("go"), 0))
     runtime.chat(msgs).result()
+}
+
+// PTC 子调用审批：放行这一次（结构化答复只认选项 id）
+func ptcAllowOnce(req: UserRequest): UserAnswer {
+    let sel = ArrayList<String>()
+    sel.add("allow_once")
+    UserAnswer(req.id, UserAnswerStatus.Answered, selected: sel)
 }
 
 @Test
@@ -420,7 +428,7 @@ func runtime_nativeToolCallIsAlsoBounded() {
     let runtime = AgentRuntime(ptcRuntimeConfig(ToolPresentationMode.Native,
         toolTimeoutSeconds: UInt32(1), toolPattern: "hanging"), provider,
         toolReg, MemorySessionStore(), TrustManager(), SkillRegistry(), AgentRegistry(),
-        providerReg, ArrayList<Hook>(), { q => "y" }, McpManager())
+        providerReg, McpManager(), ask: Some({ req: UserRequest => ptcAllowOnce(req) }))
 
     let msgs = ArrayList<Message>()
     msgs.add(UserMessage(ContentList.ofText("go"), 0))
@@ -492,7 +500,7 @@ func runProgramCollectingEvents(program: String): ArrayList<AgentEvent> {
 
     let runtime = AgentRuntime(ptcRuntimeConfig(ToolPresentationMode.Ptc), provider,
         toolReg, MemorySessionStore(), TrustManager(), SkillRegistry(), AgentRegistry(),
-        providerReg, ArrayList<Hook>(), { q => "y" }, McpManager())
+        providerReg, McpManager(), ask: Some({ req: UserRequest => ptcAllowOnce(req) }))
 
     let msgs = ArrayList<Message>()
     msgs.add(UserMessage(ContentList.ofText("go"), 0))

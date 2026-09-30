@@ -13,6 +13,7 @@ import jsonvalue.JsonValue
 import atelier.agent.*
 import atelier.context.PromptSegmentContributor
 import atelier.message.*
+import atelier.interaction.*
 import atelier.provider.*
 import atelier.session.*
 import atelier.skill.*
@@ -22,37 +23,15 @@ import atelier.util.{toJsonString, fromJsonString}
 
 // AG-UI 端点（对外前端协议）：
 //   POST /ag-ui/agent  RunAgentInput → text/event-stream（AG-UI 事件）
-//   POST /ag-ui/input  回传 askUser 的回答或客户端工具的执行结果
 //
-// 与既有 /agent/stream 并存：那条是 atelier 私有事件格式（TUI 在用），这条遵守公开协议。
+// 提问不另开端点：以 RUN_FINISHED{outcome:interrupt} 结束本次 run，客户端在下一次
+// RunAgentInput.resume[] 里带回答复（同一 threadId，覆盖全部未决中断）。
+// 与既有 /agent/stream 并存：那条是 atelier 私有事件格式，这条遵守公开协议。
 // 设计见 docs/plans/2026-09-30-ag-ui-endpoint.md。
-
-// ── 外部输入通道 ────────────────────────────────────────────────────────────
-
-// 每个等待中的外部请求一个队列：askUser 用键 "user"，客户端工具用键 "tool:<toolCallId>"。
-// 分开按键，避免并行工具调用时互相偷走对方的回答。
-class AgUiRunChannels {
-    private let queues = ConcurrentHashMap<String, LinkedBlockingQueue<AgUiInputDTO>>()
-
-    public func register(key: String): LinkedBlockingQueue<AgUiInputDTO> {
-        let q = LinkedBlockingQueue<AgUiInputDTO>(1)
-        this.queues.add(key, q)
-        q
-    }
-
-    public func deliver(key: String, dto: AgUiInputDTO): Bool {
-        match (this.queues.get(key)) {
-            case Some(q) => q.tryAdd(dto)
-            case None => false
-        }
-    }
-
-    public func discard(key: String): Unit { this.queues.remove(key) }
-}
 
 // ── SSE 写出端 ──────────────────────────────────────────────────────────────
 
-// 运行线程（工具执行、askUser 回调）与消费循环都会写同一个 response body，
+// 运行线程（工具执行、提问回调）与消费循环都会写同一个 response body，
 // 并发写会交错成非法帧 → 全部经这里串行化。写坏一次即置位，后续事件直接丢。
 class AgUiSseSink {
     private let writer: HttpResponseWriter
@@ -128,7 +107,6 @@ public class AgUiHandler {
     private let skillRegistry: SkillRegistry
     private let providerRegistry: ProviderRegistry
     private let mcpManager: McpManager
-    private let runs = ConcurrentHashMap<String, AgUiRunChannels>()
     // threadId → 未决中断（内存态：单进程服务；跨重启无法关联时按协议回 RunError）
     private let openInterrupts = ConcurrentHashMap<String, ArrayList<AgUiInterrupt>>()
 
@@ -148,7 +126,6 @@ public class AgUiHandler {
     public func registerRoutes(distributor: HttpRequestDistributor): Unit {
         let h = this
         distributor.register("/ag-ui/agent", { ctx => h.handleAgent(ctx) })
-        distributor.register("/ag-ui/input", { ctx => h.handleInput(ctx) })
     }
 
     // 不合规输入（缺 resume / resume 对不上）也要走事件流：协议规定以 RUN_ERROR 回应，
@@ -166,28 +143,6 @@ public class AgUiHandler {
         let sink = AgUiSseSink(HttpResponseWriter(ctx))
         sink.send(RunStartedEvent(threadId, runId))
         sink.send(RunErrorEvent(message, code))
-    }
-
-    public func handleInput(ctx: HttpContext): Unit {
-        let body = readBody(ctx)
-        let dto = try { fromJsonString<AgUiInputDTO>(body) } catch (_) {
-            jsonResponse(ctx, 400, toJsonString(ErrorResponse("invalid JSON"))); return
-        }
-        let key = inputKey(dto)
-        if (key == "") {
-            jsonResponse(ctx, 400, toJsonString(ErrorResponse("kind must be user_input or tool_result"))); return
-        }
-        let channels = match (this.runs.get(dto.runId)) {
-            case Some(c) => c
-            case None =>
-                jsonResponse(ctx, 404, toJsonString(ErrorResponse("unknown run: ${dto.runId}"))); return
-        }
-        if (channels.deliver(key, dto)) {
-            jsonResponse(ctx, 200, toJsonString(ErrorResponse("")))
-        } else {
-            // 没有在等的请求：多半是重复回传或 runId 写错，明确回报，别静默丢弃
-            jsonResponse(ctx, 404, toJsonString(ErrorResponse("no pending request for ${key}")))
-        }
     }
 
     public func handleAgent(ctx: HttpContext): Unit {
@@ -271,22 +226,12 @@ public class AgUiHandler {
         b.header("transfer-encoding", "chunked")
 
         let sink = AgUiSseSink(HttpResponseWriter(ctx))
-        let channels = AgUiRunChannels()
-        this.runs.add(runId, channels)
 
         let provider = this.resolveProvider()
         let runtime = AgentRuntime(cfg, provider, this.clientToolRegistry(input.tools),
             this.sessionStore, this.trustManager, this.skillRegistry, this.agentRegistry,
-            this.providerRegistry, ArrayList<Hook>(), { q =>
-                // 等外部输入：先告诉前端，再阻塞等 /ag-ui/input
-                let key = "user"
-                let queue = channels.register(key)
-                sink.send(CustomEvent("user_input_request",
-                    JsonValue.fromObject(AgUiUserInputPayload(q))))
-                let answer = queue.remove()
-                channels.discard(key)
-                answer.text
-            }, SessionEnvironment(), this.mcpManager,
+            this.providerRegistry, ArrayList<Hook>(), SessionEnvironment(), this.mcpManager,
+            ask: Some({ req: UserRequest => UserAnswer.pending(req.id) }),
             promptContributors: this.contributorsFor(input))
 
         let translator = AgUiTranslator(threadId, runId, clientTools: clientToolNames)
@@ -303,7 +248,6 @@ public class AgUiHandler {
 
         let eventStream = runtime.chatWithSessionId(threadId, msgs, SessionEnvironment())
         streamAgUiEvents(eventStream, translator, sink, oldLoaded)
-        this.runs.remove(runId)
 
         // 挂起 → 登记未决中断（下一次 run 的 resume 要覆盖它们）
         let pending = translator.pendingInterrupts()
@@ -411,15 +355,6 @@ func streamAgUiEvents(eventStream: LoopEventStream, translator: AgUiTranslator, 
         case false => log.info("ag-ui run finished", Array<Attr>())
     }
     all
-}
-
-// 输入通道的键：askUser 的回答与客户端工具结果分键，互不干扰
-func inputKey(dto: AgUiInputDTO): String {
-    match (dto.kind) {
-        case "user_input" => "user"
-        case "tool_result" => if (dto.toolCallId != "") { "tool:" + dto.toolCallId } else { "" }
-        case _ => ""
-    }
 }
 
 // RunAgentInput.messages → atelier 消息。
@@ -573,6 +508,60 @@ func toolNameOf(msgs: ArrayList<Message>, toolCallId: String): String {
     ""
 }
 
+// 中断 + 客户端的 resume 条目 → 结构化答复。
+// 载荷约定（与 AG-UI 生态习惯一致，两种都收）：
+//   {approved: true|false}                → 审批结论（allow_once / deny）
+//   {selected:[...]} / {text:"..."} / {values:{...}} → 选择 / 文本 / 表单
+//   其它标量或对象                         → 当作纯文本（保留原文，别丢信息）
+func resumeAnswerOf(intr: AgUiInterrupt, entry: AgUiResumeDTO): UserAnswer {
+    if (entry.isCancelled()) {
+        return UserAnswer(intr.id, UserAnswerStatus.Cancelled)
+    }
+    var selected = ArrayList<String>()
+    var text = ""
+    let values = HashMap<String, JsonValue>()
+    match (entry.payload) {
+        case Some(JsonValue.Map(m)) =>
+            match (m.get("approved")) {
+                case Some(JsonValue.Boolean(b)) =>
+                    selected.add(if (b) { "allow_once" } else { "deny" })
+                case _ => ()
+            }
+            match (m.get("selected")) {
+                case Some(JsonValue.Array(items)) =>
+                    for (item in items) {
+                        match (item) {
+                            case JsonValue.String(s) => selected.add(s)
+                            case _ => ()
+                        }
+                    }
+                case Some(JsonValue.String(s)) => selected.add(s)
+                case _ => ()
+            }
+            match (m.get("text")) {
+                case Some(JsonValue.String(s)) => text = s
+                case _ => ()
+            }
+            match (m.get("values")) {
+                case Some(JsonValue.Map(vs)) =>
+                    for (k in vs.keys()) {
+                        match (vs.get(k)) {
+                            case Some(v) => values[k] = v
+                            case None => ()
+                        }
+                    }
+                case _ => ()
+            }
+            if (selected.size == 0 && text == "" && values.size == 0) {
+                text = payloadText(entry.payload)
+            }
+        case Some(_) => text = payloadText(entry.payload)
+        case None => ()
+    }
+    UserAnswer(intr.id, UserAnswerStatus.Answered,
+        selected: selected, text: text, values: values)
+}
+
 // resume[] → 本次 run 的输入消息。返回 (消息, 错误)：错误非空即回 RUN_ERROR（协议规则 3/6/7）。
 // 每个未决中断都必须被覆盖（部分恢复不支持）；引用未知中断 id 同样报错。
 func agUiResumeToMessages(history: ArrayList<Message>, open: ArrayList<AgUiInterrupt>,
@@ -608,9 +597,11 @@ func agUiResumeToMessages(history: ArrayList<Message>, open: ArrayList<AgUiInter
             msgs.add(ToolResultMessage(i.toolCallId, toolNameOf(history, i.toolCallId),
                 ContentList.ofText(text), cancelled || denied, nowMillis()))
         } else {
-            // 非工具类中断（要一段输入）：回应的载荷当作新一轮用户输入
-            let text = payloadText(entry.payload)
-            if (text != "") { msgs.add(UserMessage(ContentList.ofText(text), nowMillis())) }
+            // 审批 / 要输入类中断：答复必须回到**同一个提问**上（重放那一回合时按 requestId 命中），
+            // 所以编码进消息元数据，而不是当成一句普通用户消息
+            let ans = resumeAnswerOf(i, entry)
+            msgs.add(UserMessage(ContentList.ofText(ans.text), nowMillis(),
+                metadata: encodeAnswer(ans)))
         }
     }
     (msgs, None)

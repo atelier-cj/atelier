@@ -169,7 +169,7 @@ func makeCapabilityRuntime(provider: Provider, mws: ArrayList<ProviderMiddleware
     let store = MemorySessionStore()
     let mcpMgr = McpManager()
     AgentRuntime(subConfig(), provider, toolReg, store, trustMgr,
-        skillReg, agentReg, providerReg, ArrayList<Hook>(), { q => "" },
+        skillReg, agentReg, providerReg, ArrayList<Hook>(),
         SessionEnvironment(), mcpMgr, middlewares: mws)
 }
 
