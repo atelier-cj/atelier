@@ -187,3 +187,22 @@ public struct ToolContext { ... public let ask: AskFn ... }   // 5 个构造器�
    支持到什么程度，否则选择/表单在 ACP 端只能降级为"文本输入"。
 
 在这两条定下来之前，**不启动这次删除**：否则宿主要改两遍（先适配字符串→结构化，再适配阻塞→挂起）。
+
+### 两个待定行为的结论（2026-10-01 定）
+
+**① AG-UI：`ask` 返回 `Pending`（挂起）** —— 已定。随之删除私有通道
+（`CUSTOM user_input_request` 与 `POST /ag-ui/input`），标准前端只认 `RUN_FINISHED.outcome.interrupts`
++ 下一次 run 的 `resume[]`。
+
+**② ACP：elicitation 能力调研结论（依据本仓 `acp-cj`，它按官方 schema 实现）**
+
+| 能力 | 现状 | 映射策略 |
+|---|---|---|
+| 结构化表单 | `ElicitationSchema.of(props, required:)` + form 模式 ✓ | `Form` → 一个字段一个 property |
+| 字段类型 | `string` / `number` / `integer` / `boolean` / `array` + `EnumOption` ✓ | `Text`→string、`Number`→number、`Boolean`→boolean、`Select`→enum |
+| 单选 | enum + `EnumOption` ✓ | `Choice(multi=false)` → 单个 enum property |
+| **多选** | 没有"数组元素为枚举"的明确表达 ✗ | **降级为 N 个 boolean property**（各客户端都能渲染；id 校验仍在 runtime 侧） |
+| 审批 | `session/request_permission` 才是 ACP 的原生机制 ✓ | `Approval` → permission 请求（不走 elicitation），与现有 `toolApprovalFn` 桥合并 |
+| 能力协商 | `clientCapabilities.elicitation` 可选 ✓，未声明时 form 模式必须拒绝 ✓ | 未声明 → **明确降级**：单字段文本提问；仍不可用则返回 `Cancelled` 并留痕（不再用空串表示失败） |
+
+结论：不需要等外部调研，ACP 侧三种形态都能落；唯一需要降级的是**多选**（拆成多个 boolean）。
