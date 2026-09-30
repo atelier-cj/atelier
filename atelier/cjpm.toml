@@ -1,6 +1,6 @@
 [package]
 name = "atelier"
-version = "0.1.5"
+version = "0.1.6"
 description = "纯仓颉实现的 Agent Harness：把模型变成 Agent 的那层脚手架（工具 / Provider / 会话 / 压缩 / 信任闸门 / ACP）"
 cjc-version = "1.1.0"
 output-type = "static"
