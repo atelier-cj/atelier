@@ -2,6 +2,7 @@ package atelier.agent
 
 import std.collection.*
 import atelier.message.*
+import atelier.tool.ExternalRequest
 import atelier.event.EventStream
 
 public interface AgentEvent {
@@ -71,6 +72,18 @@ public class ToolExecutionEndEvent <: AgentEvent {
         this.toolCallId = toolCallId; this.result = result; this.isError = isError
     }
     public func eventType(): String { "tool_execution_end" }
+}
+
+/**
+ * 本次运行挂起：等待外部结果（前端执行工具、用户确认……）。
+ *
+ * 挂起不是失败：历史停在 assistant(tool_calls)，调用方带结果发起下一次 run 即可继续。
+ * 消费者见本事件后不应再期待后续回合。
+ */
+public class SuspendEvent <: AgentEvent {
+    public let requests: ArrayList<ExternalRequest>
+    public init(requests: ArrayList<ExternalRequest>) { this.requests = requests }
+    public func eventType(): String { "suspend" }
 }
 
 public class CompactionEvent <: AgentEvent {

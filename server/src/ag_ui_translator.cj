@@ -120,6 +120,8 @@ public class AgUiTranslator {
     private var toolArgs: HashMap<String, String> = HashMap<String, String>()
     private var stopReason: String = "end_turn"
     private var finished: Bool = false
+    // 运行挂起时收集的中断：RUN_FINISHED 需要以 interrupt 收尾而不是 success
+    private var interrupts: ArrayList<AgUiInterrupt> = ArrayList()
 
     public init(threadId: String, runId: String, clientTools!: ArrayList<String> = ArrayList()) {
         this.threadId = threadId; this.runId = runId; this.clientTools = clientTools
@@ -128,6 +130,9 @@ public class AgUiTranslator {
     public func turns(): Int64 { this.turn }
 
     public func stopReasonName(): String { this.stopReason }
+
+    // 本次 run 结束时是否有未决中断（handler 据此登记并等待 resume）
+    public func pendingInterrupts(): ArrayList<AgUiInterrupt> { this.interrupts }
 
     // run 开始：RUN_STARTED + STATE_SNAPSHOT（快照只在开头发一次）
     public func start(snapshot: AgUiStateSnapshot): ArrayList<AgUiEvent> {
@@ -206,6 +211,11 @@ public class AgUiTranslator {
                     JsonValue.fromObject(AgUiToolProgressPayload(e.toolCallId, e.progress))))
             case e: ToolExecutionEndEvent =>
                 out.add(ToolCallResultEvent(this.resultMessageId(), e.toolCallId, e.result, "tool"))
+            case e: SuspendEvent =>
+                // 挂起：run 到此为止，交由客户端在下一次 run 的 resume 里给结果
+                for (req in e.requests) {
+                    this.interrupts.add(AgUiInterrupt(req.id, req.reason, req.message, req.toolCallId))
+                }
             case e: CompactionEvent =>
                 out.add(CustomEvent("compaction",
                     JsonValue.fromObject(AgUiCompactionPayload(e.reason, e.tokensBefore, e.tokensAfter))))
@@ -230,7 +240,8 @@ public class AgUiTranslator {
                 this.closeText(out)
                 this.closeStep(out)
                 this.finished = true
-                out.add(RunFinishedEvent(this.threadId, this.runId, this.stopReason, this.turn))
+                out.add(RunFinishedEvent(this.threadId, this.runId, this.stopReason, this.turn,
+                    interrupts: this.interrupts))
             case _ => ()
         }
         out

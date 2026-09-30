@@ -146,6 +146,37 @@ public class AgUiMessageDTO <: JsonDeserializable<AgUiMessageDTO> {
     }
 }
 
+// resume[]：客户端对未决中断的回应（AG-UI 1.0 的中断-恢复契约）
+public class AgUiResumeDTO <: JsonDeserializable<AgUiResumeDTO> {
+    public let interruptId: String
+    // "resolved"（给了回应）/ "cancelled"（放弃，无有意义输入）
+    public let status: String
+    public let payload: Option<JsonValue>
+
+    public init(interruptId: String, status: String, payload: Option<JsonValue>) {
+        this.interruptId = interruptId; this.status = status; this.payload = payload
+    }
+
+    public static func fromJson(r: JsonReader): AgUiResumeDTO {
+        var interruptId = ""
+        var status = ""
+        var payload: Option<JsonValue> = None
+        r.startObject()
+        while (r.peek() != JsonToken.EndObject) {
+            match (r.readName()) {
+                case "interruptId" => interruptId = r.readValue<String>()
+                case "status" => status = r.readValue<String>()
+                case "payload" => payload = Some(JsonValue.fromJson(r))
+                case _ => r.skip()
+            }
+        }
+        r.endObject()
+        AgUiResumeDTO(interruptId, status, payload)
+    }
+
+    public func isCancelled(): Bool { this.status == "cancelled" }
+}
+
 public class AgUiToolDTO <: JsonDeserializable<AgUiToolDTO> {
     public let name: String
     public let description: String
@@ -205,13 +236,17 @@ public class RunAgentInput <: JsonDeserializable<RunAgentInput> {
     public let tools: ArrayList<AgUiToolDTO>
     public let context: ArrayList<AgUiContextDTO>
     public let forwardedProps: Option<JsonValue>
+    // 对上一次中断的回应（同一 thread）：有未决中断时本字段必填
+    public let resume: ArrayList<AgUiResumeDTO>
 
     public init(threadId: String, runId: String, state: Option<JsonValue>,
         messages: ArrayList<AgUiMessageDTO>, tools: ArrayList<AgUiToolDTO>,
-        context: ArrayList<AgUiContextDTO>, forwardedProps: Option<JsonValue>) {
+        context: ArrayList<AgUiContextDTO>, forwardedProps: Option<JsonValue>,
+        resume!: ArrayList<AgUiResumeDTO> = ArrayList()) {
         this.threadId = threadId; this.runId = runId; this.state = state
         this.messages = messages; this.tools = tools
         this.context = context; this.forwardedProps = forwardedProps
+        this.resume = resume
     }
 
     public static func fromJson(r: JsonReader): RunAgentInput {
@@ -222,6 +257,7 @@ public class RunAgentInput <: JsonDeserializable<RunAgentInput> {
         var tools = ArrayList<AgUiToolDTO>()
         var context = ArrayList<AgUiContextDTO>()
         var forwarded: Option<JsonValue> = None
+        var resume = ArrayList<AgUiResumeDTO>()
         r.startObject()
         while (r.peek() != JsonToken.EndObject) {
             match (r.readName()) {
@@ -247,11 +283,17 @@ public class RunAgentInput <: JsonDeserializable<RunAgentInput> {
                     }
                     r.endArray()
                 case "forwardedProps" => forwarded = Some(JsonValue.fromJson(r))
+                case "resume" =>
+                    r.startArray()
+                    while (r.peek() != JsonToken.EndArray) {
+                        resume.add(AgUiResumeDTO.fromJson(r))
+                    }
+                    r.endArray()
                 case _ => r.skip()
             }
         }
         r.endObject()
-        RunAgentInput(threadId, runId, state, messages, tools, context, forwarded)
+        RunAgentInput(threadId, runId, state, messages, tools, context, forwarded, resume: resume)
     }
 
     // forwardedProps.agent：客户端指定本次 run 用哪个 agent（缺省时由服务端挑默认 agent）

@@ -91,8 +91,9 @@ AG-UI 的 `tools` 是**前端实现**的工具。做法：为本次 run 建一�
 
 ## 七、后续（本轮不做）
 
-1. **interrupt/resume**：`askUser` 与客户端工具改为"结束本次 run + 下次 run 带 `resume`/工具结果"，
-   需要运行时挂起（会话已持久化，具备条件）
+1. **interrupt/resume（已完成 2026-10-01）**：客户端工具走 `RUN_FINISHED.outcome=interrupt` +
+   下次 run 的 `resume[]`；核心新增 `ToolResult.external` / `ExternalRequest` / `SuspendEvent`，
+   运行时遇 external 结果即挂起（不写伪结果）。剩余：`askUser` 仍阻塞（需要核心为"等外部输入"发事件）
 2. `REASONING_*` 增量流（现在只有消息结束时一次性给出）
 3. `STATE_DELTA`：把 todo 列表等会话内状态以 JSON Patch 增量推给前端
 4. 二进制 transport（AG-UI 的可选高性能通道）

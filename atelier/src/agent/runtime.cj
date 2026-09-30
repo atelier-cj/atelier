@@ -474,6 +474,9 @@ public open class AgentRuntime {
                                 continue
                             }
                             var resIdx: Int64 = 0
+                            // 需要外部给结果的调用：本次 run 挂起（不写结果消息，历史停在
+                            // assistant(tool_calls)），由调用方在下一次 run 带回结果
+                            let pendingExternal = ArrayList<ExternalRequest>()
                             for (i in 0..toolCalls.size) {
                                 let tc = toolCalls[Int64(i)]
                                 match (skipResults.get(Int64(i))) {
@@ -483,6 +486,15 @@ public open class AgentRuntime {
                                     case None =>
                                         if (resIdx < results.size) {
                                             let r = results[Int64(resIdx)]
+                                            match (r.external) {
+                                                case Some(req) =>
+                                                    // 挂起：不产生结果消息（写了就等于伪造结果）
+                                                    log.info("tool ${tc.name} awaits external result: ${req.id}", Array<Attr>())
+                                                    pendingExternal.add(req)
+                                                    resIdx++
+                                                    continue
+                                                case None => ()
+                                            }
                                             log.info("tool ${tc.name} done: err=${r.isError}", Array<Attr>())
                                             this.mcpManager.markUsedTool(tc.name)
                                             // 工具执行结束事件（与开始事件一一对应）
@@ -503,6 +515,13 @@ public open class AgentRuntime {
                             toolCallCount += toolCalls.size
                             lastToolTime = MonoTime.now()
                             this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
+                            if (pendingExternal.size > 0) {
+                                // 中止本次 run：历史已落在 assistant(tool_calls)，
+                                // 下一次 run 带结果即可继续（见 SuspendEvent 注释）
+                                this.emit(stream, SuspendEvent(pendingExternal))
+                                finished = true
+                                continue
+                            }
 
                         case _ =>
                             if (cancelFlag.load()) {

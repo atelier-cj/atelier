@@ -186,3 +186,133 @@ func handler_fullRunAgentInputParsesThroughHelpers() {
     @Expect(text.contains("你是运维助手"), true)
     @Expect(text.contains("prod"), true)
 }
+
+// ── 中断-恢复的消息换算 ─────────────────────────────────────────────────────
+
+func openOf(id: String, reason: String, toolCallId: String): AgUiInterrupt {
+    AgUiInterrupt(id, reason, "需要外部处理", toolCallId)
+}
+
+func resumeOf(interruptId: String, status: String, payload: Option<JsonValue>): AgUiResumeDTO {
+    AgUiResumeDTO(interruptId, status, payload)
+}
+
+func historyWithToolCall(): ArrayList<Message> {
+    let calls = ArrayList<ContentBlock>()
+    calls.add(ContentBlock.ToolCall(ToolCallBlock("c1", "get_weather",
+        JsonValue.Map(HashMap<String, JsonValue>()))))
+    let out = ArrayList<Message>()
+    out.add(UserMessage(ContentList.ofText("查天气"), 0))
+    out.add(AssistantMessage(ContentList(calls), "m", "fake", StopReason.ToolUse, TokenUsage(0, 0), 0))
+    out
+}
+
+@Test
+func handler_resumeResolvedBecomesToolResult() {
+    let open = ArrayList<AgUiInterrupt>([openOf("int-c1", "tool_call", "c1")])
+    let resume = ArrayList<AgUiResumeDTO>([
+        resumeOf("int-c1", "resolved", Some(JsonValue.String("北京晴")))])
+    let (msgs, err) = agUiResumeToMessages(historyWithToolCall(), open, resume)
+    @Expect(err.isNone(), true)
+    @Expect(msgs.size, 1)
+    match (msgs[0]) {
+        case tr: ToolResultMessage =>
+            @Expect(tr.toolCallId, "c1")
+            @Expect(toText(tr.content), "北京晴")
+            @Expect(tr.isError, false)
+            // 工具名从历史里配对找回（恢复时只有 toolCallId）
+            @Expect(tr.toolName, "get_weather")
+        case _ => @Fail("应当是工具结果")
+    }
+}
+
+@Test
+func handler_resumeCancelledIsErrorResult() {
+    let open = ArrayList<AgUiInterrupt>([openOf("int-c1", "tool_call", "c1")])
+    let resume = ArrayList<AgUiResumeDTO>([resumeOf("int-c1", "cancelled", None)])
+    let (msgs, err) = agUiResumeToMessages(historyWithToolCall(), open, resume)
+    @Expect(err.isNone(), true)
+    match (msgs[0]) {
+        case tr: ToolResultMessage =>
+            @Expect(tr.isError, true)
+            @Expect(toText(tr.content), "[cancelled by user]")
+        case _ => @Fail("应当是工具结果")
+    }
+}
+
+@Test
+func handler_resumeDeniedPayloadIsErrorResult() {
+    let denied = JsonValue.Map(HashMap<String, JsonValue>([("approved", JsonValue.Boolean(false))]))
+    let open = ArrayList<AgUiInterrupt>([openOf("int-c1", "tool_call", "c1")])
+    let resume = ArrayList<AgUiResumeDTO>([resumeOf("int-c1", "resolved", Some(denied))])
+    let (msgs, err) = agUiResumeToMessages(historyWithToolCall(), open, resume)
+    @Expect(err.isNone(), true)
+    match (msgs[0]) {
+        case tr: ToolResultMessage =>
+            @Expect(tr.isError, true)
+            @Expect(toText(tr.content), "[denied by user]")
+        case _ => @Fail("应当是工具结果")
+    }
+}
+
+@Test
+func handler_resumePartialIsRejected() {
+    // 规则 3：一次 resume 必须覆盖全部未决中断，部分恢复不支持
+    let open = ArrayList<AgUiInterrupt>([
+        openOf("int-c1", "tool_call", "c1"), openOf("int-c2", "tool_call", "c2")])
+    let resume = ArrayList<AgUiResumeDTO>([resumeOf("int-c1", "resolved", None)])
+    let (msgs, err) = agUiResumeToMessages(historyWithToolCall(), open, resume)
+    @Expect(msgs.size, 0)
+    match (err) {
+        case Some(msg) => @Expect(msg.contains("int-c2"), true)
+        case None => @Fail("部分恢复必须报错")
+    }
+}
+
+@Test
+func handler_resumeUnknownInterruptIsRejected() {
+    let open = ArrayList<AgUiInterrupt>([openOf("int-c1", "tool_call", "c1")])
+    let resume = ArrayList<AgUiResumeDTO>([
+        resumeOf("int-other", "resolved", None), resumeOf("int-c1", "resolved", None)])
+    let (_, err) = agUiResumeToMessages(historyWithToolCall(), open, resume)
+    match (err) {
+        case Some(msg) => @Expect(msg.contains("int-other"), true)
+        case None => @Fail("未知中断 id 必须报错")
+    }
+}
+
+@Test
+func handler_resumeInputRequiredBecomesUserMessage() {
+    let open = ArrayList<AgUiInterrupt>([openOf("int-q", "input_required", "")])
+    let resume = ArrayList<AgUiResumeDTO>([
+        resumeOf("int-q", "resolved", Some(JsonValue.String("Q1")))])
+    let (msgs, err) = agUiResumeToMessages(ArrayList<Message>(), open, resume)
+    @Expect(err.isNone(), true)
+    match (msgs[0]) {
+        case um: UserMessage => @Expect(toText(um.content), "Q1")
+        case _ => @Fail("非工具中断的回应应当是用户消息")
+    }
+}
+
+@Test
+func handler_outMessagesSkipInternalMarkers() {
+    let msgs = historyWithToolCall()
+    msgs.add(ToolResultMessage("c1", "get_weather", ContentList.ofText("晴"), false, 0))
+    msgs.add(CompactionMessage("早前摘要", 10, 2))
+    let out = agUiOutMessages(msgs)
+    // 压缩标记不外发（客户端无从渲染，也不该看到内部上下文管理细节）
+    @Expect(out.size, 3)
+    @Expect(out[0].role, "user")
+    @Expect(out[1].role, "assistant")
+    @Expect(out[1].toolCalls.size, 1)
+    @Expect(out[2].role, "tool")
+    @Expect(out[2].toolCallId, "c1")
+}
+
+@Test
+func handler_payloadTextPrefersPlainString() {
+    @Expect(payloadText(Some(JsonValue.String("晴"))), "晴")
+    // 数字按 jsonvalue 的序列化口径（1.0 → "1"）
+    @Expect(payloadText(Some(JsonValue.Number(1.0))), "1")
+    @Expect(payloadText(None), "")
+}

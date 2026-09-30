@@ -174,3 +174,73 @@ func events_reasoningUsesOwnMessageId() {
     @Expect(fieldOf(body, "role"), "reasoning")
     @Expect(body.contains("m1-r"), true)
 }
+
+// 中断收尾：outcome.type=interrupt 且 interrupts 非空（协议规则 2/3 的载体）
+@Test
+func events_runFinishedInterruptOutcome() {
+    let ints = ArrayList<AgUiInterrupt>()
+    ints.add(AgUiInterrupt("int-c1", "tool_call", "客户端需执行 get_weather", "c1"))
+    let body = frameBody(RunFinishedEvent("t1", "r1", "tool_use", 1, interrupts: ints))
+    @Expect(fieldOf(body, "type"), "RUN_FINISHED")
+    let v = JsonValue.parse(body)
+    match (v) {
+        case JsonValue.Map(m) =>
+            match (m.get("outcome")) {
+                case Some(JsonValue.Map(o)) =>
+                    match (o.get("type")) {
+                        case Some(JsonValue.String(s)) => @Expect(s, "interrupt")
+                        case _ => @Fail("outcome.type 必须是 interrupt")
+                    }
+                    match (o.get("interrupts")) {
+                        case Some(JsonValue.Array(arr)) =>
+                            @Expect(arr.size, 1)
+                            let one = toJsonString(arr[0])
+                            @Expect(fieldOf(one, "id"), "int-c1")
+                            @Expect(fieldOf(one, "reason"), "tool_call")
+                            @Expect(fieldOf(one, "toolCallId"), "c1")
+                        case _ => @Fail("interrupts 必须是非空数组")
+                    }
+                case _ => @Fail("必须带 outcome")
+            }
+        case _ => @Fail("帧体应当是 JSON 对象")
+    }
+}
+
+@Test
+func events_interruptOmitsEmptyToolCallId() {
+    let ints = ArrayList<AgUiInterrupt>()
+    ints.add(AgUiInterrupt("int-1", "input_required", "请补充信息", ""))
+    let body = frameBody(RunFinishedEvent("t1", "r1", "end_turn", 1, interrupts: ints))
+    @Expect(body.contains("toolCallId"), false)
+    @Expect(fieldOf(body, "threadId"), "t1")
+}
+
+// 消息快照：中断边界上交给客户端重建上下文所需的一切
+@Test
+func events_messagesSnapshotShape() {
+    let calls = ArrayList<AgUiToolCallDTO>()
+    calls.add(AgUiToolCallDTO("c1", AgUiFunctionDTO("get_weather", "{\"city\":\"北京\"}")))
+    let msgs = ArrayList<AgUiOutMessage>()
+    msgs.add(AgUiOutMessage("m1", "user", "查天气", "", ArrayList<AgUiToolCallDTO>()))
+    msgs.add(AgUiOutMessage("m2", "assistant", "", "", calls))
+    msgs.add(AgUiOutMessage("m3", "tool", "晴", "c1", ArrayList<AgUiToolCallDTO>()))
+    let body = frameBody(MessagesSnapshotEvent(msgs))
+    @Expect(fieldOf(body, "type"), "MESSAGES_SNAPSHOT")
+    let v = JsonValue.parse(body)
+    match (v) {
+        case JsonValue.Map(m) =>
+            match (m.get("messages")) {
+                case Some(JsonValue.Array(arr)) =>
+                    @Expect(arr.size, 3)
+                    let asst = toJsonString(arr[1])
+                    @Expect(asst.contains("\"toolCalls\""), true)
+                    @Expect(asst.contains("get_weather"), true)
+                    let tool = toJsonString(arr[2])
+                    @Expect(fieldOf(tool, "toolCallId"), "c1")
+                    // 无工具调用的消息不该出现空 toolCalls 字段
+                    @Expect(toJsonString(arr[0]).contains("toolCalls"), false)
+                case _ => @Fail("messages 缺失")
+            }
+        case _ => @Fail("帧体应当是 JSON 对象")
+    }
+}

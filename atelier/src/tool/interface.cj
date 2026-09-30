@@ -100,16 +100,47 @@ public struct ToolResult {
     public let isError: Bool
     /** Whether this result should terminate the entire Run. */
     public let terminate: Bool
+    /**
+     * 本次调用要由**外部**给结果（前端执行、用户确认……）。
+     *
+     * 非 None 表示：本进程不产出结果，运行时挂起这次 run（不写结果消息，历史停在
+     * assistant(tool_calls)），把中断交给调用方；调用方在**下一次** run 里带回结果。
+     */
+    public let external: Option<ExternalRequest>
 
     public init(
         text: String,
         details: Option<JsonValue>,
         isError: Bool,
-        terminate: Bool
+        terminate: Bool,
+        external!: Option<ExternalRequest> = None
     ) {
         this.text = text
         this.details = details
         this.isError = isError
         this.terminate = terminate
+        this.external = external
+    }
+}
+
+/**
+ * 挂起请求：这次运行需要外部在之后提供结果。
+ *
+ * id 是跨 run 的关联键（调用方在恢复时原样回填）：同一个挂起被重复提交要幂等。
+ */
+public class ExternalRequest {
+    public let id: String
+    /** 分类：tool_call（绑定某次工具调用）/ input_required（要一段结构化输入） */
+    public let reason: String
+    /** 给人看的一句话（前端没有专用 UI 时的兜底展示） */
+    public let message: String
+    /** reason=tool_call 时绑定到的工具调用 id，否则为空 */
+    public let toolCallId: String
+
+    public init(id: String, reason: String, message: String, toolCallId!: String = "") {
+        this.id = id
+        this.reason = reason
+        this.message = message
+        this.toolCallId = toolCallId
     }
 }
