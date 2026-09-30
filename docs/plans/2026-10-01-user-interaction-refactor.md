@@ -206,3 +206,32 @@ public struct ToolContext { ... public let ask: AskFn ... }   // 5 个构造器�
 | 能力协商 | `clientCapabilities.elicitation` 可选 ✓，未声明时 form 模式必须拒绝 ✓ | 未声明 → **明确降级**：单字段文本提问；仍不可用则返回 `Cancelled` 并留痕（不再用空串表示失败） |
 
 结论：不需要等外部调研，ACP 侧三种形态都能落；唯一需要降级的是**多选**（拆成多个 boolean）。
+
+### ACP 迁移的实施笔记（2026-10-01 现场勘察）
+
+已知可用（`acp-cj/src/types/elicitation.cj`）：
+
+| 入口 | 说明 |
+|---|---|
+| `ElicitationPropertySchema.string()/.number()/.integer()/.boolean()/.array()` | 字段类型齐全 ✓ |
+| `EnumOption` | 枚举项（`const`/`title`；注意 `const` 是仓颉关键字，访问写 ``opt.`const` ``）✓ |
+| `ElicitationSchema.of(props, required:)` + `CreateElicitationRequest.form(...)` | 多字段表单 ✓ |
+| `agent.createElicitation(req, timeout:)` → `Result` | 反向请求 ✓ |
+
+需要新写的两处：
+
+1. **答复提取**：现有 `elicitationAnswerOf` 只认单字段 `answer`（且只处理字符串）✗，
+   要改成按 schema 逐字段取（string/number/boolean/enum/array → values/selected ✓）
+2. **枚举属性的构造入口**：`ElicitationPropertySchema` 的静态构造器只看到
+   string/number/integer/boolean/array；单选要落成 enum，需要确认是直接给属性对象的
+   `enum` 字段赋值，还是有静态构造器（勘察一次即可）
+
+映射与降级（照 §九 的定稿）：
+
+- `Approval` → 建议走 `session/request_permission`（ACP 原生机制，与现有 `toolApprovalFn` 桥合并），
+  不走 elicitation；三选项 allow_once/allow_always/deny
+- `Choice(multi=false)` → 单 enum 字段；`Form` → 一字段一 property
+- `Choice(multi=true)` → **降级为 N 个 boolean**
+- 能力未声明 / 传输失败 / 用户拒绝 → 分别返回 `Cancelled`（并留痕），**不再折叠成空串**
+- 接线：`SessionLoop` 增可选 `askFn`（转发给 runtime 的 `ask:`），bridge 传
+  `{ req => this.answerUserRequest(acpId, req) }`
