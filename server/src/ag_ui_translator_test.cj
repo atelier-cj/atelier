@@ -4,6 +4,7 @@ import std.collection.*
 import jsonvalue.*
 import atelier.message.*
 import atelier.agent.*
+import atelier.tool.ExternalRequest
 
 // 翻译器：AgentEvent → AG-UI 事件序列。这里锁的是「生命周期必须自洽」——
 // 开了的消息要关、工具三次事件要成组、RUN_ERROR 之后不能再来 RUN_FINISHED，
@@ -320,4 +321,42 @@ func translator_clientToolRequestCarriesCallIdentity() {
         case e: CustomEvent => @Expect(e.name, "client_tool_request")
         case _ => @Fail("应当是 CUSTOM")
     }
+}
+
+// 挂起：RUN_FINISHED 必须换成 interrupt 结果，且 interrupts 交给 handler 去登记
+@Test
+func translator_suspendEndsWithInterruptOutcome() {
+    let tr = newTranslator()
+    tr.translate(TurnStartEvent())
+    let msg = asstWithTool("c1", "get_weather", JsonValue.Map(HashMap<String, JsonValue>()))
+    tr.translate(MessageStartEvent(msg))
+    tr.translate(MessageEndEvent(msg))
+    tr.translate(ToolExecutionStartEvent("c1", "get_weather"))
+    let reqs = ArrayList<ExternalRequest>()
+    reqs.add(ExternalRequest("int-c1", "tool_call", "客户端需执行 get_weather", toolCallId: "c1"))
+    tr.translate(TurnEndEvent(asstWithTool("c1", "get_weather",
+        JsonValue.Map(HashMap<String, JsonValue>())), ArrayList<ToolResultMessage>()))
+    @Expect(kinds(tr.translate(SuspendEvent(reqs))), "")
+    let out = tr.translate(AgentEndEvent(ArrayList<Message>()))
+    @Expect(kinds(out), "RUN_FINISHED")
+    match (out[0]) {
+        case e: RunFinishedEvent =>
+            @Expect(e.interrupts.size, 1)
+            @Expect(e.interrupts[0].id, "int-c1")
+            @Expect(e.interrupts[0].toolCallId, "c1")
+        case _ => @Fail("应当是 RUN_FINISHED")
+    }
+    @Expect(tr.pendingInterrupts().size, 1)
+}
+
+// 没挂起时仍是 success 结果（旧客户端行为不变）
+@Test
+func translator_noSuspendKeepsSuccessOutcome() {
+    let tr = newTranslator()
+    let out = tr.translate(AgentEndEvent(ArrayList<Message>()))
+    match (out[0]) {
+        case e: RunFinishedEvent => @Expect(e.interrupts.size, 0)
+        case _ => @Fail("应当是 RUN_FINISHED")
+    }
+    @Expect(tr.pendingInterrupts().size, 0)
 }

@@ -113,3 +113,25 @@ func dto_inputMessageUserAnswerDefaultsNoError() {
     @Expect(dto.isError, false)
     @Expect(dto.toolCallId, "")
 }
+
+// resume[]：中断-恢复的回应载荷
+@Test
+func dto_resumeParsed() {
+    let json = """
+{"threadId":"t","runId":"r","resume":[
+  {"interruptId":"int-c1","status":"resolved","payload":{"weather":"晴"}},
+  {"interruptId":"int-c2","status":"cancelled"}]}
+"""
+    let input = fromJsonString<RunAgentInput>(json)
+    @Expect(input.resume.size, 2)
+    @Expect(input.resume[0].interruptId, "int-c1")
+    @Expect(input.resume[0].isCancelled(), false)
+    @Expect(input.resume[1].isCancelled(), true)
+    @Expect(input.resume[1].payload.isNone(), true)
+}
+
+@Test
+func dto_resumeAbsentIsEmpty() {
+    let input = fromJsonString<RunAgentInput>("{\"threadId\":\"t\",\"runId\":\"r\"}")
+    @Expect(input.resume.size, 0)
+}

@@ -85,13 +85,8 @@ class ClientToolShim <: Tool {
     private let toolName: String
     private let desc: String
     private let toolSchema: JsonValue
-    private let runId: String
-    private let channels: AgUiRunChannels
-
-    public init(toolName: String, desc: String, schema: JsonValue, runId: String,
-        channels: AgUiRunChannels) {
+    public init(toolName: String, desc: String, schema: JsonValue) {
         this.toolName = toolName; this.desc = desc; this.toolSchema = schema
-        this.runId = runId; this.channels = channels
     }
 
     public func name(): String { this.toolName }
@@ -102,16 +97,14 @@ class ClientToolShim <: Tool {
     public func execute(ctx: ToolContext, args: JsonValue): ToolResult {
         let callId = ctx.toolCallId
         if (callId == "") {
-            // 拿不到调用 id 就没法把结果对上，只能明确失败，不能假装成功
+            // 拿不到调用 id 就无法把之后的结果对上，只能明确失败
             return ToolResult("client tool ${this.toolName} invoked without a tool call id", None, true, false)
         }
-        // 请求事件由翻译器按固定顺序发出（见 AgUiTranslator），这里只等结果：
-        // 工具线程自己写 SSE 会与消费循环抢顺序，前端可能先看到请求、后看到 TOOL_CALL_START
-        let key = "tool:" + callId
-        let queue = this.channels.register(key)
-        let answer = queue.remove()
-        this.channels.discard(key)
-        ToolResult(answer.result, None, answer.isError, false)
+        // 交给外部执行：本次 run 挂起（历史停在 assistant(tool_calls)），
+        // 客户端执行完在下一次 run 的 resume 里带回结果（AG-UI 的中断-恢复模型）
+        ToolResult("", None, false, false,
+            external: Some(ExternalRequest("int-" + callId, "tool_call",
+                "客户端需执行工具 ${this.toolName}", toolCallId: callId)))
     }
 }
 
@@ -136,6 +129,8 @@ public class AgUiHandler {
     private let providerRegistry: ProviderRegistry
     private let mcpManager: McpManager
     private let runs = ConcurrentHashMap<String, AgUiRunChannels>()
+    // threadId → 未决中断（内存态：单进程服务；跨重启无法关联时按协议回 RunError）
+    private let openInterrupts = ConcurrentHashMap<String, ArrayList<AgUiInterrupt>>()
 
     public init(agentRegistry: AgentRegistry, toolRegistry: ToolRegistry,
         sessionStore: SessionStore, trustManager: TrustManager,
@@ -154,6 +149,23 @@ public class AgUiHandler {
         let h = this
         distributor.register("/ag-ui/agent", { ctx => h.handleAgent(ctx) })
         distributor.register("/ag-ui/input", { ctx => h.handleInput(ctx) })
+    }
+
+    // 不合规输入（缺 resume / resume 对不上）也要走事件流：协议规定以 RUN_ERROR 回应，
+    // 而不是 HTTP 4xx（客户端只解析流里的错误）
+    private func emitRunErrorOnly(ctx: HttpContext, threadId: String, runId: String,
+        message: String, code: String): Unit {
+        let b = ctx.responseBuilder
+        b.status(UInt16(200))
+        b.header("content-type", "text/event-stream")
+        b.header("cache-control", "no-cache")
+        b.header("connection", "keep-alive")
+        // 与正常路径一致：SSE 必须声明分块，否则写出直接报
+        // HttpException: Either Content-Length or chunked must be set.（客户端只会看到空流）
+        b.header("transfer-encoding", "chunked")
+        let sink = AgUiSseSink(HttpResponseWriter(ctx))
+        sink.send(RunStartedEvent(threadId, runId))
+        sink.send(RunErrorEvent(message, code))
     }
 
     public func handleInput(ctx: HttpContext): Unit {
@@ -205,11 +217,50 @@ public class AgUiHandler {
 
         // 会话不存在时 load 会抛（新 thread 的首次请求就是这条路），按"无历史"处理：
         // 运行时会创建该会话，threadId 因此成为跨 run 的会话 id
-        var hasHistory = false
-        try { hasHistory = this.sessionStore.load(threadId).size > 0 } catch (_) { hasHistory = false }
-        let msgs = agUiMessagesToAtelier(input.messages, hasHistory)
-        if (msgs.size == 0) {
-            jsonResponse(ctx, 400, toJsonString(ErrorResponse("no user message in RunAgentInput"))); return
+        var oldLoaded = ArrayList<Message>()
+        try { oldLoaded = this.sessionStore.load(threadId) } catch (_) { oldLoaded = ArrayList<Message>() }
+        let hasHistory = oldLoaded.size > 0
+
+        // 中断-恢复：有未决中断时必须带 resume，且必须覆盖全部（协议规则 3/4）
+        let open = match (this.openInterrupts.get(threadId)) {
+            case Some(list) => list
+            case None => ArrayList<AgUiInterrupt>()
+        }
+        var msgs = ArrayList<Message>()
+        var resumeResults = ArrayList<ToolResultMessage>()
+        if (open.size == 0 && input.resume.size > 0) {
+            this.emitRunErrorOnly(ctx, threadId, runId,
+                "resume provided but this thread has no unresolved interrupt", "invalid_resume")
+            return
+        }
+        if (open.size > 0) {
+            if (input.resume.size == 0) {
+                this.emitRunErrorOnly(ctx, threadId, runId,
+                    "thread has ${open.size} unresolved interrupt(s); RunAgentInput.resume is required",
+                    "interrupt_required")
+                return
+            }
+            let (resumeMsgs, err) = agUiResumeToMessages(oldLoaded, open, input.resume)
+            match (err) {
+                case Some(msg) =>
+                    this.emitRunErrorOnly(ctx, threadId, runId, msg, "invalid_resume")
+                    return
+                case None => ()
+            }
+            msgs = ArrayList<Message>(oldLoaded)
+            for (m in resumeMsgs) {
+                msgs.add(m)
+                match (m) {
+                    case tr: ToolResultMessage => resumeResults.add(tr)
+                    case _ => ()
+                }
+            }
+            this.openInterrupts.remove(threadId)
+        } else {
+            msgs = agUiMessagesToAtelier(input.messages, hasHistory)
+            if (msgs.size == 0) {
+                jsonResponse(ctx, 400, toJsonString(ErrorResponse("no user message in RunAgentInput"))); return
+            }
         }
 
         let b = ctx.responseBuilder
@@ -224,7 +275,7 @@ public class AgUiHandler {
         this.runs.add(runId, channels)
 
         let provider = this.resolveProvider()
-        let runtime = AgentRuntime(cfg, provider, this.clientToolRegistry(input.tools, runId, channels),
+        let runtime = AgentRuntime(cfg, provider, this.clientToolRegistry(input.tools),
             this.sessionStore, this.trustManager, this.skillRegistry, this.agentRegistry,
             this.providerRegistry, ArrayList<Hook>(), { q =>
                 // 等外部输入：先告诉前端，再阻塞等 /ag-ui/input
@@ -243,14 +294,34 @@ public class AgUiHandler {
             sessionEnvWorkDir(), input.state)
         for (ev in translator.start(snapshot)) { sink.send(ev) }
 
+        // 恢复带来的结果按协议补发 TOOL_CALL_RESULT（绑定原先的 toolCallId），
+        // 客户端的时间线才完整：它不必猜"我提交的结果有没有被采用"
+        for (tr in resumeResults) {
+            sink.send(ToolCallResultEvent(tr.toolCallId + "-result", tr.toolCallId,
+                toText(tr.content), "tool"))
+        }
+
         let eventStream = runtime.chatWithSessionId(threadId, msgs, SessionEnvironment())
-        streamAgUiEvents(eventStream, translator, sink)
+        streamAgUiEvents(eventStream, translator, sink, oldLoaded)
         this.runs.remove(runId)
+
+        // 挂起 → 登记未决中断（下一次 run 的 resume 要覆盖它们）
+        let pending = translator.pendingInterrupts()
+        if (pending.size > 0) { this.openInterrupts.add(threadId, pending) }
+
+        // 落库：运行时不落库，由宿主统一追加（挂起那轮同样要落 —— 历史停在
+        // assistant(tool_calls) 才是恢复的锚点）。取回全量消息失败时退回追加已知输入。
+        let all = try { eventStream.result() } catch (_) { msgs }
+        match (persistAppend(this.sessionStore, threadId, oldLoaded, all)) {
+            case Some(err) =>
+                let log = getGlobalLogger([("name", "AgUi")])
+                log.warn("session persist failed: ${err}", Array<Attr>())
+            case None => ()
+        }
     }
 
     // 客户端工具进 run 作用域注册表：base 工具 ∪ 本次客户端工具（run 结束即弃，不污染全局）
-    private func clientToolRegistry(tools: ArrayList<AgUiToolDTO>, runId: String,
-        channels: AgUiRunChannels): ToolRegistry {
+    private func clientToolRegistry(tools: ArrayList<AgUiToolDTO>): ToolRegistry {
         let reg = ToolRegistry()
         for (t in this.toolRegistry.list()) { reg.register(t) }
         for (t in tools) {
@@ -260,7 +331,7 @@ public class AgUiHandler {
             }
             // 同名工具以客户端为准：前端声明的工具语义由前端实现
             if (reg.has(t.name)) { reg.remove(t.name) }
-            reg.register(ClientToolShim(t.name, t.description, schema, runId, channels))
+            reg.register(ClientToolShim(t.name, t.description, schema))
         }
         reg
     }
@@ -297,12 +368,30 @@ public class AgUiHandler {
 }
 
 // 消费循环：翻译 + 写出，直到 AgentEnd / provider 失败 / 客户端断开
-func streamAgUiEvents(eventStream: LoopEventStream, translator: AgUiTranslator, sink: AgUiSseSink): Unit {
+func streamAgUiEvents(eventStream: LoopEventStream, translator: AgUiTranslator, sink: AgUiSseSink,
+    oldLoaded: ArrayList<Message>): ArrayList<Message> {
     let log = getGlobalLogger([("name", "AgUi")])
     var done = false
+    // 挂起那一刻的助手消息（TurnEnd 先于 Suspend 到达）：快照要用它补全"停在 assistant(tool_calls)"
+    var pendingAssistant: Option<AssistantMessage> = None
+    var suspended = false
+    var all = oldLoaded
     while (!done) {
         match (eventStream.receive(30 * Duration.second)) {
             case Some(ev) =>
+                match (ev) {
+                    case te: TurnEndEvent => pendingAssistant = Some(te.message)
+                    case se: SuspendEvent =>
+                        // 协议要求：恢复所需状态必须在 RUN_FINISHED 之前发出
+                        suspended = true
+                        let snapshotMsgs = ArrayList<Message>(oldLoaded)
+                        match (pendingAssistant) {
+                            case Some(am) => snapshotMsgs.add(am)
+                            case None => ()
+                        }
+                        sink.send(MessagesSnapshotEvent(agUiOutMessages(snapshotMsgs)))
+                    case _ => ()
+                }
                 for (out in translator.translate(ev)) { sink.send(out) }
                 match (ev) {
                     case _: AgentEndEvent => done = true
@@ -317,7 +406,11 @@ func streamAgUiEvents(eventStream: LoopEventStream, translator: AgUiTranslator, 
             case None => done = true
         }
     }
-    log.info("ag-ui run finished", Array<Attr>())
+    match (suspended) {
+        case true => log.info("ag-ui run suspended", Array<Attr>())
+        case false => log.info("ag-ui run finished", Array<Attr>())
+    }
+    all
 }
 
 // 输入通道的键：askUser 的回答与客户端工具结果分键，互不干扰
@@ -415,6 +508,112 @@ func parseArgs(raw: String): JsonValue {
         // 参数不是合法 JSON 时保留原文，工具自己能给出更好的报错
         JsonValue.String(raw)
     }
+}
+
+// ── 中断-恢复的消息换算 ──────────────────────────────────────────────────────
+
+// 会话消息 → AG-UI 出站消息（MESSAGES_SNAPSHOT 用）。
+// 内部标记（压缩/归档）不外发：它们是上下文管理的实现细节，客户端无法理解也无从渲染。
+func agUiOutMessages(msgs: ArrayList<Message>): ArrayList<AgUiOutMessage> {
+    let out = ArrayList<AgUiOutMessage>()
+    var idx: Int64 = 0
+    for (m in msgs) {
+        idx++
+        let id = "m" + idx.toString()
+        match (m) {
+            case um: UserMessage =>
+                out.add(AgUiOutMessage(id, "user", toText(um.content), "", ArrayList<AgUiToolCallDTO>()))
+            case am: AssistantMessage =>
+                let calls = ArrayList<AgUiToolCallDTO>()
+                for (tc in am.toolCalls()) {
+                    calls.add(AgUiToolCallDTO(tc.id, AgUiFunctionDTO(tc.name, toJsonString(tc.args))))
+                }
+                out.add(AgUiOutMessage(id, "assistant", toText(am.content), "", calls))
+            case tm: ToolResultMessage =>
+                out.add(AgUiOutMessage(id, "tool", toText(tm.content), tm.toolCallId,
+                    ArrayList<AgUiToolCallDTO>()))
+            case _ => ()
+        }
+    }
+    out
+}
+
+// 载荷 → 结果文本：字符串载荷原样用（客户端最常发字符串），其它按 JSON 序列化
+func payloadText(payload: Option<JsonValue>): String {
+    match (payload) {
+        case Some(JsonValue.String(s)) => s
+        case Some(v) => toJsonString(v)
+        case None => ""
+    }
+}
+
+// 载荷里明确拒绝（{approved:false}）＝ 不执行该调用，但仍要给它一条结果消息保持配对
+func payloadDenied(payload: Option<JsonValue>): Bool {
+    match (payload) {
+        case Some(JsonValue.Map(m)) =>
+            match (m.get("approved")) {
+                case Some(JsonValue.Boolean(b)) => !b
+                case _ => false
+            }
+        case _ => false
+    }
+}
+
+// 历史里找回某个工具调用的名字（恢复时只拿得到 toolCallId）
+func toolNameOf(msgs: ArrayList<Message>, toolCallId: String): String {
+    for (m in msgs) {
+        match (m) {
+            case am: AssistantMessage =>
+                for (tc in am.toolCalls()) {
+                    if (tc.id == toolCallId) { return tc.name }
+                }
+            case _ => ()
+        }
+    }
+    ""
+}
+
+// resume[] → 本次 run 的输入消息。返回 (消息, 错误)：错误非空即回 RUN_ERROR（协议规则 3/6/7）。
+// 每个未决中断都必须被覆盖（部分恢复不支持）；引用未知中断 id 同样报错。
+func agUiResumeToMessages(history: ArrayList<Message>, open: ArrayList<AgUiInterrupt>,
+    resume: ArrayList<AgUiResumeDTO>): (ArrayList<Message>, Option<String>) {
+    let byId = HashMap<String, AgUiResumeDTO>()
+    for (r in resume) { byId[r.interruptId] = r }
+    for (r in resume) {
+        var known = false
+        for (i in open) {
+            if (i.id == r.interruptId) { known = true }
+        }
+        if (!known) {
+            return (ArrayList<Message>(), Some("cannot correlate interruptId: ${r.interruptId}"))
+        }
+    }
+    let msgs = ArrayList<Message>()
+    for (i in open) {
+        let entry = match (byId.get(i.id)) {
+            case Some(r) => r
+            case None => return (ArrayList<Message>(),
+                Some("resume must address every open interrupt; missing: ${i.id}"))
+        }
+        if (i.reason == "tool_call" && i.toolCallId != "") {
+            let cancelled = entry.isCancelled()
+            let denied = payloadDenied(entry.payload)
+            let text = if (cancelled) {
+                "[cancelled by user]"
+            } else if (denied) {
+                "[denied by user]"
+            } else {
+                payloadText(entry.payload)
+            }
+            msgs.add(ToolResultMessage(i.toolCallId, toolNameOf(history, i.toolCallId),
+                ContentList.ofText(text), cancelled || denied, nowMillis()))
+        } else {
+            // 非工具类中断（要一段输入）：回应的载荷当作新一轮用户输入
+            let text = payloadText(entry.payload)
+            if (text != "") { msgs.add(UserMessage(ContentList.ofText(text), nowMillis())) }
+        }
+    }
+    (msgs, None)
 }
 
 func nowMillis(): Int64 {

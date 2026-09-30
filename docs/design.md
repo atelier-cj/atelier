@@ -516,8 +516,36 @@ curl -X POST http://localhost:8080/agent/run \
 | 思维链 | `REASONING_START` → `REASONING_MESSAGE_START/CONTENT/END` → `REASONING_END`（独立消息 id） |
 | 工具调用 | `TOOL_CALL_START` + `TOOL_CALL_ARGS`（全量参数）+ `TOOL_CALL_END`；执行完 `TOOL_CALL_RESULT` |
 | 工具进度 / 上下文压缩 | `CUSTOM`（`tool_progress` / `compaction`） |
-| 提问、前端工具 | `CUSTOM`（`user_input_request` / `client_tool_request`）→ 经 `/ag-ui/input` 回传 |
+| 提问（`askUser`） | `CUSTOM`（`user_input_request`）→ 经 `/ag-ui/input` 回传（同 run 内等待） |
+| 前端工具 | `TOOL_CALL_*` → `CUSTOM`（`client_tool_request`）→ **挂起** |
 | 正常结束 / provider 失败 | `RUN_FINISHED`（`outcome=success` + `result.stopReason/turns`）/ `RUN_ERROR` |
+| 挂起（等外部结果） | `MESSAGES_SNAPSHOT`（恢复所需状态）→ `RUN_FINISHED`（`outcome.type="interrupt"`） |
+
+##### 中断-恢复（AG-UI 1.0）
+
+前端工具**不阻塞**：运行时挂起本次 run，历史停在 `assistant(tool_calls)`，
+`RUN_FINISHED.outcome` 变成 `{type:"interrupt", interrupts:[{id, reason:"tool_call", toolCallId, message}]}`
+（中断 id 形如 `int-<toolCallId>`，跨 run 关联）。
+
+客户端执行完工具后，在**同 threadId** 起新 run，带
+`resume: [{interruptId, status:"resolved"|"cancelled", payload}]`：
+
+- 服务端校验 resume 覆盖**全部**未决中断（部分恢复不支持）、interruptId 必须能关联，
+  不合规以 `RUN_ERROR` 回应（协议规则 2/3/4）
+- payload 即工具结果（`{approved:false}` 视为拒绝，结果记 `[denied by user]`）；
+  `cancelled` 记 `[cancelled by user]` —— 两种情况都仍写一条工具结果消息，保持配对
+- 本 run **补发** `TOOL_CALL_RESULT`（绑定原 `toolCallId`），随后继续跑到答复
+
+未决中断登记在服务端内存（单进程服务）；跨重启无法关联时按协议回 `RUN_ERROR`。
+`askUser`（信任闸门等）仍是"同 run 内等待"：它由运行时回调发起、不产生工具调用，
+要挂起需要核心为"等外部输入"发事件，留作后续。
+
+##### 会话持久化与工具调用
+
+跨 run 恢复的前提是历史里 `assistant(tool_calls)` 还在 —— 会话存储必须保留工具调用块
+（`serialize.cj` 的 `toolCalls`/`stopReason`）。只存文本的话，重载后的历史里
+`assistant(tool_calls)` 变成纯文本，紧随其后的 tool 结果在 provider 看来就是"孤儿"，
+下一次请求直接判 400。
 
 语义要点：
 
