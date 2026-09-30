@@ -81,6 +81,8 @@ public open class AgentRuntime {
     private let toolExecutor: ToolExecutor
     private let hooks: ArrayList<Hook>
     private let askUser: AskUserFn
+    // 结构化提问（None = 走字符串适配器）；宿主提供它才能返回 Pending 让 run 挂起
+    private let askFn: Option<AskFn>
     // 本次 run 的恢复答复（chatWithEnv 开跑时设置）。运行时不跨 run 复用：
     // 现有宿主（CLI 每回合、ACP 每会话、server 每请求）都是新建实例，子 agent 亦各自持有一份。
     // PTC 子调用授权在深层调用栈里，拿不到开跑时的局部变量，故用瞬态字段传递。
@@ -108,6 +110,7 @@ public open class AgentRuntime {
         agentRegistry: AgentRegistry, providerRegistry: ProviderRegistry,
         hooks: ArrayList<Hook>, askUser: AskUserFn,
         sessionEnv: SessionEnvironment, mcpManager: McpManager,
+        ask!: Option<AskFn> = None,
         promptContributors!: ArrayList<PromptSegmentContributor> = ArrayList(),
         middlewares!: ArrayList<ProviderMiddleware> = ArrayList(),
         eventBus!: ?EventBus = None) {
@@ -122,6 +125,7 @@ public open class AgentRuntime {
             budget: toolBudgetPolicyOf(config))
         this.hooks = hooks
         this.askUser = askUser
+        this.askFn = ask
         this.modelRegistry = ModelContextRegistry()
         this.sessionEnv = sessionEnv
         this.mcpManager = mcpManager
@@ -138,10 +142,11 @@ public open class AgentRuntime {
         toolRegistry: ToolRegistry, sessionStore: SessionStore,
         trustManager: TrustManager, skillRegistry: SkillRegistry,
         agentRegistry: AgentRegistry, providerRegistry: ProviderRegistry,
-        hooks: ArrayList<Hook>, askUser: AskUserFn, mcpManager: McpManager) {
+        hooks: ArrayList<Hook>, askUser: AskUserFn, mcpManager: McpManager,
+        ask!: Option<AskFn> = None) {
         this(config, provider, toolRegistry, sessionStore, trustManager,
             skillRegistry, agentRegistry, providerRegistry, hooks, askUser,
-            SessionEnvironment(), mcpManager)
+            SessionEnvironment(), mcpManager, ask: ask)
     }
 
     // 9 参：config..providerRegistry + mcpManager
@@ -204,6 +209,11 @@ public open class AgentRuntime {
             case Some(a) => return a
             case None => ()
         }
+        // 结构化实现优先：只有它能表达"挂起"（Pending）与选择/表单
+        match (this.askFn) {
+            case Some(f) => return f(req)
+            case None => ()
+        }
         match (this.toolApprovalFn) {
             case Some(f) =>
                 let raw = f(call, ctx.workDir)
@@ -224,7 +234,7 @@ public open class AgentRuntime {
         let stream = EventStream<AgentEvent, ArrayList<Message>>()
         let se = sessionEnv
         let workDir = resolveWorkDir(se)
-        let ctx = ToolContext(workDir, this.askUser, se.context, sessionId)
+        let ctx = ToolContext(workDir, this.askUser, se.context, sessionId, ask: this.askFn)
         // 恢复：宿主随消息带回的答复（重放同一回合时要先查它，命中就不再问宿主）
         let resumedAnswers = collectResumedAnswers(messages)
         this.resumedAnswersForSub = resumedAnswers

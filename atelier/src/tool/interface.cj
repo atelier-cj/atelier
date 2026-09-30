@@ -21,6 +21,10 @@ public enum ToolExecutionMode {
  */
 public type AskUserFn = (String) -> String
 
+// 结构化提问（可选升级）：宿主实现它就能回答"审批/选择/表单"，并可用 Pending 表示挂起。
+// 未提供时退回下面的字符串问答，行为与改造前一致 —— 升级是逐宿主进行的。
+public type AskFn = (UserRequest) -> UserAnswer
+
 /**
  * 结构化提问入口（审批 / 选择 / 表单）。
  *
@@ -31,6 +35,11 @@ public type AskUserFn = (String) -> String
  */
 extend ToolContext {
     public func ask(req: UserRequest): UserAnswer {
+        // 宿主提供了结构化实现就用它（它能返回 Pending → 运行时据此挂起）
+        match (this.askFn) {
+            case Some(f) => return f(req)
+            case None => ()
+        }
         let raw = this.askUser(req.message)
         match (req.kind) {
             case UserRequestKind.Approval =>
@@ -67,6 +76,8 @@ public struct ToolContext {
     // 工具要把自己的执行与协议/UI 上的同一次调用对上（进度上报、等外部执行结果）时用得到它：
     // 一次调用一份上下文，而不是一个会话共用一份。
     public let toolCallId: String
+    // 结构化提问实现（None = 走字符串问答适配器）
+    public let askFn: Option<AskFn>
 
     public init(workDir: String) {
         this.workDir = workDir
@@ -74,6 +85,7 @@ public struct ToolContext {
         this.env = HashMap()
         this.sessionId = ""
         this.toolCallId = ""
+        this.askFn = None
     }
 
     public init(workDir: String, askUser: AskUserFn) {
@@ -82,6 +94,7 @@ public struct ToolContext {
         this.env = HashMap()
         this.sessionId = ""
         this.toolCallId = ""
+        this.askFn = None
     }
 
     public init(workDir: String, askUser: AskUserFn, env: HashMap<String, String>) {
@@ -90,15 +103,17 @@ public struct ToolContext {
         this.env = env
         this.sessionId = ""
         this.toolCallId = ""
+        this.askFn = None
     }
 
     public init(workDir: String, askUser: AskUserFn, env: HashMap<String, String>, sessionId: String,
-        toolCallId!: String = "") {
+        toolCallId!: String = "", ask!: Option<AskFn> = None) {
         this.workDir = workDir
         this.askUser = askUser
         this.env = env
         this.sessionId = sessionId
         this.toolCallId = toolCallId
+        this.askFn = ask
     }
 }
 
