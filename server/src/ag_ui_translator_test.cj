@@ -156,6 +156,34 @@ func translator_toolCallTriadCarriesRememberedArgs() {
 }
 
 @Test
+func translator_clientToolRequestFollowsTriadInOrder() {
+    // 前端工具：TOOL_CALL_* 之后**紧接着**请前端执行（顺序确定，不能与消费循环抢）
+    let clientTools = ArrayList<String>(["get_weather"])
+    let tr = AgUiTranslator("t1", "r1", clientTools: clientTools)
+    let args = JsonValue.Map(HashMap<String, JsonValue>([("city", JsonValue.String("北京"))]))
+    let msg = asstWithTool("c1", "get_weather", args)
+    tr.translate(MessageStartEvent(msg))
+    tr.translate(MessageEndEvent(msg))
+    let out = tr.translate(ToolExecutionStartEvent("c1", "get_weather"))
+    @Expect(kinds(out), "TOOL_CALL_START,TOOL_CALL_ARGS,TOOL_CALL_END,CUSTOM")
+    match (out[3]) {
+        case e: CustomEvent => @Expect(e.name, "client_tool_request")
+        case _ => @Fail("末条应当是 client_tool_request")
+    }
+}
+
+@Test
+func translator_serverToolDoesNotAskClient() {
+    // 服务端自己实现的工具不该请前端执行
+    let tr = AgUiTranslator("t1", "r1", clientTools: ArrayList<String>(["get_weather"]))
+    let msg = asstWithTool("c1", "bash", JsonValue.Map(HashMap<String, JsonValue>()))
+    tr.translate(MessageStartEvent(msg))
+    tr.translate(MessageEndEvent(msg))
+    @Expect(kinds(tr.translate(ToolExecutionStartEvent("c1", "bash"))),
+        "TOOL_CALL_START,TOOL_CALL_ARGS,TOOL_CALL_END")
+}
+
+@Test
 func translator_toolCallWithoutRememberedArgsFallsBackToEmptyObject() {
     let tr = newTranslator()
     let out = tr.translate(ToolExecutionStartEvent("c9", "bash"))

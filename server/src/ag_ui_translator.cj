@@ -108,6 +108,9 @@ public class AgUiCompactionPayload <: JsonSerializable {
 public class AgUiTranslator {
     private let threadId: String
     private let runId: String
+    // 客户端工具（前端实现）：它们的调用要在 TOOL_CALL_* 之后按确定顺序补一条
+    // client_tool_request，让前端去执行 —— 由工具线程自己发会与消费循环抢顺序
+    private let clientTools: ArrayList<String>
     private var turn: Int64 = 0
     private var stepOpen: Bool = false
     private var msgSeq: Int64 = 0
@@ -118,8 +121,8 @@ public class AgUiTranslator {
     private var stopReason: String = "end_turn"
     private var finished: Bool = false
 
-    public init(threadId: String, runId: String) {
-        this.threadId = threadId; this.runId = runId
+    public init(threadId: String, runId: String, clientTools!: ArrayList<String> = ArrayList()) {
+        this.threadId = threadId; this.runId = runId; this.clientTools = clientTools
     }
 
     public func turns(): Int64 { this.turn }
@@ -194,6 +197,10 @@ public class AgUiTranslator {
                 out.add(ToolCallStartEvent(e.toolCallId, e.toolName, this.lastAssistantId))
                 out.add(ToolCallArgsEvent(e.toolCallId, args))
                 out.add(ToolCallEndEvent(e.toolCallId))
+                // 前端工具：调用信息齐了再请前端执行（顺序确定，不跟消费循环抢）
+                if (this.clientTools.contains(e.toolName)) {
+                    out.add(this.clientToolRequest(e.toolCallId, e.toolName, args))
+                }
             case e: ToolExecutionUpdateEvent =>
                 out.add(CustomEvent("tool_progress",
                     JsonValue.fromObject(AgUiToolProgressPayload(e.toolCallId, e.progress))))

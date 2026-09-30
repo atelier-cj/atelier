@@ -87,12 +87,11 @@ class ClientToolShim <: Tool {
     private let toolSchema: JsonValue
     private let runId: String
     private let channels: AgUiRunChannels
-    private let sink: AgUiSseSink
 
     public init(toolName: String, desc: String, schema: JsonValue, runId: String,
-        channels: AgUiRunChannels, sink: AgUiSseSink) {
+        channels: AgUiRunChannels) {
         this.toolName = toolName; this.desc = desc; this.toolSchema = schema
-        this.runId = runId; this.channels = channels; this.sink = sink
+        this.runId = runId; this.channels = channels
     }
 
     public func name(): String { this.toolName }
@@ -106,10 +105,10 @@ class ClientToolShim <: Tool {
             // 拿不到调用 id 就没法把结果对上，只能明确失败，不能假装成功
             return ToolResult("client tool ${this.toolName} invoked without a tool call id", None, true, false)
         }
+        // 请求事件由翻译器按固定顺序发出（见 AgUiTranslator），这里只等结果：
+        // 工具线程自己写 SSE 会与消费循环抢顺序，前端可能先看到请求、后看到 TOOL_CALL_START
         let key = "tool:" + callId
         let queue = this.channels.register(key)
-        this.sink.send(CustomEvent("client_tool_request",
-            JsonValue.fromObject(AgUiClientToolPayload(callId, this.toolName, toJsonString(args)))))
         let answer = queue.remove()
         this.channels.discard(key)
         ToolResult(answer.result, None, answer.isError, false)
@@ -225,7 +224,7 @@ public class AgUiHandler {
         this.runs.add(runId, channels)
 
         let provider = this.resolveProvider()
-        let runtime = AgentRuntime(cfg, provider, this.clientToolRegistry(input.tools, runId, channels, sink),
+        let runtime = AgentRuntime(cfg, provider, this.clientToolRegistry(input.tools, runId, channels),
             this.sessionStore, this.trustManager, this.skillRegistry, this.agentRegistry,
             this.providerRegistry, ArrayList<Hook>(), { q =>
                 // 等外部输入：先告诉前端，再阻塞等 /ag-ui/input
@@ -239,7 +238,7 @@ public class AgUiHandler {
             }, SessionEnvironment(), this.mcpManager,
             promptContributors: this.contributorsFor(input))
 
-        let translator = AgUiTranslator(threadId, runId)
+        let translator = AgUiTranslator(threadId, runId, clientTools: clientToolNames)
         let snapshot = AgUiStateSnapshot(agentName, cfg.model, threadId,
             sessionEnvWorkDir(), input.state)
         for (ev in translator.start(snapshot)) { sink.send(ev) }
@@ -251,7 +250,7 @@ public class AgUiHandler {
 
     // 客户端工具进 run 作用域注册表：base 工具 ∪ 本次客户端工具（run 结束即弃，不污染全局）
     private func clientToolRegistry(tools: ArrayList<AgUiToolDTO>, runId: String,
-        channels: AgUiRunChannels, sink: AgUiSseSink): ToolRegistry {
+        channels: AgUiRunChannels): ToolRegistry {
         let reg = ToolRegistry()
         for (t in this.toolRegistry.list()) { reg.register(t) }
         for (t in tools) {
@@ -261,7 +260,7 @@ public class AgUiHandler {
             }
             // 同名工具以客户端为准：前端声明的工具语义由前端实现
             if (reg.has(t.name)) { reg.remove(t.name) }
-            reg.register(ClientToolShim(t.name, t.description, schema, runId, channels, sink))
+            reg.register(ClientToolShim(t.name, t.description, schema, runId, channels))
         }
         reg
     }
