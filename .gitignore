@@ -10,3 +10,6 @@ __pycache__/
 
 # cjpm 构建脚本缓存（构建产物，不进版本库）
 build-script-cache/
+
+# 工作区级锁文件（cjpm 构建时生成；成员级 atelier/cjpm.lock 才是被跟踪的那份）
+/cjpm.lock
