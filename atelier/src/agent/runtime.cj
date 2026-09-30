@@ -451,7 +451,8 @@ public open class AgentRuntime {
                             let results = try {
                                 this.toolExecutor.executeBatch(batch)
                             } catch (e: Exception) {
-                                log.error("tool execute error: ${e.message}", Array<Attr>())
+                                // 同 provider 错误：异常 message 常为空（FS/Socket 类），只打 message 等于没打
+                                log.error("tool execute error: ${e.toString()}", Array<Attr>())
                                 // 整批失败也必须**每个 call 各回一条**结果：只回一条（且 id 为空）
                                 // 会让历史里 assistant(tool_calls=N) 对不上结果，下一次请求被 provider 判 400
                                 for (i in 0..toolCalls.size) {
