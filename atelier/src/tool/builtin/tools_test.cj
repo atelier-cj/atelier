@@ -163,7 +163,9 @@ func tool_glob_respectsGitignore() {
 func tool_glob_noIgnoreIncludesAll() {
     let ctx = ToolContext(".")
     let args = HashMap<String, JsonValue>()
-    args.add("pattern", JsonValue.String("*"))
+    // 递归要用 `**/*`：`*` 按 glob 语义只匹配顶层（本用例要验的是 noIgnore 绕过 gitignore，
+    // 原先写 `*` 其实依赖了"`*` 会递归"这个错误行为）
+    args.add("pattern", JsonValue.String("**/*"))
     args.add("noIgnore", JsonValue.String("true"))
     let result = GlobTool().execute(ctx, JsonValue.Map(args))
     @Expect(result.isError, false)

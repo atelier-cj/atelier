@@ -25,10 +25,13 @@ public class WriteFileTool <: Tool {
             case Some(JsonValue.String(s)) => s
             case _ => return ToolResult("Missing required parameter: content", None, true, false)
         }
-        let fullPath: String = if (ctx.workDir == "") { pathRel } else { ctx.workDir + "/" + pathRel }
+        // 绝对路径原样用（拼在 workDir 后面会得到"不存在"的假失败）；相对路径挂 workDir
+        let fullPath = resolveToolPath(ctx.workDir, pathRel)
         if (exists(fullPath)) {
             return ToolResult("File already exists: ${pathRel}. Use edit_file to modify an existing file.", None, true, false)
         }
+        // 父目录不存在就建：模型写新项目时常直接写 src/x.ts，缺父目录会白跑一次调用
+        ensureParentDir(fullPath)
         var path: Path
         try { path = Path(fullPath) } catch (_: Exception) {
             return ToolResult("Invalid file path: ${pathRel}", None, true, false)

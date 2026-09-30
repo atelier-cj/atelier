@@ -37,41 +37,48 @@ public class GlobTool <: Tool {
             case _ => false
         }
 
-        // Split pattern into directory and file pattern parts
-        let parts = pattern.split("/")
-        let filePattern = parts[parts.size - 1]
-
-        // Build the directory prefix from all parts except the last
-        var searchRoot: String
-        if (parts.size > 1) {
-            var dirBuilder = ""
-            for (i in 0..parts.size - 1) {
-                if (i > 0) { dirBuilder = dirBuilder + "/" }
-                dirBuilder = dirBuilder + parts[Int64(i)]
+        // 目录前缀里**没有**通配时，直接把前缀当搜索根（省一次全树扫描）；
+        // 有通配（`src/**/*`、`**/*.mjs`）时必须从 workDir 整树走 ——
+        // 否则会把 `src/**` 当成字面目录去 exists()，得到「搜索路径不存在」这种假失败。
+        let segments = splitSegments(pattern)
+        let root = if (ctx.workDir == "") { "." } else { ctx.workDir }
+        var dirPrefix = ""
+        if (segments.size > 1) {
+            let head = ArrayList<String>()
+            var wildcardInHead = false
+            for (i in 0..segments.size - 1) {
+                let seg = segments[Int64(i)]
+                if (seg.contains("*") || seg.contains("?") || seg.contains("{")) { wildcardInHead = true }
+                head.add(seg)
             }
-            searchRoot = if (ctx.workDir == "") { dirBuilder } else { ctx.workDir + "/" + dirBuilder }
-        } else {
-            searchRoot = if (ctx.workDir == "") { "." } else { ctx.workDir }
+            if (!wildcardInHead) { dirPrefix = String.join(head.toArray(), delimiter: "/") }
         }
-
+        var searchRoot = root
+        if (dirPrefix != "") {
+            searchRoot = resolveToolPath(ctx.workDir, dirPrefix)
+            if (!exists(searchRoot)) {
+                return ToolResult("Search path does not exist: ${dirPrefix}", None, true, false)
+            }
+        }
         if (!exists(searchRoot)) {
             return ToolResult("Search path does not exist: ${searchRoot}", None, true, false)
         }
 
         let ign = if (noIgnore) { GitIgnoreMatcher() } else { GitIgnoreMatcher(searchRoot) }
 
-        // Collect matching files
         let matches = ArrayList<String>()
-        globMatchFiles(searchRoot, filePattern, ign, matches)
+        globMatchFiles(root, searchRoot, pattern, ign, matches)
+        matches.sort()
 
         if (matches.size == 0) {
+            // 没匹配不是错误：模型据此判断"这个路径下确实没有"，报错会让它反复换写法重试
             return ToolResult("No files matching pattern: ${pattern}", None, false, false)
         }
 
         let output = StringBuilder()
         for (i in 0..matches.size) {
             if (i > 0) { output.append("\n") }
-            output.append(matches[i])
+            output.append(matches[Int64(i)])
         }
 
         return ToolResult(output.toString(), None, false, false)
@@ -82,111 +89,29 @@ public class GlobTool <: Tool {
     }
 }
 
-func globMatchFiles(root: String, pattern: String, ign: GitIgnoreMatcher, result: ArrayList<String>): Unit {
-    if (!exists(root)) {
-        return
-    }
-
+// 递归遍历：对每个文件用**整段 pattern** 匹配它的相对路径（支持 `**` 跨层）。
+// searchRoot 只是扫描起点（有字面前缀时用来省扫描），匹配始终以 workDir 为基准。
+func globMatchFiles(root: String, searchRoot: String, pattern: String, ign: GitIgnoreMatcher,
+    result: ArrayList<String>): Unit {
+    if (!exists(searchRoot)) { return }
     let rootPath = try {
-        Path(root)
+        Path(searchRoot)
     } catch (_: Exception) {
         return
     }
-
-    let hasWildcard = pattern.contains("*")
-
     let entries = try {
         Directory.readFrom(rootPath)
     } catch (_: Exception) {
         return
     }
-
     for (entry in entries) {
         let childPath = rootPath.join(entry.name).toString()
-        if (ign.isIgnored(entry.name) || ign.isIgnored(relativePath(root, childPath))) {
-            continue
-        }
+        let rel = relativePath(root, childPath)
+        if (ign.isIgnored(entry.name) || ign.isIgnored(rel)) { continue }
         if (entry.isDirectory()) {
-            globMatchFiles(childPath, pattern, ign, result)
-        } else {
-            if (hasWildcard) {
-                if (simpleGlobMatch(entry.name, pattern)) {
-                    result.add(childPath)
-                }
-            } else {
-                if (entry.name == pattern) {
-                    result.add(childPath)
-                }
-            }
+            globMatchFiles(root, childPath, pattern, ign, result)
+        } else if (globMatchPath(pattern, rel)) {
+            result.add(rel)
         }
     }
-}
-
-func relativePath(base: String, target: String): String {
-    if (target.startsWith(base)) {
-        let r = subStrGit(target, base.size, target.size)
-        if (r.startsWith("/")) { subStrGit(r, 1, r.size) } else { r }
-    } else { target }
-}
-
-func subStrGit(s: String, start: Int64, end: Int64): String {
-    let bytes = s.toArray()
-    if (start < 0 || start >= end || end > Int64(bytes.size)) { return "" }
-    let buf = ArrayList<Byte>()
-    for (i in start..end) { buf.add(bytes[Int64(i)]) }
-    let raw = Array<Byte>(buf.size, repeat: 0)
-    for (i in 0..buf.size) { raw[i] = buf[Int64(i)] }
-    String.fromUtf8(raw)
-}
-
-func simpleGlobMatch(name: String, pattern: String): Bool {
-    let starIdx = pattern.indexOf("*", 0)
-    match (starIdx) {
-        case None =>
-            return name == pattern
-        case Some(pos) =>
-            let prefix = takePrefix(pattern, pos)
-            let suffix = takeSuffix(pattern, pos + 1)
-
-            if (prefix != "" && !name.startsWith(prefix)) {
-                return false
-            }
-
-            if (suffix != "" && !name.endsWith(suffix)) {
-                return false
-            }
-
-            if (prefix == "" || suffix == "") {
-                return true
-            }
-
-            // For "prefix*suffix", ensure prefix appears before suffix
-            let prefixFound = name.indexOf(prefix, 0)
-            match (prefixFound) {
-                case None => return false
-                case Some(prefixPos) =>
-                    let afterPrefix = prefixPos + prefix.size
-                    let suffixFound = name.indexOf(suffix, afterPrefix)
-                    match (suffixFound) {
-                        case None => return false
-                        case Some(_) => return true
-                    }
-            }
-    }
-}
-
-// Helper: get string prefix up to position pos (exclusive)
-func takePrefix(s: String, pos: Int64): String {
-    let bytes = s.toArray()
-    let prefixBytes = bytes.slice(0, pos)
-    String.fromUtf8(prefixBytes)
-}
-
-// Helper: get string suffix from position pos (inclusive)
-func takeSuffix(s: String, pos: Int64): String {
-    let bytes = s.toArray()
-    let remaining = bytes.size - pos
-    if (remaining <= 0) { return "" }
-    let suffixBytes = bytes.slice(pos, remaining)
-    String.fromUtf8(suffixBytes)
 }

@@ -23,7 +23,7 @@ public class ReadFileTool <: Tool {
             case JsonValue.String(s) => JsonValue.toObject<ReadArgs>(JsonValue.parse(s))
             case _ => JsonValue.toObject<ReadArgs>(args)
         }
-        let fullPath: String = if (ctx.workDir == "") { p.path } else { ctx.workDir + "/" + p.path }
+        let fullPath = resolveToolPath(ctx.workDir, p.path)
         if (!exists(fullPath)) {
             return ToolResult("File not found: ${p.path}", None, true, false)
         }
