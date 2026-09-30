@@ -2,6 +2,7 @@ package atelier.agent
 
 import atelier.message.*
 import atelier.tool.*
+import atelier.interaction.*
 import atelier.provider.*
 import atelier.skill.*
 import atelier.session.*
@@ -395,16 +396,39 @@ public open class AgentRuntime {
                                                         log.warn("tool ${tc.name} blocked by hook", Array<Attr>())
                                                 }
                                             case TrustDecision.NeedsApproval =>
-                                                let answer = match (this.toolApprovalFn) {
-                                                    case Some(f) => f(tc, ctx.workDir)
-                                                    case None =>
-                                                        this.askUser(
-                                                            "Tool '" + tc.name + "' needs your approval.\n" +
-                                                            "  y  — allow this once (session only)\n" +
-                                                            "  a  — always allow this directory\n" +
-                                                            "  n  — deny")
+                                                // 审批走结构化提问：菜单由 approvalRequest 统一构造，
+                                                // 结论只认选项 id（不再比对 "y"/"yes"/"a" 这类魔法字符串）
+                                                let gateReq = approvalRequest(
+                                                    "ask:${sessionId}:${turnCount}:${tc.id}:approval",
+                                                    tc.name, JsonValue.Map(HashMap<String, JsonValue>()),
+                                                    "Tool '" + tc.name + "' needs your approval.",
+                                                    toolCallId: tc.id)
+                                                let gateAns = match (this.toolApprovalFn) {
+                                                    case Some(f) =>
+                                                        let raw = f(tc, ctx.workDir)
+                                                        let sel = ArrayList<String>()
+                                                        if (raw == "a" || raw == "always" || raw == "yes") {
+                                                            sel.add("allow_always")
+                                                        } else if (raw == "y" || raw == "once") {
+                                                            sel.add("allow_once")
+                                                        } else {
+                                                            sel.add("deny")
+                                                        }
+                                                        UserAnswer(gateReq.id, UserAnswerStatus.Answered,
+                                                            selected: sel)
+                                                    case None => ctx.ask(gateReq)
                                                 }
-                                                if (answer == "a" || answer == "always" || answer == "yes") {
+                                                // 答复一律过校验：不合格按拒绝处理（不静默接受）
+                                                match (validateAnswer(gateReq, gateAns)) {
+                                                    case Some(err) =>
+                                                        log.warn("invalid approval answer (${err}); treating as deny", Array<Attr>())
+                                                    case None => ()
+                                                }
+                                                let gateInvalid = match (validateAnswer(gateReq, gateAns)) {
+                                                    case Some(_) => true
+                                                    case None => false
+                                                }
+                                                if (!gateInvalid && gateAns.isAllowAlways()) {
                                                     this.trustManager.setTrust(ctx.workDir, TrustState.Trusted)
                                                     log.info("tool ${tc.name} always approved for ${ctx.workDir}", Array<Attr>())
                                                     let (args, skipMsg) = decideToolCall(hookState, turnCount, tc)
@@ -417,7 +441,7 @@ public open class AgentRuntime {
                                                             skipResults[idx] = skipMsg ?? "Tool blocked by hook"
                                                             log.warn("tool ${tc.name} blocked by hook", Array<Attr>())
                                                     }
-                                                } else if (answer == "y" || answer == "once") {
+                                                } else if (!gateInvalid && gateAns.isAllowOnce()) {
                                                     this.trustManager.setSessionTrust(sessionId, ctx.workDir, TrustState.Trusted)
                                                     log.info("tool ${tc.name} approved for session", Array<Attr>())
                                                     let (args, skipMsg) = decideToolCall(hookState, turnCount, tc)
@@ -807,21 +831,36 @@ public open class AgentRuntime {
     private func approveSubCall(tool: Tool, args: JsonValue, ctx: ToolContext): Bool {
         let log = getGlobalLogger([("name", "AgentRuntime")])
         let call = ToolCallBlock("", tool.name(), args)
-        let answer = match (this.toolApprovalFn) {
-            case Some(f) => f(call, ctx.workDir)
-            case None =>
-                this.askUser(
-                    "Tool '" + tool.name() + "' needs your approval.\n" +
-                    "  y  — allow this once (session only)\n" +
-                    "  a  — always allow this directory\n" +
-                    "  n  — deny")
+        // 与模型直调的审批同一条路径（同一套选项、同一套判定）
+        let subReq = approvalRequest(
+            "ask:${ctx.sessionId}:sub:${tool.name()}:approval",
+            tool.name(), args, "Tool '" + tool.name() + "' needs your approval.")
+        let subAns = match (this.toolApprovalFn) {
+            case Some(f) =>
+                let raw = f(call, ctx.workDir)
+                let sel = ArrayList<String>()
+                if (raw == "a" || raw == "always" || raw == "yes") {
+                    sel.add("allow_always")
+                } else if (raw == "y" || raw == "once") {
+                    sel.add("allow_once")
+                } else {
+                    sel.add("deny")
+                }
+                UserAnswer(subReq.id, UserAnswerStatus.Answered, selected: sel)
+            case None => ctx.ask(subReq)
         }
-        if (answer == "a" || answer == "always" || answer == "yes") {
+        let subInvalid = match (validateAnswer(subReq, subAns)) {
+            case Some(err) =>
+                log.warn("invalid approval answer (${err}); treating as deny", Array<Attr>())
+                true
+            case None => false
+        }
+        if (!subInvalid && subAns.isAllowAlways()) {
             this.trustManager.setTrust(ctx.workDir, TrustState.Trusted)
             log.info("sub-call ${tool.name()} always approved for ${ctx.workDir}", Array<Attr>())
             return true
         }
-        if (answer == "y" || answer == "once") {
+        if (!subInvalid && subAns.isAllowOnce()) {
             this.trustManager.setSessionTrust(ctx.sessionId, ctx.workDir, TrustState.Trusted)
             log.info("sub-call ${tool.name()} approved for session", Array<Attr>())
             return true

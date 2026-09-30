@@ -1,6 +1,8 @@
 package atelier.tool
 
+import std.collection.*
 import jsonvalue.*
+import atelier.interaction.{UserRequest, UserAnswer, UserAnswerStatus, UserRequestKind}
 import std.collection.HashMap
 
 /**
@@ -18,6 +20,42 @@ public enum ToolExecutionMode {
  * Provides runtime information such as working directory and user interaction.
  */
 public type AskUserFn = (String) -> String
+
+/**
+ * 结构化提问入口（审批 / 选择 / 表单）。
+ *
+ * 适配器语义：老宿主只提供 `askUser(String) -> String`，这里把它的答复映射成结构化结果 ——
+ * 审批按历史约定认 "y"/"once"/"a"/"always"/"yes"，其余一律按拒绝处理，与改造前的行为一致。
+ * 想支持挂起（AG-UI 那类"结束本次 run、下一次输入再答"）的宿主，直接构造 ToolContext 时
+ * 传入自己的 askUser 实现返回 pending 语义的答复即可（见 docs/plans/2026-10-01-user-interaction-refactor.md）。
+ */
+extend ToolContext {
+    public func ask(req: UserRequest): UserAnswer {
+        let raw = this.askUser(req.message)
+        match (req.kind) {
+            case UserRequestKind.Approval =>
+                let selected = ArrayList<String>()
+                if (raw == "a" || raw == "always" || raw == "yes") {
+                    selected.add("allow_always")
+                } else if (raw == "y" || raw == "once") {
+                    selected.add("allow_once")
+                } else {
+                    selected.add("deny")
+                }
+                UserAnswer(req.id, UserAnswerStatus.Answered, selected: selected)
+            case UserRequestKind.Choice =>
+                if (raw == "") { return UserAnswer(req.id, UserAnswerStatus.Cancelled) }
+                let selected = ArrayList<String>()
+                selected.add(raw)
+                UserAnswer(req.id, UserAnswerStatus.Answered, selected: selected, text: raw)
+            case UserRequestKind.Form =>
+                if (raw == "") { return UserAnswer(req.id, UserAnswerStatus.Cancelled) }
+                UserAnswer(req.id, UserAnswerStatus.Answered, text: raw)
+            case UserRequestKind.ToolExecution =>
+                UserAnswer(req.id, UserAnswerStatus.Answered, text: raw)
+        }
+    }
+}
 
 public struct ToolContext {
     public let workDir: String

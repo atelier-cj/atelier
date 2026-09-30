@@ -1,4 +1,4 @@
-package atelier.agent
+package atelier.interaction
 
 import std.collection.*
 import jsonvalue.*
