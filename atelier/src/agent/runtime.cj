@@ -81,6 +81,10 @@ public open class AgentRuntime {
     private let toolExecutor: ToolExecutor
     private let hooks: ArrayList<Hook>
     private let askUser: AskUserFn
+    // 本次 run 的恢复答复（chatWithEnv 开跑时设置）。运行时不跨 run 复用：
+    // 现有宿主（CLI 每回合、ACP 每会话、server 每请求）都是新建实例，子 agent 亦各自持有一份。
+    // PTC 子调用授权在深层调用栈里，拿不到开跑时的局部变量，故用瞬态字段传递。
+    private var resumedAnswersForSub: HashMap<String, UserAnswer> = HashMap()
     private let modelRegistry: ModelContextRegistry
     private let sessionEnv: SessionEnvironment
     private let mcpManager: McpManager
@@ -192,11 +196,38 @@ public open class AgentRuntime {
         ToolContext(ctx.workDir, ctx.askUser, ctx.env, ctx.sessionId, toolCallId: toolCallId)
     }
 
+    // 问宿主要答复：恢复带回的答复优先；否则走审批桥（ACP 权限），最后才是 ToolContext.ask。
+    // 两个审批调用点共用，避免"恢复路径只改一处"这类漏改。
+    private func askHost(req: UserRequest, resumed: HashMap<String, UserAnswer>,
+        ctx: ToolContext, call: ToolCallBlock): UserAnswer {
+        match (resumed.get(req.id)) {
+            case Some(a) => return a
+            case None => ()
+        }
+        match (this.toolApprovalFn) {
+            case Some(f) =>
+                let raw = f(call, ctx.workDir)
+                let sel = ArrayList<String>()
+                if (raw == "a" || raw == "always" || raw == "yes") {
+                    sel.add("allow_always")
+                } else if (raw == "y" || raw == "once") {
+                    sel.add("allow_once")
+                } else {
+                    sel.add("deny")
+                }
+                UserAnswer(req.id, UserAnswerStatus.Answered, selected: sel)
+            case None => ctx.ask(req)
+        }
+    }
+
     private func chatWithEnv(sessionId: String, messages: ArrayList<Message>, sessionEnv: SessionEnvironment): EventStream<AgentEvent, ArrayList<Message>> {
         let stream = EventStream<AgentEvent, ArrayList<Message>>()
         let se = sessionEnv
         let workDir = resolveWorkDir(se)
         let ctx = ToolContext(workDir, this.askUser, se.context, sessionId)
+        // 恢复：宿主随消息带回的答复（重放同一回合时要先查它，命中就不再问宿主）
+        let resumedAnswers = collectResumedAnswers(messages)
+        this.resumedAnswersForSub = resumedAnswers
         // 每次工具调用单独一份上下文（带该次调用的 id）：工具要把自己与协议/UI 上的同一次调用对上时用
         let ctxBuilder = ContextBuilder(this.skillRegistry, se, contributors: this.promptContributors)
 
@@ -403,21 +434,7 @@ public open class AgentRuntime {
                                                     tc.name, JsonValue.Map(HashMap<String, JsonValue>()),
                                                     "Tool '" + tc.name + "' needs your approval.",
                                                     toolCallId: tc.id)
-                                                let gateAns = match (this.toolApprovalFn) {
-                                                    case Some(f) =>
-                                                        let raw = f(tc, ctx.workDir)
-                                                        let sel = ArrayList<String>()
-                                                        if (raw == "a" || raw == "always" || raw == "yes") {
-                                                            sel.add("allow_always")
-                                                        } else if (raw == "y" || raw == "once") {
-                                                            sel.add("allow_once")
-                                                        } else {
-                                                            sel.add("deny")
-                                                        }
-                                                        UserAnswer(gateReq.id, UserAnswerStatus.Answered,
-                                                            selected: sel)
-                                                    case None => ctx.ask(gateReq)
-                                                }
+                                                let gateAns = this.askHost(gateReq, resumedAnswers, ctx, tc)
                                                 // 答复一律过校验：不合格按拒绝处理（不静默接受）
                                                 match (validateAnswer(gateReq, gateAns)) {
                                                     case Some(err) =>
@@ -835,20 +852,7 @@ public open class AgentRuntime {
         let subReq = approvalRequest(
             "ask:${ctx.sessionId}:sub:${tool.name()}:approval",
             tool.name(), args, "Tool '" + tool.name() + "' needs your approval.")
-        let subAns = match (this.toolApprovalFn) {
-            case Some(f) =>
-                let raw = f(call, ctx.workDir)
-                let sel = ArrayList<String>()
-                if (raw == "a" || raw == "always" || raw == "yes") {
-                    sel.add("allow_always")
-                } else if (raw == "y" || raw == "once") {
-                    sel.add("allow_once")
-                } else {
-                    sel.add("deny")
-                }
-                UserAnswer(subReq.id, UserAnswerStatus.Answered, selected: sel)
-            case None => ctx.ask(subReq)
-        }
+        let subAns = this.askHost(subReq, this.resumedAnswersForSub, ctx, call)
         let subInvalid = match (validateAnswer(subReq, subAns)) {
             case Some(err) =>
                 log.warn("invalid approval answer (${err}); treating as deny", Array<Attr>())
