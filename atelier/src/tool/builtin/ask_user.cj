@@ -60,8 +60,10 @@ public class AskUserTool <: Tool {
                 "User cancelled without answering.", None, true, false)
             case UserAnswerStatus.TimedOut => return ToolResult(
                 "User did not answer in time.", None, true, false)
-            case UserAnswerStatus.Pending => return ToolResult(
-                "Waiting for the user's answer (run will resume).", None, false, false)
+            case UserAnswerStatus.Pending => return ToolResult("", None, false, false,
+                // 挂起：本次调用没有结果，等宿主在后续输入里带回（与前端工具同一条路径）
+                external: Some(ExternalRequest(req.id, "input_required", req.message,
+                    toolCallId: ctx.toolCallId)))
             case UserAnswerStatus.Answered => ()
         }
 

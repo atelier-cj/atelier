@@ -61,7 +61,8 @@ func gatedToolUse(): AssistantMessage {
     AssistantMessage(ContentList(blocks), "m", "fake", StopReason.ToolUse, TokenUsage(0, 0), 0)
 }
 
-func runGate(askAnswer: Option<UserAnswer>): (ArrayList<AgentEvent>, GatedTool) {
+func runGate(askAnswer: Option<UserAnswer>, sessionId!: String = "s1",
+    extra!: ArrayList<Message> = ArrayList()): (ArrayList<AgentEvent>, GatedTool) {
     let tool = GatedTool()
     let reg = ToolRegistry()
     reg.register(tool)
@@ -82,7 +83,11 @@ func runGate(askAnswer: Option<UserAnswer>): (ArrayList<AgentEvent>, GatedTool) 
     let runtime = AgentRuntime(AgentConfig.default(), provider, reg, MemorySessionStore(), trust,
         SkillRegistry(), AgentRegistry(), preg, ArrayList<Hook>(), { q => "" }, McpManager(),
         ask: askImpl)
-    let stream = runtime.chat(ArrayList<Message>([UserMessage(ContentList.ofText("跑一下"), 0)]))
+    let input = ArrayList<Message>()
+    input.add(UserMessage(ContentList.ofText("跑一下"), 0))
+    for (m in extra) { input.add(m) }
+    // 指定 sessionId：闸门请求 id 里含 sessionId/turn，两趟必须一致才对得上
+    let stream = runtime.chatWithSessionId(sessionId, input, SessionEnvironment())
     let events = ArrayList<AgentEvent>()
     var done = false
     while (!done) {
@@ -120,4 +125,59 @@ func askSuspend_denyBlocksTool() {
         selected: ArrayList<String>(["deny"]))
     let (_, tool) = runGate(Some(deny))
     @Expect(tool.executed, 0)
+}
+
+
+func kindsOf(events: ArrayList<AgentEvent>): String {
+    let parts = ArrayList<String>()
+    for (e in events) { parts.add(e.eventType()) }
+    String.join(parts.toArray(), delimiter: ",")
+}
+
+func suspendRequestIds(events: ArrayList<AgentEvent>): ArrayList<String> {
+    let out = ArrayList<String>()
+    for (e in events) {
+        match (e) {
+            case se: SuspendEvent =>
+                for (r in se.requests) { out.add(r.id) }
+            case _ => ()
+        }
+    }
+    out
+}
+
+@Test
+func askSuspend_pendingSuspendsRunWithoutExecuting() {
+    // 第一趟：宿主返回 Pending → 发 SuspendEvent、本轮工具一个都不执行
+    let pending = UserAnswer("ignored", UserAnswerStatus.Pending)
+    let (events, tool) = runGate(Some(pending))
+    @Expect(tool.executed, 0)
+    @Expect(kindsOf(events).contains("suspend"), true)
+    let ids = suspendRequestIds(events)
+    @Expect(ids.size, 1)
+    // 请求 id 带 kind 后缀，且以 approval 结尾（审批 = confirmation 语义）
+    @Expect(ids[0].contains("call_g"), true)
+    @Expect(ids[0].endsWith("approval"), true)
+}
+
+@Test
+func askSuspend_resumeWithAnswerExecutesOnce() {
+    // 第二趟（同 session、同回合 → 请求 id 不变）：答复随消息带回 → 工具执行一次
+    let pending = UserAnswer("ignored", UserAnswerStatus.Pending)
+    let (_, tool1) = runGate(Some(pending))
+    @Expect(tool1.executed, 0)
+    // 先拿到第一趟的请求 id（宿主就是这么知道要回哪个 id 的）
+    let (events1, _) = runGate(Some(pending))
+    let ids = suspendRequestIds(events1)
+    @Expect(ids.size, 1)
+
+    // 第二趟：把答复挂进消息元数据（真实路径：AG-UI 的 resume[].payload → 消息）
+    let answer = UserAnswer(ids[0], UserAnswerStatus.Answered,
+        selected: ArrayList<String>(["allow_once"]))
+    let extra = ArrayList<Message>()
+    extra.add(UserMessage(ContentList.ofText("同意"), 0, metadata: encodeAnswer(answer)))
+    // 这一趟宿主"没有"结构化 ask（None）也应当能恢复：答复优先于任何提问通道
+    let (events2, tool2) = runGate(None, extra: extra)
+    @Expect(tool2.executed, 1)
+    @Expect(kindsOf(events2).contains("suspend"), false)
 }

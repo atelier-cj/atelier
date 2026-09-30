@@ -414,6 +414,9 @@ public open class AgentRuntime {
                                     skipIdx++
                                 }
                             }
+                            // 本轮闸门里"宿主要求挂起"的请求（审批 = confirmation；
+                            // 选择/表单由工具内的提问走 ToolResult.external，不在此列）
+                            let pendingAsks = ArrayList<ExternalRequest>()
                             let batch = ArrayList<(String, ToolContext, JsonValue)>()
                             let skipResults = HashMap<Int64, String>()
                             // 实际进入执行批的工具（与 batch 同序），用于发工具执行事件
@@ -445,6 +448,15 @@ public open class AgentRuntime {
                                                     "Tool '" + tc.name + "' needs your approval.",
                                                     toolCallId: tc.id)
                                                 let gateAns = this.askHost(gateReq, resumedAnswers, ctx, tc)
+                                                // 宿主要求挂起：记下来，整批都不执行（结果在批量执行后才写历史，
+                                                // 所以此刻挂起等于"什么都没发生"，重放不会重复副作用）
+                                                match (gateAns.status) {
+                                                    case UserAnswerStatus.Pending =>
+                                                        pendingAsks.add(ExternalRequest(gateReq.id,
+                                                            "confirmation", gateReq.message,
+                                                            toolCallId: tc.id))
+                                                    case _ => ()
+                                                }
                                                 // 答复一律过校验：不合格按拒绝处理（不静默接受）
                                                 match (validateAnswer(gateReq, gateAns)) {
                                                     case Some(err) =>
@@ -500,6 +512,14 @@ public open class AgentRuntime {
                                 if (elapsed < minIntervalMs) {
                                     sleep(Duration.millisecond * (minIntervalMs - elapsed))
                                 }
+                            }
+                            if (pendingAsks.size > 0) {
+                                // 整批一起挂起：一次把本批所有待确认项交给宿主，
+                                // 恢复后同一批一次做完（而不是逐个挂起、逐个恢复）
+                                this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
+                                this.emit(stream, SuspendEvent(pendingAsks))
+                                finished = true
+                                continue
                             }
                             // 工具执行开始事件（供流式消费方展示工具进度；被跳过/拦截的工具不发）
                             for (k in 0..runCallIds.size) {
