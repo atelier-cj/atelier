@@ -503,7 +503,7 @@ class ScriptToolProvider <: Provider {
 }
 
 func parentCtx(): ToolContext {
-    ToolContext("/tmp", { q => "" }, HashMap<String, String>(), "parent_session_1")
+    ToolContext("/tmp", HashMap<String, String>(), "parent_session_1")
 }
 
 // 父端五工具直接 execute 链：start → await(done) → send → await(reply) → close

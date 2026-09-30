@@ -165,7 +165,7 @@ main() {
 | GET | `/agent/configs` | 列举 Agent 配置详情 |
 | POST | `/agent/run` | 同步运行 |
 | GET | `/agent/stream` | SSE 流式运行 |
-| POST | `/agent/input` | ask_user 交互输入 |
+| POST | `/agent/input` | 提问答复回传（按 requestId：审批/选择/表单） |
 | POST | `/session/save` | 保存会话 |
 | POST | `/session/load` | 加载会话 |
 | POST | `/session/fork` | 克隆会话 |
@@ -493,7 +493,7 @@ class AuditHook <: Hook {
 let hooks = ArrayList<Hook>([AuditHook()])
 let runtime = AgentRuntime(config, provider, toolReg,
     sessionStore, trustMgr, skillReg, agentReg, providerReg,
-    hooks, askUserFn)
+    hooks, mcpManager, ask: Some(askFn))   // askFn：宿主提问通道（不传 = 提问即取消）
 ```
 
 所有钩子都有空默认实现，只需覆写需要的。完整的决策类型、状态共享、融合顺序与最佳实践见 **[Hook 文档](hooks.md)**。
@@ -513,6 +513,6 @@ AgentRuntime 的构造参数即依赖注入点：
 | `agentRegistry` | `AgentRegistry` | 子 Agent 注册 |
 | `providerRegistry` | `ProviderRegistry` | Provider 注册表 |
 | `hooks` | `ArrayList<Hook>` | 生命周期钩子（可选），见下方示例 |
-| `askUser` | `AskUserFn` | 用户交互回调（可选），默认返回空字符串 |
+| `askFn` | `Option<AskFn>` | 提问通道：`(UserRequest) -> UserAnswer`（审批/选择/表单）。不传 = 无交互通道，提问按取消处理 |
 
 ---

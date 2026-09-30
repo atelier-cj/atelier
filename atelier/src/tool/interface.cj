@@ -19,56 +19,28 @@ public enum ToolExecutionMode {
  * Context passed to tool execution.
  * Provides runtime information such as working directory and user interaction.
  */
-public type AskUserFn = (String) -> String
 
-// 结构化提问（可选升级）：宿主实现它就能回答"审批/选择/表单"，并可用 Pending 表示挂起。
-// 未提供时退回下面的字符串问答，行为与改造前一致 —— 升级是逐宿主进行的。
+// 结构化提问（宿主实现它就能回答"审批/选择/表单"，并可用 Pending 表示挂起）。
+// 未提供时一律按"取消"处理 —— 空答复无法与"拒绝/答了个空"区分，不能当默认值用。
 public type AskFn = (UserRequest) -> UserAnswer
 
 /**
  * 结构化提问入口（审批 / 选择 / 表单）。
  *
- * 适配器语义：老宿主只提供 `askUser(String) -> String`，这里把它的答复映射成结构化结果 ——
- * 审批按历史约定认 "y"/"once"/"a"/"always"/"yes"，其余一律按拒绝处理，与改造前的行为一致。
- * 想支持挂起（AG-UI 那类"结束本次 run、下一次输入再答"）的宿主，直接构造 ToolContext 时
- * 传入自己的 askUser 实现返回 pending 语义的答复即可（见 docs/plans/2026-10-01-user-interaction-refactor.md）。
+ * 宿主没给实现时返回 `Cancelled`：这表示"这条通道不存在"，而不是"用户拒绝了"。
+ * 需要交互的宿主（TUI / ACP / AG-UI）各自提供自己的 `askFn`。
  */
 extend ToolContext {
     public func ask(req: UserRequest): UserAnswer {
-        // 宿主提供了结构化实现就用它（它能返回 Pending → 运行时据此挂起）
         match (this.askFn) {
-            case Some(f) => return f(req)
-            case None => ()
-        }
-        let raw = this.askUser(req.message)
-        match (req.kind) {
-            case UserRequestKind.Approval =>
-                let selected = ArrayList<String>()
-                if (raw == "a" || raw == "always" || raw == "yes") {
-                    selected.add("allow_always")
-                } else if (raw == "y" || raw == "once") {
-                    selected.add("allow_once")
-                } else {
-                    selected.add("deny")
-                }
-                UserAnswer(req.id, UserAnswerStatus.Answered, selected: selected)
-            case UserRequestKind.Choice =>
-                if (raw == "") { return UserAnswer(req.id, UserAnswerStatus.Cancelled) }
-                let selected = ArrayList<String>()
-                selected.add(raw)
-                UserAnswer(req.id, UserAnswerStatus.Answered, selected: selected, text: raw)
-            case UserRequestKind.Form =>
-                if (raw == "") { return UserAnswer(req.id, UserAnswerStatus.Cancelled) }
-                UserAnswer(req.id, UserAnswerStatus.Answered, text: raw)
-            case UserRequestKind.ToolExecution =>
-                UserAnswer(req.id, UserAnswerStatus.Answered, text: raw)
+            case Some(f) => f(req)
+            case None => UserAnswer(req.id, UserAnswerStatus.Cancelled)
         }
     }
 }
 
 public struct ToolContext {
     public let workDir: String
-    public let askUser: AskUserFn
     public let env: HashMap<String, String>
     // 当前运行会话 id（无会话上下文时为空 ""）；子 agent 父向调度等场景使用
     public let sessionId: String
@@ -76,40 +48,28 @@ public struct ToolContext {
     // 工具要把自己的执行与协议/UI 上的同一次调用对上（进度上报、等外部执行结果）时用得到它：
     // 一次调用一份上下文，而不是一个会话共用一份。
     public let toolCallId: String
-    // 结构化提问实现（None = 走字符串问答适配器）
+    // 结构化提问实现（None = 无交互通道，提问即取消）
     public let askFn: Option<AskFn>
 
     public init(workDir: String) {
         this.workDir = workDir
-        this.askUser = { q => "" }
         this.env = HashMap()
         this.sessionId = ""
         this.toolCallId = ""
         this.askFn = None
     }
 
-    public init(workDir: String, askUser: AskUserFn) {
+    public init(workDir: String, env: HashMap<String, String>) {
         this.workDir = workDir
-        this.askUser = askUser
-        this.env = HashMap()
-        this.sessionId = ""
-        this.toolCallId = ""
-        this.askFn = None
-    }
-
-    public init(workDir: String, askUser: AskUserFn, env: HashMap<String, String>) {
-        this.workDir = workDir
-        this.askUser = askUser
         this.env = env
         this.sessionId = ""
         this.toolCallId = ""
         this.askFn = None
     }
 
-    public init(workDir: String, askUser: AskUserFn, env: HashMap<String, String>, sessionId: String,
+    public init(workDir: String, env: HashMap<String, String>, sessionId: String,
         toolCallId!: String = "", ask!: Option<AskFn> = None) {
         this.workDir = workDir
-        this.askUser = askUser
         this.env = env
         this.sessionId = sessionId
         this.toolCallId = toolCallId

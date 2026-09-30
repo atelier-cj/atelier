@@ -91,7 +91,7 @@ func runScripted(config: AgentConfig, provider: Provider): ArrayList<Message> {
     let providerReg = ProviderRegistry()
     providerReg.register("default", provider)
     let runtime = AgentRuntime(config, provider, toolReg, sessionStore, trustMgr,
-        skillReg, agentReg, providerReg, ArrayList<Hook>(), { q => "" }, McpManager())
+        skillReg, agentReg, providerReg, ArrayList<Hook>(), McpManager())
     let msgs = ArrayList<Message>()
     msgs.add(UserMessage(ContentList.ofText("把大文件写完"), 0))
     runtime.chat(msgs).result()
@@ -218,7 +218,7 @@ func runRecording(config: AgentConfig, provider: Provider): ArrayList<Message> {
     let providerReg = ProviderRegistry()
     providerReg.register("default", provider)
     let runtime = AgentRuntime(config, provider, toolReg, MemorySessionStore(), TrustManager(),
-        SkillRegistry(), AgentRegistry(), providerReg, ArrayList<Hook>(), { q => "" }, McpManager())
+        SkillRegistry(), AgentRegistry(), providerReg, ArrayList<Hook>(), McpManager())
     let msgs = ArrayList<Message>()
     msgs.add(UserMessage(ContentList.ofText("把大文件写完"), 0))
     runtime.chat(msgs).result()

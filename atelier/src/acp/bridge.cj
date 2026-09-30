@@ -344,7 +344,6 @@ public class AcpBridge {
                 { => ctx.isCancelled() },
                 onEvent: { ev => this.pushEvent(acpId, host, ev, model) },
                 parentSession: None,
-                approvalFn: { tc, wd => this.requestToolApproval(acpId, tc) },
                 askFn: Some({ req: UserRequest => this.answerUserRequest(acpId, req) }),
                 maxLoad: MaxAcpLoadMessages)
             this.lastStopReason(outcome.messages)
@@ -434,10 +433,7 @@ public class AcpBridge {
         PromptResponse(StopReasonEndTurn)
     }
 
-    // ===================== 落库（单落库职责，与 REPL 同构） =====================
-    // ===================== 用户提问（Elicitation 表单桥，ask_user 工具用） =====================
-
-    // 以单字段表单向 Client 询问用户；能力未声明/decline/cancel/失败返回 ""（兼容文本 askUser 拒绝语义）
+    // ===================== 用户提问（结构化提问 → elicitation） =====================
 
     // ── 结构化提问（审批 / 选择 / 表单）→ ACP elicitation ──────────────────────
     //
@@ -470,51 +466,6 @@ public class AcpBridge {
         }
     }
 
-    private func elicitationAsk(acpId: String, question: String): String {
-        let propsArr: Array<(String, ElicitationPropertySchema)> = [("answer", ElicitationPropertySchema.string())]
-        let requiredArr = ArrayList<String>()
-        requiredArr.add("answer")
-        let schema = ElicitationSchema.of(propsArr, required: Some(requiredArr))
-        let req = CreateElicitationRequest.form(acpId, question, schema)
-        match (this.agent.createElicitation(req, timeout: 5 * Duration.minute)) {
-            case Result.Ok(resp) => elicitationAnswerOf(resp.action, resp.content)
-            case Result.Err(e) =>
-                // 通道失败/超时一律降级为「未作答」：不留痕则与「用户拒绝」不可区分
-                eprintln("[atelier-acp] elicitation failed, treated as no answer: ${e.toString()}")
-                ""
-        }
-    }
-
-    // ===================== 工具授权（request_permission 反向调用） =====================
-
-    private func requestToolApproval(acpId: String, tc: ToolCallBlock): String {
-        // 反向调用 client：同步等待授权（超时/失败按拒绝处理）
-        let call = ToolCallUpdate()
-        call.toolCallId = tc.id
-        call.title = Some(tc.name)
-        call.kind = Some(toolKindFor(tc.name))
-        call.status = Some(ToolStatusPending)
-        call.rawInput = Some(tc.args)
-        let options = ArrayList<PermissionOption>()
-        options.add(PermissionOption("allow_once", "允许一次", "allow_once"))
-        options.add(PermissionOption("allow_always", "始终允许（此目录）", "allow_always"))
-        options.add(PermissionOption("reject", "拒绝", "reject_once"))
-        match (this.agent.requestPermission(acpId, call, options, timeout: 10 * Duration.minute)) {
-            case Result.Ok(resp) =>
-                match (resp.outcome.optionId) {
-                    case Some(optId) =>
-                        if (optId == "allow_once") { "y" }
-                        else if (optId == "allow_always") { "a" }
-                        else { "" }
-                    case None => ""
-                }
-            case Result.Err(e) =>
-                // 授权通道失败按拒绝处理（fail-safe 语义不变），但必须留痕：否则「工具为何被拒」无从排查
-                eprintln("[atelier-acp] permission request failed, treated as denied: ${e.toString()}")
-                ""
-        }
-    }
-
     // ===================== 配置合成 =====================
 
     private func buildConfig(model: String, compactionOn: Bool): AgentConfig {
@@ -536,24 +487,6 @@ public class AcpBridge {
             this.baseConfig.tags, this.baseConfig.createdBy,
             this.baseConfig.createdAt, this.baseConfig.updatedAt,
             sideEffectToolTimeout: this.baseConfig.sideEffectToolTimeout)
-    }
-}
-
-// Elicitation 表单响应 → 答案文本（纯函数，单测重点）。
-// 表单模式：accept 时 content 为符合 schema 的对象（{ answer: "..." }）；
-// decline/cancel/缺失返回空串（与 askUserFn 拒绝语义一致，兼容旧行为）。
-public func elicitationAnswerOf(action: String, content: ?JsonValue): String {
-    if (action != ElicitationActionAccept) { return "" }
-    if (content.isNone()) { return "" }
-    match (content.getOrThrow()) {
-        case JsonValue.Map(m) =>
-            let ans = m.get("answer")
-            if (ans.isNone()) { return "" }
-            match (ans.getOrThrow()) {
-                case JsonValue.String(v) => v
-                case _ => ""
-            }
-        case _ => ""
     }
 }
 

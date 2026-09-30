@@ -276,3 +276,39 @@ node scripts/agui-probe.mjs http://127.0.0.1:8791 default
 模态性有跨线程用例守着（`tui_test.cj`）：回合线程登记提问并等待 → 主线程按键 → 答复回填；
 提问期间打的字不会变成新消息。
 
+
+## 十二、第 6 步收口：删掉字符串适配器（2026-10-01）
+
+提问只剩一条通道：`AskFn = (UserRequest) -> UserAnswer`。所有"字符串问答"的残留一律退场 ——
+留着它们，新宿主会照着旧例子接，最后又是三端行为分叉。
+
+**删除**
+
+| 位置 | 删掉的东西 | 原因 |
+|---|---|---|
+| `atelier.tool` | `AskUserFn`、`ToolContext.askUser` | 空串同时表示"拒绝/答了空/没通道"，下游无法区分 |
+| `AgentRuntime` | `askUser` 位置参数、`toolApprovalFn` | 被 `ask` 吸收；审批不再走"y/a//"魔法字符串 |
+| `SessionLoop` | `approvalFn!`、`askUserFn!` | 同上 |
+| `atelier.acp` | `requestToolApproval`、`elicitationAsk`、`elicitationAnswerOf` | 审批/问答统一走 `answerUserRequest` → elicitation |
+| `server`（AG-UI） | `AgUiInputDTO`、`inputKey`、`AgUiUserInputPayload`、`CustomEvent("user_input_request")` | 输入通道已由 `resume[]` 取代；`/ag-ui/input` 上一轮已删 |
+
+**替换**
+
+- `ToolContext.askFn: Option<AskFn>`；`ctx.ask(req)` 在无实现时返回 `Cancelled`（= "这条通道不存在"，
+  不是"用户拒绝了"）。`callContext` 顺带修正：派生上下文原先没带 `askFn`，子调用会静默失去提问能力。
+- `AgentRuntime`：13/11/9 参构造都接受 `ask!: Option<AskFn>`（命名、可选）；不传 = 无交互通道。
+- **HTTP 提问通道**（`/agent/stream` + `/agent/input`，见 docs/http-api.md）：
+  - 推 `data: {"type":"user_request","request":{...}}`（整条 `UserRequest`，含选项/字段/toolCallId）
+  - 回传 `{requestId, status, selected, text, values}`；`requestId` 对不上 → `404`、答复不合格 → `400`
+  - 旧实现把答案投给"任意一条等待中的提问"（并发下第一个等待者会拿到别人的答案）→ 改为按 id 精确投递
+  - 表单值按字段声明类型包装（bool → 布尔、multi_select → 数组），再交 `validateAnswer`
+
+**宿主接线速查**
+
+| 宿主 | 接法 |
+|---|---|
+| TUI | `AgentRuntime(..., McpManager(), ask: Some({ req => this.askHost(t, req) }))` |
+| ACP | `SessionLoop.run(..., askFn: Some({ req => this.answerUserRequest(acpId, req) }))` |
+| AG-UI | `ask: Some({ req => UserAnswer.pending(req.id) })`（挂起 → `RUN_FINISHED{interrupt}`） |
+| HTTP SSE | `/agent/stream` 内推 `user_request` 帧 + 等 `/agent/input` 回传 |
+| 一次性 / 批处理 | 不传 `ask` → 提问按取消处理（配合 `ATELIER_TRUST_DIR` 预授权） |

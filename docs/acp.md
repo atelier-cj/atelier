@@ -64,7 +64,7 @@ cli.app acp [agent]
 | prompt 文本（ContentBlock） | `UserMessage` → `AgentRuntime.chatWithSessionId` |
 | `session/update` 通知 | `AcpTranslator`：运行时事件 → 协议 update（文本 chunk / tool_call / usage） |
 | 回合结束 | `PromptResponse.stopReason`（`end_turn / max_tokens / refusal / cancelled`） |
-| 工具授权 | 信任闸门 → `session/request_permission`（`toolApprovalFn` 挂载点） |
+| 用户提问 | 结构化提问（审批/选择/表单）→ elicitation 表单（`askFn` 挂载点）；decline/cancel/失败 → `Cancelled` + 留痕 |
 
 ## Session Config Options
 

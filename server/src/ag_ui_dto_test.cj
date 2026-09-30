@@ -95,25 +95,6 @@ func dto_toolParametersKeptOpaque() {
     @Expect(input.tools[0].description, "")
 }
 
-@Test
-func dto_inputMessageToolResult() {
-    let dto = fromJsonString<AgUiInputDTO>(
-        "{\"runId\":\"r1\",\"kind\":\"tool_result\",\"toolCallId\":\"c1\",\"result\":\"done\",\"isError\":true}")
-    @Expect(dto.runId, "r1")
-    @Expect(dto.kind, "tool_result")
-    @Expect(dto.toolCallId, "c1")
-    @Expect(dto.result, "done")
-    @Expect(dto.isError, true)
-}
-
-@Test
-func dto_inputMessageUserAnswerDefaultsNoError() {
-    let dto = fromJsonString<AgUiInputDTO>("{\"runId\":\"r1\",\"kind\":\"user_input\",\"text\":\"好\"}")
-    @Expect(dto.text, "好")
-    @Expect(dto.isError, false)
-    @Expect(dto.toolCallId, "")
-}
-
 // resume[]：中断-恢复的回应载荷
 @Test
 func dto_resumeParsed() {

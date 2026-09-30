@@ -112,20 +112,47 @@ curl -N -X POST http://localhost:8080/agent/stream \
 # data: {"type":"agent_end"}
 ```
 
-### ask_user 交互输入
+### 提问交互（审批 / 选择 / 表单）
 
-SSE 流式模式下，LLM 调用 ask_user 时会发射 `user_input_request` 事件。客户端通过以下端点回复：
+SSE 流式模式下，回合需要用户拍板时会推一条 `user_request` 帧，随后**阻塞等人**：
+
+```
+data: {"type":"user_request","request":{"id":"ask:sess_x:3:call_a:approval","kind":"approval",
+       "message":"Tool 'bash' needs your approval.","toolCallId":"call_a","toolName":"bash",
+       "options":[{"id":"allow_once","label":"允许这一次"}, ...]}}
+```
+
+客户端按 `request` 渲染（`options` 给选择/审批，`fields` 给表单），再用**同一个 id** 回复：
 
 ```
 POST /agent/input
 ```
 
 ```bash
+# 审批 / 选择：selected 是选项 id（多选按顺序给多个）
 curl -X POST http://localhost:8080/agent/input \
   -H "Content-Type: application/json" \
-  -d '{"sessionId":"sess_xxx","answer":"yes"}'
+  -d '{"requestId":"ask:sess_x:3:call_a:approval","selected":["allow_once"]}'
+
+# 表单：values 是「字段名 → 文本」；bool 用 "true"/"false"，multi_select 用逗号分隔
+curl -X POST http://localhost:8080/agent/input \
+  -H "Content-Type: application/json" \
+  -d '{"requestId":"ask:sess_x:5:call_b","values":{"env":"prod","tags":"a,b"}}'
+
+# 放弃：明确回报取消（不是回一个空答复）
+curl -X POST http://localhost:8080/agent/input \
+  -H "Content-Type: application/json" \
+  -d '{"requestId":"ask:sess_x:5:call_b","status":"cancelled"}'
 # {"status":"ok"}
 ```
+
+约定：
+
+- `requestId` 必须是一条**尚未作答**的提问 id：对不上返回 `404`（静默成功会让调用方
+  以为答复已生效，而回合仍在原地等人）；
+- 答复按提问里的字段类型包装后过一遍校验，不合格返回 `400` + 原因；
+- `status` 缺省为 `answered`，另有 `cancelled` / `timed_out` / `pending`；
+- 每次提问只接受一次答复，先到的生效。
 
 ## OpenAI 兼容 API
 

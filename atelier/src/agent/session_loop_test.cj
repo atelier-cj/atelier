@@ -8,6 +8,7 @@ import atelier.tool.builtin.AskUserTool
 import atelier.session.*
 import atelier.trust.*
 import atelier.skill.*
+import atelier.interaction.*
 import atelier.event.EventStream
 import atelier.context.PromptSegmentContributor
 import jsonvalue.*
@@ -44,9 +45,9 @@ public func sessionLoop_onEventSeesLifecycle() {
     @Expect(store.load("sess_loop_1").size >= Int64(2), true)
 }
 
-// askUserFn 注入：ask_user 工具回合走注入实现（ACP Elicitation 桥的挂载点）
+// askFn 注入：ask_user 工具的回合走宿主提问通道
 @Test
-public func sessionLoop_askUserFnInjectedToAskTool() {
+public func sessionLoop_askFnInjectedToAskTool() {
     let asked = ArrayList<String>()
     // 回合脚本：第 1 轮调 ask_user，第 2 轮 EndTurn
     let steps = ArrayList<(String, JsonValue)>()
@@ -67,9 +68,15 @@ public func sessionLoop_askUserFnInjectedToAskTool() {
     let mcpMgr = McpManager()
     let loop = SessionLoop(toolReg, trustMgr, skillReg, agentReg, providerReg, store, mcpMgr)
     let cfg = subConfig()
-    let askFn: (String) -> String = { q => asked.add(q); "选 A" }
+    // 普通提问 = 单字段表单（answer）：答复按字段名回填
+    let askFn: AskFn = { req: UserRequest =>
+        asked.add(req.message)
+        let vals = HashMap<String, JsonValue>()
+        vals["answer"] = JsonValue.String("选 A")
+        UserAnswer(req.id, UserAnswerStatus.Answered, values: vals)
+    }
     loop.run("sess_ask_1", "帮我决策", cfg, provider, None, SessionEnvironment(),
-        { => false }, { => false }, askUserFn: askFn)
+        { => false }, { => false }, askFn: Some(askFn))
     @Expect(asked.size, 1)
     @Expect(asked[0], "方案 A 还是 B？")
     // 答案作为工具结果进入第二轮上下文

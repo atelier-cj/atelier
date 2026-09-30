@@ -303,17 +303,6 @@ func translator_newTurnClosesOpenTextAndStep() {
 }
 
 @Test
-func translator_userInputRequestIsCustom() {
-    let tr = newTranslator()
-    let ev = tr.userInputRequest("要继续吗？")
-    @Expect(ev.eventType(), "CUSTOM")
-    match (ev) {
-        case e: CustomEvent => @Expect(e.name, "user_input_request")
-        case _ => @Fail("应当是 CUSTOM")
-    }
-}
-
-@Test
 func translator_clientToolRequestCarriesCallIdentity() {
     let tr = newTranslator()
     let ev = tr.clientToolRequest("c1", "client_tool", "{\"x\":1}")

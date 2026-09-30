@@ -23,18 +23,15 @@ import atelier.util.{toJsonString, fromJsonString}
 
 // AG-UI 端点（对外前端协议）：
 //   POST /ag-ui/agent  RunAgentInput → text/event-stream（AG-UI 事件）
-//   POST /ag-ui/input  回传 askUser 的回答或客户端工具的执行结果
 //
-// 与既有 /agent/stream 并存：那条是 atelier 私有事件格式（TUI 在用），这条遵守公开协议。
+// 提问不另开端点：以 RUN_FINISHED{outcome:interrupt} 结束本次 run，客户端在下一次
+// RunAgentInput.resume[] 里带回答复（同一 threadId，覆盖全部未决中断）。
+// 与既有 /agent/stream 并存：那条是 atelier 私有事件格式，这条遵守公开协议。
 // 设计见 docs/plans/2026-09-30-ag-ui-endpoint.md。
 
-// ── 外部输入通道 ────────────────────────────────────────────────────────────
-
-// 每个等待中的外部请求一个队列：askUser 用键 "user"，客户端工具用键 "tool:<toolCallId>"。
-// 分开按键，避免并行工具调用时互相偷走对方的回答。
 // ── SSE 写出端 ──────────────────────────────────────────────────────────────
 
-// 运行线程（工具执行、askUser 回调）与消费循环都会写同一个 response body，
+// 运行线程（工具执行、提问回调）与消费循环都会写同一个 response body，
 // 并发写会交错成非法帧 → 全部经这里串行化。写坏一次即置位，后续事件直接丢。
 class AgUiSseSink {
     private let writer: HttpResponseWriter
@@ -233,7 +230,7 @@ public class AgUiHandler {
         let provider = this.resolveProvider()
         let runtime = AgentRuntime(cfg, provider, this.clientToolRegistry(input.tools),
             this.sessionStore, this.trustManager, this.skillRegistry, this.agentRegistry,
-            this.providerRegistry, ArrayList<Hook>(), { q => "" }, SessionEnvironment(), this.mcpManager,
+            this.providerRegistry, ArrayList<Hook>(), SessionEnvironment(), this.mcpManager,
             ask: Some({ req: UserRequest => UserAnswer.pending(req.id) }),
             promptContributors: this.contributorsFor(input))
 
@@ -358,15 +355,6 @@ func streamAgUiEvents(eventStream: LoopEventStream, translator: AgUiTranslator, 
         case false => log.info("ag-ui run finished", Array<Attr>())
     }
     all
-}
-
-// 输入通道的键：askUser 的回答与客户端工具结果分键，互不干扰
-func inputKey(dto: AgUiInputDTO): String {
-    match (dto.kind) {
-        case "user_input" => "user"
-        case "tool_result" => if (dto.toolCallId != "") { "tool:" + dto.toolCallId } else { "" }
-        case _ => ""
-    }
 }
 
 // RunAgentInput.messages → atelier 消息。

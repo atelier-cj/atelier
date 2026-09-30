@@ -63,8 +63,7 @@ public class SessionLoop {
     // requestCancel：cancel 请求（中断进行中回合，回合正常收敛收尾）。
     // onEvent：可选的逐事件钩子（如 ACP 事件翻译），在事件被内部消费前调用。
     // parentSession：首轮落库写入 header.parentSession 的提示（子 agent 标记父会话用）。
-    // approvalFn：工具级授权回调（ACP 权限桥注入；None 走默认文本 askUser）。
-    // askUserFn：用户问答实现（ask_user 工具调用；ACP 场景注入 Elicitation 表单桥）。
+    // askFn：结构化提问实现（信任闸门审批、ask_user 的问答都由它出去；None = 无交互通道）。
     // maxLoad：历史加载截断窗口（0=不截断；>0 语义同 truncateMessages，保留 Archive 头部）。
     public func run(sessionId: String, inputText: String,
         config: AgentConfig, provider: Provider, toolRegOverride: ?ToolRegistry,
@@ -72,8 +71,6 @@ public class SessionLoop {
         requestStop: () -> Bool, requestCancel: () -> Bool,
         onEvent!: ?(AgentEvent) -> Unit = None,
         parentSession!: ?String = None,
-        approvalFn!: ?(ToolCallBlock, String) -> String = None,
-        askUserFn!: (String) -> String = { q => "" },
         askFn!: Option<AskFn> = None,
         maxLoad!: Int64 = 0,
         attachments!: ArrayList<ContentBlock> = ArrayList()): TurnOutcome {
@@ -96,11 +93,10 @@ public class SessionLoop {
         }
         let runtime = AgentRuntime(config, provider, toolRegistry, this.sessionStore,
             this.trustMgr, this.skillReg, this.agentReg, this.providerReg,
-            ArrayList<Hook>(), askUserFn, env, this.mcpMgr, ask: askFn,
+            ArrayList<Hook>(), env, this.mcpMgr, ask: askFn,
             promptContributors: this.promptContributors,
             middlewares: this.middlewares,
             eventBus: this.eventBus)
-        runtime.toolApprovalFn = approvalFn
         let stream = runtime.chatWithSessionId(sessionId, msgs, env)
         // 事件消费 + 控制轮询收敛成一个独立函数（便于用构造出来的流单测：见
         // session_loop_test 的 consumeTurnStream 用例）

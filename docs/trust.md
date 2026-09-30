@@ -73,8 +73,8 @@ Tool 'bash' needs your approval.
 
 ## 非交互授权（headless）
 
-TUI 之外没有回答询问的地方：`run` / `serve` / `acp` 子命令若无人注入审批回调，默认 askUser
-返回空串，`NeedsApproval` 一律按拒绝处理 —— `bash` / `write_file` / `edit_file` 全部不可用。
+TUI 之外没有回答询问的地方：`run` / `serve` 子命令（一次性端点、批处理）没有提问通道，
+提问按取消处理，`NeedsApproval` 一律按拒绝处理 —— `bash` / `write_file` / `edit_file` 全部不可用。
 CI、评测框架、批处理等调用方用启动期声明的环境变量显式授权：
 
 ```bash

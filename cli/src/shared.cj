@@ -64,9 +64,9 @@ public func currentExePath(): String {
 /**
  * 解析 `ATELIER_TRUST_DIR`：`:` 分隔的可信工作目录列表。
  *
- * 为什么需要这么一条通道：信任闸门在 `Undecided` 时靠 askUser 询问（TUI 在输入行回答、
- * ACP 走权限桥）。无人应答的调用方（CI、评测框架、批处理）没有回答通道 —— 默认 askUser
- * 直接返回空串，判定等同于拒绝，Sequential 工具（bash / write_file / edit_file）在那里
+ * 为什么需要这么一条通道：信任闸门在 `Undecided` 时靠宿主提问（TUI 在输入行回答、
+ * ACP 走 elicitation）。无人应答的调用方（CI、评测框架、批处理）没有提问通道 ——
+ * 提问按取消处理，判定等同于拒绝，Sequential 工具（bash / write_file / edit_file）在那里
  * 全部不可用。本函数把「哪些目录可信」收敛为启动期的显式声明：只有拉起进程的一方能给出。
  *
  * 规则：`:` 分隔；跳过空白项（`::`、首尾分隔符）；去掉尾随 `/`（根 `/` 保留）；保序去重。

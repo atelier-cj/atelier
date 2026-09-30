@@ -8,6 +8,7 @@ import std.time.MonoTime
 import atelier.message.*
 import atelier.provider.*
 import atelier.tool.*
+import atelier.interaction.*
 import atelier.session.*
 import atelier.trust.*
 import atelier.skill.*
@@ -68,7 +69,7 @@ func makeMcpRuntime(provider: Provider, hooks: ArrayList<Hook>, mcpManager: McpM
     providerReg.register("default", provider)
     let store = MemorySessionStore()
     AgentRuntime(mcpRuntimeConfig(), provider, toolReg, store, trustMgr,
-        skillReg, agentReg, providerReg, hooks, { q => "" }, mcpManager)
+        skillReg, agentReg, providerReg, hooks, mcpManager)
 }
 
 // beforeTurn hook 捕获 tools 列表
@@ -600,9 +601,8 @@ func runtime_toolExecutionEvents_emittedAroundExecution() {
     @Expect(sawEnd, true)
 }
 
-// ---------- 工具级授权回调（toolApprovalFn，ACP 权限桥的挂载点） ----------
-
-// Sequential 慢工具：信任 Undecided → NeedsApproval 走授权回调
+// ---------- 信任闸门审批：走宿主的结构化提问通道 ----------
+// Sequential 慢工具：信任 Undecided → NeedsApproval 走审批通道
 class SequentialSlowTool <: Tool {
     public func name(): String { "seq_slow_tool" }
     public func description(): String { "sequential slow tool for approval test" }
@@ -640,108 +640,23 @@ class SeqToolTurnProvider <: Provider {
     }
 }
 
-func makeApprovalRuntime(provider: Provider, approval: ?(ToolCallBlock, String) -> String): AgentRuntime {
-    let toolReg = ToolRegistry()
-    toolReg.register(SequentialSlowTool())
-    let trustMgr = TrustManager()
-    let skillReg = SkillRegistry()
-    let agentReg = AgentRegistry()
-    let providerReg = ProviderRegistry()
-    providerReg.register("default", provider)
-    let store = MemorySessionStore()
-    let r = AgentRuntime(compactionRuntimeConfig(false, UInt32(16384), UInt32(20000), None), provider,
-        toolReg, store, trustMgr, skillReg, agentReg, providerReg, McpManager())
-    r.toolApprovalFn = approval
-    r
-}
-
-func lastAssistantTextOf(result: ArrayList<Message>): String {
-    var text = ""
-    for (m in result) {
-        match (m) {
-            case am: AssistantMessage =>
-                for (b in am.content.blocks()) {
-                    match (b) {
-                        case ContentBlock.TextBlock(t) => text = t
-                        case _ => ()
-                    }
-                }
-            case _ => ()
-        }
-    }
-    text
-}
-
-// toolApprovalFn 返回 "y"（once）→ 工具执行，回合正常收尾
-@Test
-func runtime_toolApprovalFn_allowsOnce() {
-    let calls = ArrayList<String>()
-    let provider = SeqToolTurnProvider()
-    let approval: ?(ToolCallBlock, String) -> String = { tc, wd =>
-        calls.add(tc.id)
-        "y"
-    }
-    let runtime = makeApprovalRuntime(provider, approval)
-    let msgs = ArrayList<Message>()
-    msgs.add(UserMessage(ContentList.ofText("go"), 0))
-    let result = runtime.chat(msgs).result()
-    @Expect(calls.size, 1)
-    @Expect(calls[0], "call_a")
-    // 工具结果进入会话消息（第二轮 EndTurn 正常收尾）
-    var foundToolResult = false
-    for (m in result) {
-        match (m) {
-            case tr: ToolResultMessage =>
-                for (b in tr.content.blocks()) {
-                    match (b) {
-                        case ContentBlock.TextBlock(t) =>
-                            if (t == "approved run done") { foundToolResult = true }
-                        case _ => ()
-                    }
-                }
-            case _ => ()
-        }
-    }
-    @Expect(foundToolResult, true)
-}
-
-// toolApprovalFn 返回 ""（deny）→ 工具不执行，结果消息带拒绝说明
-@Test
-func runtime_toolApprovalFn_denies() {
-    let provider = SeqToolTurnProvider()
-    let approval: ?(ToolCallBlock, String) -> String = { tc, wd => "" }
-    let runtime = makeApprovalRuntime(provider, approval)
-    let msgs = ArrayList<Message>()
-    msgs.add(UserMessage(ContentList.ofText("go"), 0))
-    let result = runtime.chat(msgs).result()
-    var foundDenied = false
-    for (m in result) {
-        match (m) {
-            case tr: ToolResultMessage =>
-                for (b in tr.content.blocks()) {
-                    match (b) {
-                        case ContentBlock.TextBlock(t) =>
-                            if (t.contains("denied approval")) { foundDenied = true }
-                        case _ => ()
-                    }
-                }
-            case _ => ()
-        }
-    }
-    @Expect(foundDenied, true)
-}
-
-// toolApprovalFn 为 None（默认）→ 走文本 askUser（deny：空返回）
-// 用 Box 承载可变状态（仓颉限制：lambda 不可捕获可变局部变量）
-class AskBox {
-    public var asked: Bool = false
+// 宿主提问通道的探针：记录被问到的请求（lambda 不能捕获可变局部变量，用对象承载）
+class ApprovalRecorder {
+    public var asked: Int64 = 0
+    public var lastToolName: String = ""
+    public var lastToolCallId: String = ""
     public init() {}
 }
 
-@Test
-func runtime_toolApprovalFn_defaultFallsBackToAskUser() {
-    let box = AskBox()
-    let provider = SeqToolTurnProvider()
+// 审批结论 → 结构化答复（结论只认选项 id）
+func approvalAnswerOf(req: UserRequest, decision: String): UserAnswer {
+    let sel = ArrayList<String>()
+    sel.add(decision)
+    UserAnswer(req.id, UserAnswerStatus.Answered, selected: sel)
+}
+
+// 带提问通道的 runtime：信任 Undecided 时审批走这条通道
+func makeApprovalRuntime(provider: Provider, decision: String, rec: ApprovalRecorder): AgentRuntime {
     let toolReg = ToolRegistry()
     toolReg.register(SequentialSlowTool())
     let trustMgr = TrustManager()
@@ -750,29 +665,78 @@ func runtime_toolApprovalFn_defaultFallsBackToAskUser() {
     let providerReg = ProviderRegistry()
     providerReg.register("default", provider)
     let store = MemorySessionStore()
-    let rt = AgentRuntime(compactionRuntimeConfig(false, UInt32(16384), UInt32(20000), None), provider,
+    let askFn: AskFn = { req: UserRequest =>
+        rec.asked = rec.asked + 1
+        rec.lastToolName = req.toolName
+        rec.lastToolCallId = req.toolCallId
+        approvalAnswerOf(req, decision)
+    }
+    AgentRuntime(compactionRuntimeConfig(false, UInt32(16384), UInt32(20000), None), provider,
         toolReg, store, trustMgr, skillReg, agentReg, providerReg,
-        ArrayList<Hook>(), { q => box.asked = true; "" }, McpManager())
+        ArrayList<Hook>(), McpManager(), ask: Some(askFn))
+}
+
+func approvalRunResult(runtime: AgentRuntime): ArrayList<Message> {
     let msgs = ArrayList<Message>()
     msgs.add(UserMessage(ContentList.ofText("go"), 0))
-    let result = rt.chat(msgs).result()
-    @Expect(box.asked, true)
-    // askUser deny → 工具被跳过（结果含拒绝消息）
-    var foundDenied = false
+    runtime.chat(msgs).result()
+}
+
+// 结果里是否有某段工具结果文本（审批断言的公共部分）
+func resultHasText(result: ArrayList<Message>, needle: String): Bool {
     for (m in result) {
         match (m) {
             case tr: ToolResultMessage =>
                 for (b in tr.content.blocks()) {
                     match (b) {
                         case ContentBlock.TextBlock(t) =>
-                            if (t.contains("denied approval")) { foundDenied = true }
+                            if (t.contains(needle)) { return true }
                         case _ => ()
                     }
                 }
             case _ => ()
         }
     }
-    @Expect(foundDenied, true)
+    false
+}
+
+// allow_once → 工具执行，回合正常收尾；审批请求带上被批准的工具身份
+@Test
+func runtime_approval_allowOnceRunsTool() {
+    let rec = ApprovalRecorder()
+    let runtime = makeApprovalRuntime(SeqToolTurnProvider(), "allow_once", rec)
+    let result = approvalRunResult(runtime)
+    @Expect(rec.asked, 1)
+    @Expect(rec.lastToolName, "seq_slow_tool")
+    // 审批要能对上「是哪一次调用」：宿主据此把它与具体 tool_call 关联
+    @Expect(rec.lastToolCallId, "call_a")
+    @Expect(resultHasText(result, "approved run done"), true)
+}
+
+// deny → 工具不执行，结果消息带拒绝说明
+@Test
+func runtime_approval_denySkipsTool() {
+    let rec = ApprovalRecorder()
+    let runtime = makeApprovalRuntime(SeqToolTurnProvider(), "deny", rec)
+    let result = approvalRunResult(runtime)
+    @Expect(rec.asked, 1)
+    @Expect(resultHasText(result, "denied approval"), true)
+}
+
+// 没有提问通道（一次性端点、批处理）→ 审批按取消处理：工具不执行，回合照常收尾
+// （不是挂起等人 —— 没人会来答，挂起等于把回合卡死）
+@Test
+func runtime_withoutAskChannel_deniesAndDoesNotHang() {
+    let provider = SeqToolTurnProvider()
+    let toolReg = ToolRegistry()
+    toolReg.register(SequentialSlowTool())
+    let providerReg = ProviderRegistry()
+    providerReg.register("default", provider)
+    let runtime = AgentRuntime(compactionRuntimeConfig(false, UInt32(16384), UInt32(20000), None), provider,
+        toolReg, MemorySessionStore(), TrustManager(), SkillRegistry(), AgentRegistry(), providerReg,
+        McpManager())
+    let result = approvalRunResult(runtime)
+    @Expect(resultHasText(result, "denied approval"), true)
 }
 
 // ========== ProviderMiddleware：请求级中间件链（wrap 顺序/透传/零行为变化） ==========
@@ -823,7 +787,7 @@ public func runtime_middlewaresWrappedInOrderAndApplied() {
     let store = MemorySessionStore()
     let mcpMgr = McpManager()
     let runtime = AgentRuntime(subConfig(), inner, toolReg, store, trustMgr,
-        skillReg, agentReg, providerReg, ArrayList<Hook>(), { q => "" },
+        skillReg, agentReg, providerReg, ArrayList<Hook>(),
         SessionEnvironment(), mcpMgr, middlewares: mws)
     let msgs = ArrayList<Message>()
     msgs.add(UserMessage(ContentList.ofText("hi"), 0))
@@ -872,7 +836,7 @@ class TrackingRuntime <: AgentRuntime {
         agentReg: AgentRegistry, providerReg: ProviderRegistry,
         mcpMgr: McpManager) {
         super(config, provider, toolReg, store, trustMgr, skillReg,
-            agentReg, providerReg, ArrayList<Hook>(), { q => "" }, mcpMgr)
+            agentReg, providerReg, ArrayList<Hook>(), mcpMgr)
     }
     public override func chat(messages: ArrayList<Message>): EventStream<AgentEvent, ArrayList<Message>> {
         this.chatCalls++
@@ -951,7 +915,7 @@ func runtime_providerFailureIsVisibleInMessages() {
     providerReg.register("default", provider)
     let runtime = AgentRuntime(mcpRuntimeConfig(), provider, ToolRegistry(),
         MemorySessionStore(), TrustManager(), SkillRegistry(), AgentRegistry(),
-        providerReg, ArrayList<Hook>(), { q => "" }, McpManager())
+        providerReg, ArrayList<Hook>(), McpManager())
 
     let msgs = ArrayList<Message>()
     msgs.add(UserMessage(ContentList.ofText("hi"), 0))
@@ -969,7 +933,7 @@ func runtime_shortCircuitIsVisibleInMessages() {
     providerReg.register("default", provider)
     let runtime = AgentRuntime(mcpRuntimeConfig(), provider, ToolRegistry(),
         MemorySessionStore(), TrustManager(), SkillRegistry(), AgentRegistry(),
-        providerReg, hooks, { q => "" }, McpManager())
+        providerReg, hooks, McpManager())
 
     let msgs = ArrayList<Message>()
     msgs.add(UserMessage(ContentList.ofText("hi"), 0))

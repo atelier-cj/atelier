@@ -81,7 +81,7 @@ func runGate(askAnswer: Option<UserAnswer>, sessionId!: String = "s1",
         case None => None
     }
     let runtime = AgentRuntime(AgentConfig.default(), provider, reg, MemorySessionStore(), trust,
-        SkillRegistry(), AgentRegistry(), preg, ArrayList<Hook>(), { q => "" }, McpManager(),
+        SkillRegistry(), AgentRegistry(), preg, ArrayList<Hook>(), McpManager(),
         ask: askImpl)
     let input = ArrayList<Message>()
     input.add(UserMessage(ContentList.ofText("跑一下"), 0))

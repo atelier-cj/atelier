@@ -1,6 +1,8 @@
 package server
 
 import atelier.message.*
+import atelier.interaction.*
+import jsonvalue.*
 import stdx.encoding.json.stream.*
 import std.collection.*
 
@@ -554,23 +556,111 @@ public struct Usage <: JsonSerializable {
     }
 }
 
+// /agent/input 回传体：按 requestId 精确对上一条待答提问（提问 id 确定性，见 UserRequest.id）。
+//
+// 旧契约把 answer 投给"任意一条等待中的提问"：并发请求下第一个等待者会拿到别人的答案。
+// 答复在这里按字段类型包装（multi_select → 数组、bool → 布尔），但合法性仍由 validateAnswer
+// 统一把关 —— 非法答复在边界处被打回，而不是让用户填完整张表才在 runtime 报错。
 public struct SessionInputDTO <: JsonDeserializable<SessionInputDTO> {
-    public let sessionId: String
-    public let answer: String
+    public let requestId: String
+    public let status: String                    // answered（缺省）/ cancelled / timed_out / pending
+    public let selected: ArrayList<String>       // 审批、选择：选项 id（多选按顺序）
+    public let text: String                      // 自由文本
+    public let values: HashMap<String, String>   // 表单：字段名 → 文本值（multi_select 逗号分隔）
 
-    public init(sessionId: String, answer: String) { this.sessionId = sessionId; this.answer = answer }
+    public init(requestId: String, status!: String = "answered",
+        selected!: ArrayList<String> = ArrayList(), text!: String = "",
+        values!: HashMap<String, String> = HashMap()) {
+        this.requestId = requestId
+        this.status = status
+        this.selected = selected
+        this.text = text
+        this.values = values
+    }
+
+    /** 转成结构化答复。请求 id 用提问本体的 id：回传体是照着它取的，两者必然一致。 */
+    public func toAnswer(req: UserRequest): UserAnswer {
+        let st = match (this.status) {
+            case "cancelled" => UserAnswerStatus.Cancelled
+            case "timed_out" => UserAnswerStatus.TimedOut
+            case "pending" => UserAnswerStatus.Pending
+            case _ => UserAnswerStatus.Answered
+        }
+        let vals = HashMap<String, JsonValue>()
+        for (f in req.fields) {
+            match (this.values.get(f.name)) {
+                case Some(raw) => vals[f.name] = fieldValueOf(f, raw)
+                case None => ()
+            }
+        }
+        UserAnswer(req.id, st, selected: this.selected, text: this.text, values: vals)
+    }
 
     public static func fromJson(r: JsonReader): SessionInputDTO {
-        var sessionId = ""; var answer = ""
+        var requestId = ""
+        var status = "answered"
+        var text = ""
+        let selected = ArrayList<String>()
+        let values = HashMap<String, String>()
         r.startObject()
-        while (r.peek() != EndObject) {
+        while (r.peek() != JsonToken.EndObject) {
             match (r.readName()) {
-                case "sessionId" => sessionId = r.readValue<String>()
-                case "answer" => answer = r.readValue<String>()
+                case "requestId" => requestId = r.readValue<String>()
+                case "status" => status = r.readValue<String>()
+                case "text" => text = r.readValue<String>()
+                case "selected" => readStringArray(r, selected)
+                case "values" => readStringMap(r, values)
                 case _ => r.skip()
             }
         }
         r.endObject()
-        SessionInputDTO(sessionId, answer)
+        SessionInputDTO(requestId, status: status, selected: selected, text: text, values: values)
+    }
+}
+
+// /agent/stream 的提问帧：整条 UserRequest 原样交给客户端（选项/字段/toolCallId 都在里面），
+// 客户端据此渲染，再用同一个 id 回传答复。
+public class UserRequestFrame <: JsonSerializable {
+    public let request: UserRequest
+
+    public init(request: UserRequest) { this.request = request }
+
+    public func toJson(w: JsonWriter): Unit {
+        w.startObject()
+        w.writeName("type").writeValue("user_request")
+        w.writeName("request").writeValue(this.request)
+        w.endObject()
+    }
+}
+
+func readStringArray(r: JsonReader, out: ArrayList<String>): Unit {
+    r.startArray()
+    while (r.peek() != JsonToken.EndArray) {
+        out.add(r.readValue<String>())
+    }
+    r.endArray()
+}
+
+func readStringMap(r: JsonReader, out: HashMap<String, String>): Unit {
+    r.startObject()
+    while (r.peek() != JsonToken.EndObject) {
+        let k = r.readName()
+        out[k] = r.readValue<String>()
+    }
+    r.endObject()
+}
+
+// 表单字段值按声明类型包装：否则 bool/multi_select 会被校验按"类型不符"打回
+func fieldValueOf(f: UserField, raw: String): JsonValue {
+    match (f.fieldType) {
+        case UserFieldType.MultiSelect =>
+            let arr = ArrayList<JsonValue>()
+            for (part in raw.split(",")) {
+                let t = part.trimAscii()
+                if (t != "") { arr.add(JsonValue.String(t)) }
+            }
+            JsonValue.Array(arr)
+        case UserFieldType.Boolean => JsonValue.Boolean(raw == "true" || raw == "yes")
+        case _ => JsonValue.String(raw)
     }
 }

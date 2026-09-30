@@ -854,9 +854,8 @@ public class ChatTui {
             sideEffectToolTimeout: this.agentConfig.sideEffectToolTimeout)
         AgentRuntime(cfg, this.provider, this.toolRegistry, this.sessionStore,
             this.trustManager, this.skillRegistry, this.agentRegistry, this.providerRegistry,
-            // 结构化提问优先：所有提问（信任闸门、ask_user）都从这里出去。
-            // 位置上的 askUser 是字符串时代的兜底通道，提问一律走结构化，它不会被执行
-            ArrayList<Hook>(), { q => "" }, this.mcpManager, ask: Some({ req => this.askHost(t, req) }))
+            // 提问全部走结构化通道：信任闸门审批、ask_user 的问答都在这里收按键
+            ArrayList<Hook>(), this.mcpManager, ask: Some({ req: UserRequest => this.askHost(t, req) }))
     }
 
     /**

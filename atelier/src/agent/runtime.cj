@@ -80,8 +80,7 @@ public open class AgentRuntime {
     private let providerRegistry: ProviderRegistry
     private let toolExecutor: ToolExecutor
     private let hooks: ArrayList<Hook>
-    private let askUser: AskUserFn
-    // 结构化提问（None = 走字符串适配器）；宿主提供它才能返回 Pending 让 run 挂起
+    // 结构化提问（None = 该宿主没有交互通道，提问即取消）；用它可以返回 Pending 让 run 挂起
     private let askFn: Option<AskFn>
     // 本次 run 的恢复答复（chatWithEnv 开跑时设置）。运行时不跨 run 复用：
     // 现有宿主（CLI 每回合、ACP 每会话、server 每请求）都是新建实例，子 agent 亦各自持有一份。
@@ -99,16 +98,12 @@ public open class AgentRuntime {
     private let cancels = HashMap<String, AtomicBool>()
     private let cancelLock = Mutex()
 
-    // 可选工具级授权回调（ACP 等无终端宿主注入）：返回 y/a/""（once/always/deny）。
-    // None 时维持文本 askUser 问答（默认行为）。NeedsApproval 判定优先走本回调。
-    public var toolApprovalFn: ?(ToolCallBlock, String) -> String = None
-
-    // 13 参：最全签名（hooks + askUser + sessionEnv + mcpManager），其余构造统一委托至此
+    // 13 参：最全签名（hooks + sessionEnv + mcpManager + ask），其余构造统一委托至此
     public init(config: AgentConfig, provider: Provider,
         toolRegistry: ToolRegistry, sessionStore: SessionStore,
         trustManager: TrustManager, skillRegistry: SkillRegistry,
         agentRegistry: AgentRegistry, providerRegistry: ProviderRegistry,
-        hooks: ArrayList<Hook>, askUser: AskUserFn,
+        hooks: ArrayList<Hook>,
         sessionEnv: SessionEnvironment, mcpManager: McpManager,
         ask!: Option<AskFn> = None,
         promptContributors!: ArrayList<PromptSegmentContributor> = ArrayList(),
@@ -124,7 +119,6 @@ public open class AgentRuntime {
         this.toolExecutor = ToolExecutor(this.toolRegistry,
             budget: toolBudgetPolicyOf(config))
         this.hooks = hooks
-        this.askUser = askUser
         this.askFn = ask
         this.modelRegistry = ModelContextRegistry()
         this.sessionEnv = sessionEnv
@@ -142,22 +136,23 @@ public open class AgentRuntime {
         toolRegistry: ToolRegistry, sessionStore: SessionStore,
         trustManager: TrustManager, skillRegistry: SkillRegistry,
         agentRegistry: AgentRegistry, providerRegistry: ProviderRegistry,
-        hooks: ArrayList<Hook>, askUser: AskUserFn, mcpManager: McpManager,
+        hooks: ArrayList<Hook>, mcpManager: McpManager,
         ask!: Option<AskFn> = None) {
         this(config, provider, toolRegistry, sessionStore, trustManager,
-            skillRegistry, agentRegistry, providerRegistry, hooks, askUser,
+            skillRegistry, agentRegistry, providerRegistry, hooks,
             SessionEnvironment(), mcpManager, ask: ask)
     }
 
-    // 9 参：config..providerRegistry + mcpManager
+    // 9 参：config..providerRegistry + mcpManager（可带 ask；不传 = 无交互通道）
     public init(config: AgentConfig, provider: Provider,
         toolRegistry: ToolRegistry, sessionStore: SessionStore,
         trustManager: TrustManager, skillRegistry: SkillRegistry,
         agentRegistry: AgentRegistry, providerRegistry: ProviderRegistry,
-        mcpManager: McpManager) {
+        mcpManager: McpManager,
+        ask!: Option<AskFn> = None) {
         this(config, provider, toolRegistry, sessionStore, trustManager,
             skillRegistry, agentRegistry, providerRegistry,
-            ArrayList<Hook>(), { q => "" }, mcpManager)
+            ArrayList<Hook>(), mcpManager, ask: ask)
     }
 
     // 取消进行中的会话回合（幂等：未知/已结束会话为 no-op）。
@@ -196,37 +191,21 @@ public open class AgentRuntime {
         this.chatWithEnv(sessionId, messages, sessionEnv)
     }
 
-    // 由会话级上下文派生出「本次调用」的上下文：只多一个 toolCallId
+    // 由会话级上下文派生出「本次调用」的上下文：多一个 toolCallId，其余（含提问通道）原样带过去
     private func callContext(ctx: ToolContext, toolCallId: String): ToolContext {
-        ToolContext(ctx.workDir, ctx.askUser, ctx.env, ctx.sessionId, toolCallId: toolCallId)
+        ToolContext(ctx.workDir, ctx.env, ctx.sessionId, toolCallId: toolCallId, ask: ctx.askFn)
     }
 
-    // 问宿主要答复：恢复带回的答复优先；否则走审批桥（ACP 权限），最后才是 ToolContext.ask。
-    // 两个审批调用点共用，避免"恢复路径只改一处"这类漏改。
-    private func askHost(req: UserRequest, resumed: HashMap<String, UserAnswer>,
-        ctx: ToolContext, call: ToolCallBlock): UserAnswer {
+    // 问宿主要答复：恢复带回的答复优先（重放同一回合时命中就不再问），否则交给宿主的提问通道。
+    // 无通道时按"取消"处理 —— 工具据此如实回报"没问到"，而不是拿一个空答复继续跑。
+    private func askHost(req: UserRequest, resumed: HashMap<String, UserAnswer>): UserAnswer {
         match (resumed.get(req.id)) {
             case Some(a) => return a
             case None => ()
         }
-        // 结构化实现优先：只有它能表达"挂起"（Pending）与选择/表单
         match (this.askFn) {
-            case Some(f) => return f(req)
-            case None => ()
-        }
-        match (this.toolApprovalFn) {
-            case Some(f) =>
-                let raw = f(call, ctx.workDir)
-                let sel = ArrayList<String>()
-                if (raw == "a" || raw == "always" || raw == "yes") {
-                    sel.add("allow_always")
-                } else if (raw == "y" || raw == "once") {
-                    sel.add("allow_once")
-                } else {
-                    sel.add("deny")
-                }
-                UserAnswer(req.id, UserAnswerStatus.Answered, selected: sel)
-            case None => ctx.ask(req)
+            case Some(f) => f(req)
+            case None => UserAnswer(req.id, UserAnswerStatus.Cancelled)
         }
     }
 
@@ -234,7 +213,7 @@ public open class AgentRuntime {
         let stream = EventStream<AgentEvent, ArrayList<Message>>()
         let se = sessionEnv
         let workDir = resolveWorkDir(se)
-        let ctx = ToolContext(workDir, this.askUser, se.context, sessionId, ask: this.askFn)
+        let ctx = ToolContext(workDir, se.context, sessionId, ask: this.askFn)
         // 恢复：宿主随消息带回的答复（重放同一回合时要先查它，命中就不再问宿主）
         let resumedAnswers = collectResumedAnswers(messages)
         this.resumedAnswersForSub = resumedAnswers
@@ -447,7 +426,7 @@ public open class AgentRuntime {
                                                     tc.name, JsonValue.Map(HashMap<String, JsonValue>()),
                                                     "Tool '" + tc.name + "' needs your approval.",
                                                     toolCallId: tc.id)
-                                                let gateAns = this.askHost(gateReq, resumedAnswers, ctx, tc)
+                                                let gateAns = this.askHost(gateReq, resumedAnswers)
                                                 // 宿主要求挂起：记下来，整批都不执行（结果在批量执行后才写历史，
                                                 // 所以此刻挂起等于"什么都没发生"，重放不会重复副作用）
                                                 match (gateAns.status) {
@@ -877,12 +856,11 @@ public open class AgentRuntime {
     /** 交互审批；与模型直调的审批分支保持同样的回答语义。 */
     private func approveSubCall(tool: Tool, args: JsonValue, ctx: ToolContext): Bool {
         let log = getGlobalLogger([("name", "AgentRuntime")])
-        let call = ToolCallBlock("", tool.name(), args)
         // 与模型直调的审批同一条路径（同一套选项、同一套判定）
         let subReq = approvalRequest(
             "ask:${ctx.sessionId}:sub:${tool.name()}:approval",
             tool.name(), args, "Tool '" + tool.name() + "' needs your approval.")
-        let subAns = this.askHost(subReq, this.resumedAnswersForSub, ctx, call)
+        let subAns = this.askHost(subReq, this.resumedAnswersForSub)
         let subInvalid = match (validateAnswer(subReq, subAns)) {
             case Some(err) =>
                 log.warn("invalid approval answer (${err}); treating as deny", Array<Attr>())
