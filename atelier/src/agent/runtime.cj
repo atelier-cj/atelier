@@ -308,8 +308,10 @@ public open class AgentRuntime {
                         }
                         if (!aborted) { assistantMsg = chatStream.result() }
                     } catch (e: Exception) {
-                        log.error("provider error: ${e.message}", Array<Attr>())
-                        let failureMsg = AssistantMessage(ContentList.ofText("[provider error] ${e.message}"), "", "", StopReason.Error, TokenUsage(0, 0), 0)
+                        // 用 toString() 而不是 message：Socket/FS 这类异常的 message 常为空，
+                        // 只打 message 在日志里就是一行「provider error: 」，等于没有信息
+                        log.error("provider error: ${e.toString()}", Array<Attr>())
+                        let failureMsg = AssistantMessage(ContentList.ofText("[provider error] ${e.toString()}"), "", "", StopReason.Error, TokenUsage(0, 0), 0)
                         // 同短路分支：错误必须进消息列表，否则消费端与界面都看不到它
                         currentMessages.add(failureMsg)
                         this.emit(stream, TurnEndEvent(failureMsg, ArrayList<ToolResultMessage>()))

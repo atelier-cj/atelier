@@ -131,20 +131,30 @@ main(): Int64 {
 
         case "run" =>
             if (args.size < 3) {
-                println("Usage: atelier run [agent] <prompt>")
+                println("Usage: atelier run [--json-events] [agent] <prompt>")
                 return 1
             }
+            // --json-events：stdout 改为逐行 JSON 事件（CI / 评测框架消费），答案在最后一条
+            // message 事件里；不加这个开关时 stdout 仍是纯答案文本，老用法不受影响。
+            var jsonEvents = false
             var startIdx: Int64 = 2
-            let agentName: String
-            if (agentReg.has(args[2])) {
-                agentName = args[2]
+            if (args[2] == "--json-events") {
+                jsonEvents = true
                 startIdx = 3
-            } else {
-                agentName = "default"
-                startIdx = 2
             }
             if (startIdx >= args.size) {
-                println("Usage: atelier run [agent] <prompt>")
+                println("Usage: atelier run [--json-events] [agent] <prompt>")
+                return 1
+            }
+            let agentName: String
+            if (agentReg.has(args[startIdx])) {
+                agentName = args[startIdx]
+                startIdx = startIdx + 1
+            } else {
+                agentName = "default"
+            }
+            if (startIdx >= args.size) {
+                println("Usage: atelier run [--json-events] [agent] <prompt>")
                 return 1
             }
             var prompt = ""
@@ -164,11 +174,23 @@ main(): Int64 {
             let msgs = ArrayList<Message>()
             msgs.add(UserMessage(ContentList.ofText(prompt), 0))
             let stream = runtime.chat(msgs)
-            // 进度走 stderr：stdout 只留答案（一次性运行常被管道/脚本消费）
-            pumpProgress(stream, { line => eprintln(line) })
-            let result = stream.result()
-            let last = lastTextFrom(result)
-            println(last)
+            if (jsonEvents) {
+                // 进度照旧走 stderr，JSONL 独占 stdout：两边各自可解析
+                pumpProgress(stream, { line => eprintln(line) },
+                    { ev =>
+                        for (line in jsonLinesFromEvent(ev)) { println(line) }
+                    })
+                let result = stream.result()
+                // 兜底：连一条 assistant 消息都没产出时，至少让消费方知道本轮结束了
+                if (!hasAssistantMessage(result)) {
+                    println(fallbackMessageLine(lastTextFrom(result)))
+                }
+            } else {
+                // 进度走 stderr：stdout 只留答案（一次性运行常被管道/脚本消费）
+                pumpProgress(stream, { line => eprintln(line) })
+                let result = stream.result()
+                println(lastTextFrom(result))
+            }
 
         case _ =>
             println("Atelier Agent Runtime")
