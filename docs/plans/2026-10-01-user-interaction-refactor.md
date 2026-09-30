@@ -255,3 +255,24 @@ node scripts/agui-probe.mjs http://127.0.0.1:8791 default
 | 2 | `RUN_STARTED → STATE_SNAPSHOT → TOOL_CALL_RESULT → STEP_STARTED → TEXT_MESSAGE_* → REASONING_* → STEP_FINISHED → RUN_FINISHED{success}` | 恢复补发 `TOOL_CALL_RESULT`（**不重发** `TOOL_CALL_START`）✓ 正常收尾 ✓ |
 
 这一步同时验证了三件本轮改动：中断边界前给状态、恢复走"补结果"而不是重放整段、挂起期间不重复执行工具。
+
+## 十一、TUI 迁移的实施笔记（2026-10-01）
+
+收敛规则收在 `cli/src/ask.cj` 的 `AskPrompt`（与终端无关 → 可单测），TUI 只做两件事：
+画它给的行（`panelLines`）、把按键喂给它（`handleAskKey`）。判定标准是**答复在送出前过一遍
+`validateAnswer`**（runtime 同一套），不合格就地打回 —— 宿主自己造答复最容易出的错，
+就是造出一个 runtime 认不出来的东西（用户已经走完流程，回合却报"答复不合格"）。
+
+| 项 | 结论 | 理由 |
+|---|---|---|
+| 候选列表（审批 / 选择 / `bool`\|`select`\|`multi_select` 字段） | ↑/↓ 移动，空格勾选（多选），回车提交 | 候选自带 `label`/`description`/`danger`，比 y/a/n 菜单能承载语义 |
+| 文本字段（`text`/`number`，含"普通提问"的单字段表单） | 走输入行，逐字段推进 | 与既有输入模型一致；打回时原文放回输入行 |
+| Esc | 取消**本次提问**，不再是退出程序 | 提问是模态，模态里的 Esc 是取消；退出仍走 Ctrl+C |
+| 取消的答复 | `Cancelled`（不是空串/空答复） | 空答复无法与"拒绝 / 答了个空 / 没通道"区分 |
+| `ToolExecution`（客户端工具） | 直接 `Cancelled` + 面板说明 | TUI 没有执行外部工具的通道，等下去没人会按 |
+| 表单值形态 | `text`/`number`/`select` → 字符串；`bool` → 布尔；`multi_select` → 字符串数组 | 与 ACP 侧字符串通道口径一致，校验侧接受"可解析成数字的字符串" |
+| 无候选项的请求 | 初始化即 `Cancelled`，不进等待 | 让用户对着空列表敲回车 = 把回合挂死 |
+
+模态性有跨线程用例守着（`tui_test.cj`）：回合线程登记提问并等待 → 主线程按键 → 答复回填；
+提问期间打的字不会变成新消息。
+
