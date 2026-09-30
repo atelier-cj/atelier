@@ -61,7 +61,6 @@ public class AtelierHttpHandler {
         let agUi = AgUiHandler(this.agentRegistry, this.toolRegistry, this.sessionStore,
             this.trustManager, this.skillRegistry, this.providerRegistry, this.mcpManager)
         distributor.register("/ag-ui/agent", { ctx => agUi.handleAgent(ctx) })
-        distributor.register("/ag-ui/input", { ctx => agUi.handleInput(ctx) })
     }
 
     private func handleAgentConfig(ctx: HttpContext): Unit {
