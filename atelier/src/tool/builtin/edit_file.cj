@@ -40,7 +40,7 @@ public class EditFileTool <: Tool {
             case Some(JsonValue.String(s)) => s
             case _ => return ToolResult("Missing required parameter: newString", None, true, false)
         }
-        let fullPath: String = if (ctx.workDir == "") { pathRel } else { ctx.workDir + "/" + pathRel }
+        let fullPath = resolveToolPath(ctx.workDir, pathRel)
 
         // Check if file exists
         if (!exists(fullPath)) {
