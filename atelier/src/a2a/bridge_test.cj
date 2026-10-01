@@ -289,3 +289,18 @@ func a2aBridge_executeReusesSessionAcrossTasks() {
     }
     a2aBridgeCleanup(dir)
 }
+
+// 配置没写名字时用启动时选定的 agent 名兜底：A2A 卡片的 name 是必填非空字段
+@Test
+func a2aBridge_agentCardFallsBackToAgentName() {
+    let cfg = AgentConfig("", None, "sp", None, "echo", None,
+        ArrayList<String>(), ArrayList<String>(), 0,
+        4, 0.0, 1024, None, false, None, 8, 30, 0,
+        ArrayList<String>(), None, 0, 0)
+    let spec = a2aTestSpec(ArrayList<String>())
+    let card = agentCardFromConfig(cfg, spec, "http://x", "1.0.0", name: "default")
+    @Expect(card.name, "default")
+    @Expect(card.description, "atelier agent 'default'")
+    let bare = agentCardFromConfig(cfg, spec, "http://x", "1.0.0")
+    @Expect(bare.name, "atelier")
+}

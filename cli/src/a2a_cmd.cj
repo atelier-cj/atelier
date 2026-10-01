@@ -57,7 +57,7 @@ public func runA2a(agentNameArg: String, spec: HarnessSpec, sessionDir: String,
     } else {
         "a2a-sessions.json"
     }
-    let bridge = A2aBridge(spec, cfg, provider, mappingFile, workspace)
+    let bridge = A2aBridge(spec, cfg, provider, mappingFile, workspace, agentName: agentName)
     let baseUrl = "http://${host}:${port}"
     let server = A2aServer(bridge.agentCard(baseUrl, "0.1.12"), bridge,
         options: ServerOptions.of(streaming: true, pushNotifications: false))

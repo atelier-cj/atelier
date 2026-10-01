@@ -41,6 +41,8 @@ public class A2aBridge <: A2aExecutor {
     private let spec: HarnessSpec
     private let manager: A2aSessionManager
     private let loop: SessionLoop
+    // agent 名（agent 配置里 name 为空时作卡片兜底名：A2A 卡片 name 是必填非空字段）
+    private let agentName: String
     // 会话工作目录（工具工作目录 + AGENTS.md 注入点）：A2A 请求本身不带 cwd
     private let workspace: String
     private let maxLoad: Int64
@@ -53,9 +55,10 @@ public class A2aBridge <: A2aExecutor {
     private let runningLock = Mutex()
 
     public init(spec: HarnessSpec, baseConfig: AgentConfig, provider: Provider,
-        mappingFile: String, workspace: String, maxLoad!: Int64 = 15) {
+        mappingFile: String, workspace: String, agentName!: String = "", maxLoad!: Int64 = 15) {
         this.spec = spec
         this.baseConfig = baseConfig
+        this.agentName = agentName
         this.provider = provider
         this.manager = A2aSessionManager(mappingFile)
         this.loop = SessionLoop(spec)
@@ -68,7 +71,7 @@ public class A2aBridge <: A2aExecutor {
         bindings!: ArrayList<String> = ArrayList<String>([BindingJsonRpc]),
         streaming!: Bool = true): AgentCard {
         agentCardFromConfig(this.baseConfig, this.spec, baseUrl, version,
-            bindings: bindings, streaming: streaming)
+            name: this.agentName, bindings: bindings, streaming: streaming)
     }
 
     // 会话映射管理器（宿主做 tasks/list、会话清理时用）
@@ -292,8 +295,11 @@ func errorMessage(ctx: RequestContext, detail: String): Message {
 // skills 取配置声明**且**在 SkillRegistry 里注册到的技能 —— 声明了却查不到的技能不列进卡片
 // （卡片是对外承诺，「声明了做不到」比不声明更糟）。
 public func agentCardFromConfig(cfg: AgentConfig, spec: HarnessSpec, baseUrl: String,
-    version: String, bindings!: ArrayList<String> = ArrayList<String>([BindingJsonRpc]),
+    version: String, name!: String = "",
+    bindings!: ArrayList<String> = ArrayList<String>([BindingJsonRpc]),
     streaming!: Bool = true): AgentCard {
+    // 卡片 name 是必填非空字段：配置没写名字时用启动时选定的 agent 名兜底
+    let cardName = if (cfg.name != "") { cfg.name } else if (name != "") { name } else { "atelier" }
     let skills = ArrayList<AgentSkill>()
     for (name in cfg.skills) {
         match (spec.skills.get(name)) {
@@ -310,8 +316,8 @@ public func agentCardFromConfig(cfg: AgentConfig, spec: HarnessSpec, baseUrl: St
     }
     let description = match (cfg.description) {
         case Some(d) => d
-        case None => "atelier agent '${cfg.name}'"
+        case None => "atelier agent '${cardName}'"
     }
-    buildAgentCard(cfg.name, description, version, baseUrl,
+    buildAgentCard(cardName, description, version, baseUrl,
         bindings: bindings, streaming: streaming, skills: skills)
 }
