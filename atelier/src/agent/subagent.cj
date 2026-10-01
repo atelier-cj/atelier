@@ -145,13 +145,8 @@ public open class SubAgentHandle {
 // idleTimeoutSec > 0：本地子 worker 连续空闲 N 秒自动回收（close + 从注册表摘除，
 // 会话历史保留，resumeSession 可重建）；0（默认）= 永不自动回收（显式 close 语义）。
 public class SubAgentManager {
-    private let toolReg: ToolRegistry
-    private let trustMgr: TrustManager
-    private let skillReg: SkillRegistry
-    private let agentReg: AgentRegistry
-    private let providerReg: ProviderRegistry
-    private let sessionStore: SessionStore
-    private let mcpMgr: McpManager
+    // 装配束：子 Agent 与父共用同一份组件（一次装配，不再逐个穿参数）
+    private let spec: HarnessSpec
     // 本地子空闲自动回收阈值（秒；0 = 不回收）。远程子无 idle 探测通道，仅显式 close。
     private let idleTimeoutSec: Int64
     private let handles = HashMap<String, SubAgentHandle>()
@@ -161,19 +156,10 @@ public class SubAgentManager {
     // 统一回合执行（历史装载/事件消费/落库）
     private let loop: SessionLoop
 
-    public init(toolReg: ToolRegistry, trustMgr: TrustManager,
-        skillReg: SkillRegistry, agentReg: AgentRegistry,
-        providerReg: ProviderRegistry, sessionStore: SessionStore,
-        mcpMgr: McpManager, idleTimeoutSec!: Int64 = 0) {
-        this.toolReg = toolReg
-        this.trustMgr = trustMgr
-        this.skillReg = skillReg
-        this.agentReg = agentReg
-        this.providerReg = providerReg
-        this.sessionStore = sessionStore
-        this.mcpMgr = mcpMgr
+    public init(spec: HarnessSpec, idleTimeoutSec!: Int64 = 0) {
+        this.spec = spec
         this.idleTimeoutSec = idleTimeoutSec
-        this.loop = SessionLoop(toolReg, trustMgr, skillReg, agentReg, providerReg, sessionStore, mcpMgr)
+        this.loop = SessionLoop(spec)
     }
 
     // 启动子 Agent：立即返回句柄（首回合在 worker 线程异步执行，完成后 outbox 投 done）
@@ -198,7 +184,7 @@ public class SubAgentManager {
         parentSessionId: String, childSessionId: String,
         env: SessionEnvironment): ?SubAgentHandle {
         // 会话必须存在于 store
-        let exists = try { this.sessionStore.load(childSessionId).size >= Int64(0) } catch (_) { false }
+        let exists = try { this.spec.store.load(childSessionId).size >= Int64(0) } catch (_) { false }
         if (!exists) { return None }
         synchronized(this.lock) {
             if (this.handles.contains(childSessionId)) { return None }
@@ -211,7 +197,7 @@ public class SubAgentManager {
 
     // 按 agent 注册名启动（父端 subagent_start 工具入口）；config/provider 从注册表解析
     public func startByName(agentName: String, parentSessionId: String, initialPrompt: String): ?SubAgentHandle {
-        match (this.agentReg.get(agentName)) {
+        match (this.spec.agents.get(agentName)) {
             case Some(cfg) =>
                 match (this.resolveSubProvider(cfg)) {
                     case Some(p) => Some(this.start(cfg, p, parentSessionId, initialPrompt))
@@ -224,10 +210,10 @@ public class SubAgentManager {
     // 解析子 agent provider：配置指定名 → default → 环境变量 OpenAI 兜底（与 CLI resolveProviderFor 同策略）
     private func resolveSubProvider(cfg: AgentConfig): ?Provider {
         let providerName = match (cfg.provider) { case Some(v) => v; case None => "default" }
-        match (this.providerReg.get(providerName)) {
+        match (this.spec.providers.get(providerName)) {
             case Some(p) => Some(p)
             case None =>
-                match (this.providerReg.get("default")) {
+                match (this.spec.providers.get("default")) {
                     case Some(p) => Some(p)
                     case None =>
                         let baseURL = match (getVariable("OPENAI_BASE_URL")) {
@@ -392,7 +378,7 @@ public class SubAgentManager {
         h.setState(SubagentState.Running)
         // 子工具注册表 = 共享全量 + send_message（避免 send_message 泄漏进父的工具列表）
         let childToolReg = ToolRegistry()
-        for (t in this.toolReg.list()) { childToolReg.register(t) }
+        for (t in this.spec.tools.list()) { childToolReg.register(t) }
         let sendTool = SendMessageTool(
             { body, kind =>
                 let mail = AgentMail(h.subSessionId, h.parentSessionId, kind, body)

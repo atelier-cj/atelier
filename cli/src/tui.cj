@@ -418,13 +418,8 @@ public class ChatTui {
     private let registry: SlashCommandRegistry
     private var agentConfig: AgentConfig
     private var provider: Provider
-    private let toolRegistry: ToolRegistry
-    private let sessionStore: SessionStore
-    private let trustManager: TrustManager
-    private let skillRegistry: SkillRegistry
-    private let agentRegistry: AgentRegistry
-    private let providerRegistry: ProviderRegistry
-    private let mcpManager: McpManager
+    // 装配束：组件与子 Agent 管理器都从这里来
+    private let spec: HarnessSpec
     private let sessionDir: String
     private var sessionId: String
     // messages 包内可见：测试要断言"提问期间打的字没有变成用户消息"
@@ -451,21 +446,12 @@ public class ChatTui {
     private let activity = TurnActivity()
 
     public init(agentName: String, registry: SlashCommandRegistry, agentConfig: AgentConfig,
-        provider: Provider, toolRegistry: ToolRegistry, sessionStore: SessionStore,
-        trustManager: TrustManager, skillRegistry: SkillRegistry, agentRegistry: AgentRegistry,
-        providerRegistry: ProviderRegistry, resumeSessionId: String, mcpManager: McpManager,
-        sessionDir: String) {
+        spec: HarnessSpec, resumeSessionId: String, sessionDir: String) {
         this.agentName = agentName
         this.registry = registry
         this.agentConfig = agentConfig
-        this.provider = provider
-        this.toolRegistry = toolRegistry
-        this.sessionStore = sessionStore
-        this.trustManager = trustManager
-        this.skillRegistry = skillRegistry
-        this.agentRegistry = agentRegistry
-        this.providerRegistry = providerRegistry
-        this.mcpManager = mcpManager
+        this.provider = spec.resolveProvider(agentConfig)
+        this.spec = spec
         this.sessionDir = sessionDir
         this.input = ArrayList<Rune>()
         this.scroll = 0
@@ -478,13 +464,12 @@ public class ChatTui {
         this.helpMode = false
         this.out = AutoStream.stdout()
         // 可持续子 Agent：回合内工具 + /subagent 命令
-        this.subMgr = SubAgentManager(toolRegistry, trustManager, skillRegistry,
-            agentRegistry, providerRegistry, sessionStore, mcpManager)
-        registerParentSubagentTools(toolRegistry, this.subMgr)
+        this.subMgr = SubAgentManager(spec)
+        registerParentSubagentTools(spec.tools, this.subMgr)
         if (resumeSessionId != "") {
             this.sessionId = resumeSessionId
             this.messages = try {
-                this.sessionStore.load(resumeSessionId)
+                this.spec.store.load(resumeSessionId)
             } catch (e: Exception) {
                 this.status = "会话恢复失败: " + e.message
                 ArrayList<Message>()
@@ -829,33 +814,11 @@ public class ChatTui {
 
     private func makeRuntime(t: Terminal): AgentRuntime {
         let model = if (this.modelOverride != "") { this.modelOverride } else { this.agentConfig.model }
-        let cfg = AgentConfig(
-            this.agentConfig.name, this.agentConfig.description,
-            this.agentConfig.systemPrompt, this.agentConfig.userPromptTemplate,
-            model, this.agentConfig.provider,
-            this.agentConfig.tools, this.agentConfig.skills,
-            this.agentConfig.mcpCooldownTurns,
-            this.agentConfig.maxTurns, this.agentConfig.temperature,
-            this.agentConfig.maxOutputTokens, this.agentConfig.thinkingLevel,
-            this.agentConfig.compactionEnabled,
-            this.agentConfig.compactionReserveTokens,
-            this.agentConfig.keepRecentTokens,
-            None,
-            this.agentConfig.maxToolCalls,
-            this.agentConfig.toolTimeout,
-            this.agentConfig.minToolInterval,
-            this.agentConfig.tags, this.agentConfig.createdBy,
-            this.agentConfig.createdAt, this.agentConfig.updatedAt,
-            // 同 repl：末尾的可选参数必须显式带上，漏传会静默落回默认值
-            supportsVision: this.agentConfig.supportsVision,
-            toolPresentation: this.agentConfig.toolPresentation,
-            ptcTimeoutSeconds: this.agentConfig.ptcTimeoutSeconds,
-            ptcMaxSubCalls: this.agentConfig.ptcMaxSubCalls,
-            sideEffectToolTimeout: this.agentConfig.sideEffectToolTimeout)
-        AgentRuntime(cfg, this.provider, this.toolRegistry, this.sessionStore,
-            this.trustManager, this.skillRegistry, this.agentRegistry, this.providerRegistry,
-            // 提问全部走结构化通道：信任闸门审批、ask_user 的问答都在这里收按键
-            ArrayList<Hook>(), this.mcpManager, ask: Some({ req: UserRequest => this.askHost(t, req) }))
+        // 模型切换走配置派生：手工重建会漏带末尾可选参数（上下文窗口等），丢了不报错
+        let cfg = this.agentConfig.withModel(model)
+        // 提问全部走结构化通道：信任闸门审批、ask_user 的问答都在这里收按键
+        let runSpec = this.spec.withAsk({ req: UserRequest => this.askHost(t, req) })
+        AgentRuntime(runSpec, cfg)
     }
 
     /**
@@ -965,20 +928,20 @@ public class ChatTui {
         let newMsgs = extractNewMessages(oldMsgs, this.messages)
         if (newMsgs.size == 0) { return }
         let lastLeaf: Option<String> = try {
-            let data = this.sessionStore.loadEntries(this.sessionId)
+            let data = this.spec.store.loadEntries(this.sessionId)
             if (data.entries.size > 0) { Some(data.entries[data.entries.size - 1].id) } else { None }
         } catch (e: Exception) {
             None
         }
         match (lastLeaf) {
             case Some(leaf) =>
-                try { this.sessionStore.appendBranch(this.sessionId, leaf, newMsgs) } catch (e: Exception) {
+                try { this.spec.store.appendBranch(this.sessionId, leaf, newMsgs) } catch (e: Exception) {
                     this.status = "会话落盘失败: " + e.message
                 }
             case None =>
                 try {
                     let header = SessionHeader(1, this.sessionId, 0, 0, "", "", "", None)
-                    this.sessionStore.save(this.sessionId, header, this.messages)
+                    this.spec.store.save(this.sessionId, header, this.messages)
                 } catch (e: Exception) {
                     this.status = "会话落盘失败: " + e.message
                 }
@@ -986,7 +949,7 @@ public class ChatTui {
     }
 
     private func handleModelsCommand(): Unit {
-        let models = uniqueModels(this.agentRegistry.list())
+        let models = uniqueModels(this.spec.agents.list())
         if (models.size == 0) {
             this.status = "没有配置模型"
             return
@@ -1009,7 +972,7 @@ public class ChatTui {
             return
         }
         // 无参：交互选择
-        let agents = this.agentRegistry.list()
+        let agents = this.spec.agents.list()
         if (agents.size <= 1) {
             this.status = "Agent: " + this.agentName + "（只有一个 agent 可切换）"
             return
@@ -1023,11 +986,11 @@ public class ChatTui {
 
     // 切换 Agent：换配置 + 重解析 provider + 开新会话（新上下文）
     private func switchAgent(name: String): Unit {
-        match (this.agentRegistry.get(name)) {
+        match (this.spec.agents.get(name)) {
             case Some(cfg) =>
                 this.agentName = name
                 this.agentConfig = cfg
-                this.provider = resolveProviderFor(cfg, this.providerRegistry)
+                this.provider = this.spec.resolveProvider(cfg)
                 this.sessionId = "sess_" + nextId()
                 this.messages = ArrayList<Message>()
                 this.scroll = 0
@@ -1039,7 +1002,7 @@ public class ChatTui {
 
     private func switchToSession(targetId: String): Unit {
         this.persistTurn(this.messages)
-        this.messages = try { this.sessionStore.load(targetId) } catch (e: Exception) {
+        this.messages = try { this.spec.store.load(targetId) } catch (e: Exception) {
             this.status = "[atelier] session load failed (sessionId=" + targetId + "): " + e.message
             ArrayList<Message>()
         }
@@ -1093,7 +1056,7 @@ public class ChatTui {
             this.scroll = 0
             this.status = "New session: " + this.sessionId
         } else if (cmd == "list") {
-            let sessions = try { this.sessionStore.list() } catch (e: Exception) {
+            let sessions = try { this.spec.store.list() } catch (e: Exception) {
                 this.status = "[atelier] session list failed: " + e.message
                 ArrayList<SessionHeader>()
             }
@@ -1112,7 +1075,7 @@ public class ChatTui {
         } else if (cmd == "export" && parts.size > 2) {
             let targetId = parts[2]
             let fmt = if (parts.size > 3) { parts[3] } else { "jsonl" }
-            let msgs = try { this.sessionStore.load(targetId) } catch (e: Exception) {
+            let msgs = try { this.spec.store.load(targetId) } catch (e: Exception) {
                 this.status = "Session not found: " + targetId
                 ArrayList<Message>()
             }

@@ -58,7 +58,7 @@ public func eventBus_runtimePublishesLifecycle() {
     providerReg.register("default", inner)
     let store = MemorySessionStore()
     let mcpMgr = McpManager()
-    let runtime = AgentRuntime(subConfig(), inner, toolReg, store, trustMgr,
+    let runtime = testRuntime(subConfig(), inner, toolReg, store, trustMgr,
         skillReg, agentReg, providerReg, ArrayList<Hook>(),
         SessionEnvironment(), mcpMgr, eventBus: Some(bus))
     let msgs = ArrayList<Message>()
@@ -89,7 +89,7 @@ public func eventBus_sessionLoopForwards() {
     providerReg.register("default", inner)
     let store = MemorySessionStore()
     let mcpMgr = McpManager()
-    let loop = SessionLoop(toolReg, trustMgr, skillReg, agentReg, providerReg, store, mcpMgr,
+    let loop = testSessionLoop(toolReg, trustMgr, skillReg, agentReg, providerReg, store, mcpMgr,
         eventBus: Some(bus))
     let cfg = subConfig()
     loop.run("sess_eb", "你好", cfg, inner, None, SessionEnvironment(),

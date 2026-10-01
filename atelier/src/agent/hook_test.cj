@@ -177,7 +177,7 @@ func makeRuntime(config: AgentConfig, provider: Provider, hooks: ArrayList<Hook>
     let agentReg = AgentRegistry()
     let providerReg = ProviderRegistry()
     providerReg.register("default", provider)
-    AgentRuntime(config, provider, toolReg, sessionStore, trustMgr,
+    testRuntime(config, provider, toolReg, sessionStore, trustMgr,
         skillReg, agentReg, providerReg, hooks, McpManager())
 }
 
@@ -222,7 +222,7 @@ func beforeTool_deny_blocksExecution() {
     let providerReg = ProviderRegistry()
     providerReg.register("default", provider)
     let hooks = ArrayList<Hook>([BlockingHook()])
-    let runtime = AgentRuntime(config, provider, toolReg, sessionStore, trustMgr,
+    let runtime = testRuntime(config, provider, toolReg, sessionStore, trustMgr,
         skillReg, agentReg, providerReg, hooks, McpManager())
 
     let msgs = ArrayList<Message>()
@@ -276,7 +276,7 @@ func beforeTool_modify_changesArgs() {
     let providerReg = ProviderRegistry()
     providerReg.register("default", provider)
     let hooks = ArrayList<Hook>([ModifyHook()])
-    let runtime = AgentRuntime(config, provider, toolReg, sessionStore, trustMgr,
+    let runtime = testRuntime(config, provider, toolReg, sessionStore, trustMgr,
         skillReg, agentReg, providerReg, hooks, McpManager())
 
     let msgs = ArrayList<Message>()

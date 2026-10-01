@@ -7,6 +7,7 @@ import std.fs.*
 import tomlcj.*
 import atelier.provider.*
 import atelier.context.CompactionConfig
+import atelier.agent.HarnessSpec
 
 func makeTomlProvider(extra: DataModel): TomlProvider {
     let tp = TomlProvider()
@@ -578,3 +579,88 @@ func agentConfigFrom_verifyPasses() {
     bad.maxVerifyPasses = -1
     @Expect(agentConfigFrom(bad).maxVerifyPasses, UInt32(0))
 }
+
+// ---------- 上下文窗口：声明在端点（provider × model）上 ----------
+
+func writeTempToml(body: String): String {
+    let dir = "/tmp/atelier-cfg-test-model-window"
+    try { Directory.create(Path(dir), recursive: true) } catch (_) { () }
+    let file = dir + "/config.toml"
+    let f = File(file, OpenMode.Write)
+    f.write(body.toArray())
+    f.close()
+    file
+}
+
+@Test
+func withTomlProviderModels_appliesEndpointWindows() {
+    var providers = ArrayList<TomlProvider>()
+    let p = TomlProvider()
+    p.name = "proxy"
+    let m = TomlProviderModel()
+    m.name = "vendor-model"
+    m.contextWindow = 32768
+    p.model.add(m)
+    // 两个字段都没声明 = 整条跳过
+    let bogus = TomlProviderModel()
+    bogus.name = "gpt-4o"
+    bogus.contextWindow = 0
+    bogus.maxTokens = 0
+    p.model.add(bogus)
+    providers.add(p)
+
+    let spec = withTomlProviderModels(HarnessSpec(), providers)
+    @Expect(spec.models.windowFor("proxy", "vendor-model"), Some(32768))
+    // 端点层与模型名层互不干扰：别的端点上没有这条声明
+    @Expect(spec.models.windowFor("other", "vendor-model"), None)
+    // 未声明（maxTokens = 0）的那笔不写成"完成预算 0"
+    match (spec.models.infoFor("proxy", "vendor-model")) {
+        case Some(info) =>
+            @Expect(info.contextWindow, 32768)
+            @Expect(info.maxTokens, 0)
+        case None => @Fail("endpoint declaration missing")
+    }
+    // 原装配束不受影响
+    @Expect(HarnessSpec().models.windowFor("proxy", "vendor-model"), None)
+}
+
+// ---------- provider × model：模型事实挂在端点上 ----------
+
+@Test
+func tomlProviderModel_nestedTableParses() {
+    // 形状：模型表嵌在它所属的 provider 里（同一个模型名走不同端点可以是不同窗口）
+    let file = writeTempToml("""
+[[provider]]
+name = "deepseek"
+baseURL = "https://api.deepseek.com"
+apiKey = "k"
+
+  [[provider.model]]
+  name = "deepseek-chat"
+  contextWindow = 65536
+
+  [[provider.model]]
+  name = "deepseek-reasoner"
+  contextWindow = 65536
+
+[[provider]]
+name = "proxy"
+baseURL = "https://proxy.internal/v1"
+
+  [[provider.model]]
+  name = "deepseek-chat"
+  contextWindow = 32768
+""")
+    let cfg = unmarshal<TomlConfig>(file)
+    @Expect(cfg.provider.size, 2)
+    @Expect(cfg.provider[0].name, "deepseek")
+    @Expect(cfg.provider[0].model.size, 2)
+    @Expect(cfg.provider[0].model[0].name, "deepseek-chat")
+    @Expect(cfg.provider[0].model[0].contextWindow, 65536)
+    @Expect(cfg.provider[1].name, "proxy")
+    @Expect(cfg.provider[1].model.size, 1)
+    // 同名模型在不同端点下各有一个窗口 —— 这正是不能只按模型名做键的原因
+    @Expect(cfg.provider[1].model[0].contextWindow, 32768)
+}
+
+

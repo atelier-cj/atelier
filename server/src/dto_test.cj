@@ -143,3 +143,4 @@ func inputFrame_carriesWholeRequest() {
     @Assert(json.contains("\"id\":\"ask:s:1:c\""))
     @Assert(json.contains("\"prod\""))
 }
+

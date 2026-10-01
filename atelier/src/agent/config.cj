@@ -119,6 +119,28 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
             maxVerifyPasses: this.maxVerifyPasses)
     }
 
+    /**
+     * 派生一份「换模型」的配置（模型路由 / 临时切换用）。
+     *
+     * 存在的意义是别让调用方手工重建 —— 手工重建漏带末尾可选参数会**静默**落回默认值
+     * （上下文窗口、续跑次数这类字段丢了不报错，只在行为上表现为"忽然不灵"）。
+     */
+    public func withModel(model: String): AgentConfig {
+        AgentConfig(this.name, this.description, this.systemPrompt, this.userPromptTemplate,
+            model, this.provider, this.tools, this.skills, this.mcpCooldownTurns,
+            this.maxTurns, this.temperature, this.maxOutputTokens, this.thinkingLevel,
+            this.compactionEnabled, this.compactionReserveTokens, this.keepRecentTokens,
+            this.compaction, this.maxToolCalls, this.toolTimeout, this.minToolInterval,
+            this.tags, this.createdBy, this.createdAt, this.updatedAt,
+            supportsVision: this.supportsVision,
+            toolPresentation: this.toolPresentation,
+            ptcTimeoutSeconds: this.ptcTimeoutSeconds,
+            ptcMaxSubCalls: this.ptcMaxSubCalls,
+            sideEffectToolTimeout: this.sideEffectToolTimeout,
+            maxLengthContinuations: this.maxLengthContinuations,
+            maxVerifyPasses: this.maxVerifyPasses)
+    }
+
     public static func default(): AgentConfig {
         AgentConfig(
             "", None, "", None, "", None,

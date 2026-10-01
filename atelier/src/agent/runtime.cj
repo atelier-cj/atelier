@@ -70,6 +70,8 @@ func resolveWorkDir(se: SessionEnvironment): String {
 }
 
 public open class AgentRuntime {
+    // 装配束：组件与派生能力都从这里来（子 agent 复用同一份，不再逐个穿参数）
+    private let spec: HarnessSpec
     private let config: AgentConfig
     private let provider: Provider
     private let toolRegistry: ToolRegistry
@@ -77,7 +79,6 @@ public open class AgentRuntime {
     private let trustManager: TrustManager
     private let skillRegistry: SkillRegistry
     private let agentRegistry: AgentRegistry
-    private let providerRegistry: ProviderRegistry
     private let toolExecutor: ToolExecutor
     private let hooks: ArrayList<Hook>
     // 结构化提问（None = 该宿主没有交互通道，提问即取消）；用它可以返回 Pending 让 run 挂起
@@ -87,6 +88,9 @@ public open class AgentRuntime {
     // PTC 子调用授权在深层调用栈里，拿不到开跑时的局部变量，故用瞬态字段传递。
     private var resumedAnswersForSub: HashMap<String, UserAnswer> = HashMap()
     private let modelRegistry: ModelContextRegistry
+    // 未命中模型表只提醒一次（每回合一条会把日志淹掉）
+    private let warnedModels = HashSet<String>()
+    private let warnLock = Mutex()
     private let sessionEnv: SessionEnvironment
     private let mcpManager: McpManager
     // 自定义系统提示段贡献者（宿主扩展点，见 PromptSegmentContributor）
@@ -98,61 +102,81 @@ public open class AgentRuntime {
     private let cancels = HashMap<String, AtomicBool>()
     private let cancelLock = Mutex()
 
-    // 13 参：最全签名（hooks + sessionEnv + mcpManager + ask），其余构造统一委托至此
-    public init(config: AgentConfig, provider: Provider,
-        toolRegistry: ToolRegistry, sessionStore: SessionStore,
-        trustManager: TrustManager, skillRegistry: SkillRegistry,
-        agentRegistry: AgentRegistry, providerRegistry: ProviderRegistry,
-        hooks: ArrayList<Hook>,
-        sessionEnv: SessionEnvironment, mcpManager: McpManager,
-        ask!: Option<AskFn> = None,
-        promptContributors!: ArrayList<PromptSegmentContributor> = ArrayList(),
-        middlewares!: ArrayList<ProviderMiddleware> = ArrayList(),
-        eventBus!: ?EventBus = None) {
+    /**
+     * 唯一构造：装配束 + agent 配置。
+     *
+     * provider 由 `config.provider`（缺省 `"default"`）在装配束里解析，解析不到直接报错 ——
+     * 不做「静默退化成某个默认端点」这种事。
+     *
+     * [sessionEnv] 是 `chat()` 的默认会话环境；需要按会话给环境的宿主走
+     * `chatWithSessionId(sid, msgs, env)`。
+     */
+    public init(spec: HarnessSpec, config: AgentConfig,
+        sessionEnv!: SessionEnvironment = SessionEnvironment()) {
+        this.spec = spec
         this.config = config
-        this.toolRegistry = toolRegistry
-        this.sessionStore = sessionStore
-        this.trustManager = trustManager
-        this.skillRegistry = skillRegistry
-        this.agentRegistry = agentRegistry
-        this.providerRegistry = providerRegistry
+        this.toolRegistry = spec.tools
+        this.sessionStore = spec.store
+        this.trustManager = spec.trust
+        this.skillRegistry = spec.skills
+        this.agentRegistry = spec.agents
         this.toolExecutor = ToolExecutor(this.toolRegistry,
             budget: toolBudgetPolicyOf(config))
-        this.hooks = hooks
-        this.askFn = ask
-        this.modelRegistry = ModelContextRegistry()
+        this.hooks = spec.hooks
+        this.askFn = spec.ask
+        this.modelRegistry = spec.models
         this.sessionEnv = sessionEnv
-        this.mcpManager = mcpManager
-        this.promptContributors = promptContributors
-        this.eventBus = eventBus
+        this.mcpManager = spec.mcp
+        this.promptContributors = spec.contributors
+        this.eventBus = spec.eventBus
         // 请求级中间件链 wrap（先注入者最外层；委托链末端为原始 provider）
-        var p = provider
-        for (m in middlewares) { p = m.wrap(p) }
+        var p = spec.resolveProvider(config)
+        for (m in spec.middlewares) { p = m.wrap(p) }
         this.provider = p
     }
 
-    // 11 参：hooks + askUser + mcpManager
-    public init(config: AgentConfig, provider: Provider,
-        toolRegistry: ToolRegistry, sessionStore: SessionStore,
-        trustManager: TrustManager, skillRegistry: SkillRegistry,
-        agentRegistry: AgentRegistry, providerRegistry: ProviderRegistry,
-        hooks: ArrayList<Hook>, mcpManager: McpManager,
-        ask!: Option<AskFn> = None) {
-        this(config, provider, toolRegistry, sessionStore, trustManager,
-            skillRegistry, agentRegistry, providerRegistry, hooks,
-            SessionEnvironment(), mcpManager, ask: ask)
+    /** 本次运行所用的装配束（子 agent / 工具代理要照同一份组件再建 runtime 时用） */
+    public func components(): HarnessSpec {
+        this.spec
     }
 
-    // 9 参：config..providerRegistry + mcpManager（可带 ask；不传 = 无交互通道）
-    public init(config: AgentConfig, provider: Provider,
-        toolRegistry: ToolRegistry, sessionStore: SessionStore,
-        trustManager: TrustManager, skillRegistry: SkillRegistry,
-        agentRegistry: AgentRegistry, providerRegistry: ProviderRegistry,
-        mcpManager: McpManager,
-        ask!: Option<AskFn> = None) {
-        this(config, provider, toolRegistry, sessionStore, trustManager,
-            skillRegistry, agentRegistry, providerRegistry,
-            ArrayList<Hook>(), mcpManager, ask: ask)
+    /** 本 agent 实际使用的上下文窗口（token）：声明 > provider 自报 > 兜底 */
+    public func contextWindowInUse(): Int64 {
+        this.modelInfoInUse().info.contextWindow
+    }
+
+    /**
+     * 本 agent 实际使用的完成预算（token）：agent 显式给了就用它（0 = 交给模型事实），
+     * 否则用模型事实（声明 > provider 自报 > 兜底）。
+     */
+    public func maxOutputTokensInUse(): Int64 {
+        if (this.config.maxOutputTokens > 0) {
+            return Int64(this.config.maxOutputTokens)
+        }
+        this.modelInfoInUse().info.maxTokens
+    }
+
+    // 模型事实（窗口 + 完成预算）：声明 > provider 自报 > 兜底，全链路没人知道时提醒一次
+    // （静默按兜底值走 = "模型聊着聊着忘了前面"/"输出被莫名截断"，而下游看不到线索）
+    private func modelInfoInUse(): ResolvedModelInfo {
+        let model = this.pickModel(this.config.model)
+        let providerName = providerNameOf(this.config)
+        let resolved = this.spec.resolveModelInfo(providerName, model)
+        if (!resolved.declared) {
+            let key = providerName + "/" + model
+            var first = false
+            synchronized(this.warnLock) {
+                if (!this.warnedModels.contains(key)) {
+                    this.warnedModels.add(key)
+                    first = true
+                }
+            }
+            if (first) {
+                let log = getGlobalLogger([("name", "AgentRuntime")])
+                log.warn("no model facts for provider '${providerName}' model '${model}': assuming ${resolved.info.contextWindow} context / ${resolved.info.maxTokens} max tokens; declare them with [[provider.model]]", Array<Attr>())
+            }
+        }
+        resolved
     }
 
     // 取消进行中的会话回合（幂等：未知/已结束会话为 no-op）。
@@ -277,7 +301,7 @@ public open class AgentRuntime {
                         baseSystemText + "\n\n" + PtcSdkRenderer.render(visible)
                     }
                     var chatReq = ctxBuilder.buildChatRequest(actualModel, systemText, currentMessages,
-                        Float64(this.config.temperature), Int64(this.config.maxOutputTokens),
+                        Float64(this.config.temperature), this.maxOutputTokensInUse(),
                         this.config.thinkingLevel, tools)
                     match (runBeforeTurnHooks(hookState, turnCount, chatReq)) {
                         case Some(r) =>
@@ -643,7 +667,7 @@ public open class AgentRuntime {
                             if (this.config.compactionEnabled || match (this.config.compaction) {
                                 case Some(c) => c.enabled
                                 case None => false }) {
-                                let contextWindow = this.modelRegistry.get(actualModel)
+                                let contextWindow = this.modelInfoInUse().info.contextWindow
                                 let cc = match (this.config.compaction) {
                                     case Some(c) => c
                                     case None => CompactionConfig()
@@ -749,12 +773,8 @@ public open class AgentRuntime {
                 let agentName = name[6..]
                 match (this.agentRegistry.get(agentName)) {
                     case Some(cfg) =>
-                        let prov = this.resolveSubProvider(cfg)
-                        let tool = AgentTool(agentName, cfg, prov,
-                            this.toolRegistry, this.sessionStore,
-                            this.trustManager, this.skillRegistry,
-                            this.agentRegistry, this.providerRegistry,
-                            this.mcpManager)
+                        // 子 agent 复用同一份装配束（provider 由它自己的配置解析）
+                        let tool = AgentTool(agentName, cfg, this.spec)
                         this.toolRegistry.register(tool)
                         result.add(tool)
                     case None => ()
@@ -896,14 +916,6 @@ public open class AgentRuntime {
             // （写操作类工具还可能在超时后于后台继续跑，更需要这条线索）。
             case PtcEvent.Log(callId, text) =>
                 this.emit(stream, ToolExecutionUpdateEvent(callId, text))
-        }
-    }
-
-    private func resolveSubProvider(cfg: AgentConfig): Provider {
-        let provName = match (cfg.provider) { case Some(v) => v; case None => "default" }
-        match (this.providerRegistry.get(provName)) {
-            case Some(p) => p
-            case None => this.provider
         }
     }
 

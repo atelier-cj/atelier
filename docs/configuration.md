@@ -25,6 +25,13 @@ headers = ["x-custom: value"]  # 自定义请求头（可选，Name: value 格�
 extra = { reasoning_effort = "high" }  # 透传扩展参数（可选，写入请求体）
 skipTlsVerify = false          # 跳过 TLS 证书校验（可选，默认 false；仅在系统 CA 不可得时开启，见 docs/providers.md「TLS 校验」）
 
+  # 本端点上的模型事实（可选，可多段）：上下文窗口是 (provider, model) 这一对路由的属性 ——
+  # 同名模型走官方端点和走截断过的代理，窗口可以不同，所以声明在这里而不是 agent 上
+  [[provider.model]]
+  name = "deepseek-chat"
+  contextWindow = 65536        # token，**含输入与输出**；不声明则回退 provider 自报/内置目录
+  maxTokens = 8192             # 默认完成预算（token）；压缩要按 窗口 - 完成预算 - 余量 留预算
+
 [[provider]]
 name = "ollama"
 type = "ollama"
@@ -39,8 +46,8 @@ apiKey = "${DEEPSEEK_API_KEY}"
 [[agent]]
 name = "assistant"             # Agent 名称
 description = "通用助手"       # 描述（可选）
-model = "gpt-4o"               # 模型名称
-provider = "default"           # 使用的 Provider（可选，不指定则按 model 在 registry 中查找）
+model = "deepseek-chat"        # 模型名称
+provider = "default"           # 使用的 Provider（可选，缺省 "default"）
 systemPrompt = "你是一个有用的助手"
 tools = ["bash", "read_file", "mcp_*"]  # 可用工具列表（mcp_* 通配暴露已激活的 MCP 工具）
 skills = ["code_review"]       # Skill 列表（可选）
@@ -161,12 +168,12 @@ let config = AgentConfig(
 | `systemPrompt` | `String` | `""` | 系统提示词 |
 | `userPromptTemplate` | `Option<String>` | `None` | 用户提示词模板 |
 | `model` | `String` | `""` | 模型名称（空则运行时取 OPENAI_MODEL 或 gpt-4o） |
-| `provider` | `Option<String>` | `None` | Provider 名称，在 ProviderRegistry 中查找 |
+| `provider` | `Option<String>` | `None` | Provider 名称，缺省 `"default"`；在装配束（叠加表 → 注册表）中解析，找不到会明确报错 |
 | `tools` | `ArrayList<String>` | `[]` | 工具名称列表 |
 | `skills` | `ArrayList<String>` | `[]` | Skill 名称列表 |
 | `maxTurns` | `UInt32` | `20` | 最大推理轮次 |
 | `temperature` | `Float32` | `0.7` | 生成温度 |
-| `maxOutputTokens` | `UInt32` | `4096` | 最大输出 Token |
+| `maxOutputTokens` | `UInt32` | `4096` | 最大输出 Token（agent 的策略）；`0` = 交给模型事实（`[[provider.model]] maxTokens` / provider 自报） |
 | `maxLengthContinuations` | `UInt32` | `3` | 输出撞 token 上限后同回合自动续跑的次数上限；`0` = 不续跑（截断即回合结束） |
 | `maxVerifyPasses` | `UInt32` | `0` | 收尾前自验次数上限：宣布完成时先要求实操核对再收尾；`0` = 关闭 |
 | `thinkingLevel` | `Option<String>` | `None` | 思考模式（deepseek-reasoner 可用） |

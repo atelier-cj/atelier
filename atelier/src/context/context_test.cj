@@ -2,6 +2,7 @@ package atelier.context
 
 import atelier.message.*
 import std.collection.*
+import atelier.provider.ModelInfo
 import jsonvalue.*
 
 func msg(text: String): Message {
@@ -30,33 +31,82 @@ func smallFits() {
 }
 
 @Test
-func modelRegistry_knownModel() {
-    let reg = ModelContextRegistry()
-    @Expect(reg.get("gpt-4o"), 128000)
-}
-
-@Test
-func modelRegistry_deepseek() {
-    let reg = ModelContextRegistry()
-    @Expect(reg.get("deepseek-chat"), 65536)
-}
-
-@Test
 func modelRegistry_unknownModelDefaults() {
     let reg = ModelContextRegistry()
     @Expect(reg.get("unknown-model-123"), reg.defaultContextWindow)
 }
 
 @Test
-func modelRegistry_claudeSonnet() {
+func modelRegistry_hasDistinguishesKnownFromFallback() {
     let reg = ModelContextRegistry()
-    @Expect(reg.get("claude-sonnet-4"), 200000)
+    reg.register("declared-model", ModelInfo(65536, 8192))
+    @Expect(reg.has("declared-model"), true)
+    // 未声明的模型：get 给兜底值，但 has = false —— 调用方据此留痕，
+    // 不然会静默按偏小的窗口提前压缩。
+    // 注意内置目录（llm_api 的 ModelCatalog）不在本表里：它由 provider 自报那一层提供
+    @Expect(reg.has("vendor-new-model"), false)
+    @Expect(reg.has("gpt-4o"), false)
+    @Expect(reg.get("vendor-new-model"), reg.defaultContextWindow)
 }
 
 @Test
-func modelRegistry_gemini() {
+func modelRegistry_providerLayerOverridesNameLayer() {
     let reg = ModelContextRegistry()
-    @Expect(reg.get("gemini-1.5-pro"), 1048576)
+    reg.register("vendor-model", 111)
+    reg.registerFor("proxy", "vendor-model", ModelInfo(32768, 4096))
+
+    // 端点层：同一模型名在不同端点下各是各的
+    @Expect(reg.windowFor("proxy", "vendor-model"), Some(32768))
+    @Expect(reg.hasFor("proxy", "vendor-model"), true)
+    @Expect(reg.windowFor("other", "vendor-model"), None)
+    @Expect(reg.hasFor("other", "vendor-model"), false)
+    // 模型名层不受端点层影响
+    @Expect(reg.get("vendor-model"), 111)
+
+    // 派生：端点层声明落在副本上，原表不动
+    let derived = reg.mergedFor("other", "vendor-model", ModelInfo(4096, 1024))
+    @Expect(derived.windowFor("other", "vendor-model"), Some(4096))
+    @Expect(reg.hasFor("other", "vendor-model"), false)
+    // 已有层照旧带过去
+    @Expect(derived.windowFor("proxy", "vendor-model"), Some(32768))
+    @Expect(derived.get("vendor-model"), 111)
+}
+
+@Test
+func modelRegistry_listCoversBothLayers() {
+    let reg = ModelContextRegistry()
+    reg.register("only-name", 1000)
+    reg.registerFor("p", "only-endpoint", ModelInfo(2000, 0))
+    let names = reg.list()
+    @Expect(names.contains("only-name"), true)
+    // list() 只列**显式声明**过的名字：provider 自报/内置目录不在这张表里
+    @Expect(names.contains("gpt-4o"), false)
+}
+
+@Test
+func modelRegistry_mergedOverridesOnCopy() {
+    let base = ModelContextRegistry()
+    let derived = base.merged("vendor-new-model", ModelInfo(262144, 8192))
+
+    @Expect(derived.get("vendor-new-model"), 262144)
+    @Expect(derived.has("vendor-new-model"), true)
+    // 原表不动
+    @Expect(base.has("vendor-new-model"), false)
+    // 其它声明照旧带过来
+    @Expect(derived.has("vendor-new-model"), true)
+}
+
+@Test
+func modelRegistry_defaultWindowIsConfigurable() {
+    let reg = ModelContextRegistry(defaultWindow: 32768, defaultMaxTokens: 2048)
+    @Expect(reg.get("unknown-model-xyz"), 32768)
+    @Expect(reg.defaultMaxTokens, 2048)
+
+    let narrower = reg.withDefaults(4096, 1024)
+    @Expect(narrower.get("unknown-model-xyz"), 4096)
+    // 换兜底不影响已知条目
+    @Expect(narrower.has("vendor-new-model"), false)
+    @Expect(reg.defaultContextWindow, 32768)
 }
 
 @Test

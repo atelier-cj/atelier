@@ -56,7 +56,7 @@ func runAndCaptureRequest(mode: ToolPresentationMode): CaptureRequestHook {
     let providerReg = ProviderRegistry()
     providerReg.register("default", StubProvider())
 
-    let runtime = AgentRuntime(ptcRuntimeConfig(mode), StubProvider(), toolReg,
+    let runtime = testRuntime(ptcRuntimeConfig(mode), StubProvider(), toolReg,
         MemorySessionStore(), TrustManager(), SkillRegistry(), AgentRegistry(),
         providerReg, hooks, McpManager())
 
@@ -134,7 +134,7 @@ func runtime_ptcRegistersRunXispForDispatch() {
     toolReg.register(McpStyleTool("read_file"))
     let providerReg = ProviderRegistry()
     providerReg.register("default", StubProvider())
-    let runtime = AgentRuntime(ptcRuntimeConfig(ToolPresentationMode.Ptc), StubProvider(),
+    let runtime = testRuntime(ptcRuntimeConfig(ToolPresentationMode.Ptc), StubProvider(),
         toolReg, MemorySessionStore(), TrustManager(), SkillRegistry(), AgentRegistry(),
         providerReg, hooks, McpManager())
 
@@ -243,7 +243,7 @@ func runProgramWithTool(tool: Tool, program: String, config: AgentConfig): Array
     providerReg.register("default", provider)
 
     // run_xisp 是 Sequential：workDir 未信任时走交互审批，这里一律放行
-    let runtime = AgentRuntime(config, provider,
+    let runtime = testRuntime(config, provider,
         toolReg, MemorySessionStore(), TrustManager(), SkillRegistry(), AgentRegistry(),
         providerReg, McpManager(), ask: Some({ req: UserRequest => ptcAllowOnce(req) }))
 
@@ -425,7 +425,7 @@ func runtime_nativeToolCallIsAlsoBounded() {
     let providerReg = ProviderRegistry()
     providerReg.register("default", provider)
 
-    let runtime = AgentRuntime(ptcRuntimeConfig(ToolPresentationMode.Native,
+    let runtime = testRuntime(ptcRuntimeConfig(ToolPresentationMode.Native,
         toolTimeoutSeconds: UInt32(1), toolPattern: "hanging"), provider,
         toolReg, MemorySessionStore(), TrustManager(), SkillRegistry(), AgentRegistry(),
         providerReg, McpManager(), ask: Some({ req: UserRequest => ptcAllowOnce(req) }))
@@ -498,7 +498,7 @@ func runProgramCollectingEvents(program: String): ArrayList<AgentEvent> {
     let providerReg = ProviderRegistry()
     providerReg.register("default", provider)
 
-    let runtime = AgentRuntime(ptcRuntimeConfig(ToolPresentationMode.Ptc), provider,
+    let runtime = testRuntime(ptcRuntimeConfig(ToolPresentationMode.Ptc), provider,
         toolReg, MemorySessionStore(), TrustManager(), SkillRegistry(), AgentRegistry(),
         providerReg, McpManager(), ask: Some({ req: UserRequest => ptcAllowOnce(req) }))
 

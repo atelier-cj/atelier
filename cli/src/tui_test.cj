@@ -173,9 +173,9 @@ func chatTui_enterSubmitsAndPersists() {
     let fake = FakeTerminal(keys)
     let store = MemorySessionStore()
     let trustMgr = TrustManager()
-    let tui = ChatTui("default", SlashCommandRegistry(trustMgr), AgentConfig.default(), StubProvider(),
-        ToolRegistry(), store, trustMgr, SkillRegistry(), AgentRegistry(), ProviderRegistry(),
-        "sess_test_enter", McpManager(), "/tmp/atelier-tui-test")
+    let tui = ChatTui("default", SlashCommandRegistry(trustMgr), AgentConfig.default(),
+        cliTestSpec(ToolRegistry(), store, trustMgr, SkillRegistry(), AgentRegistry(), ProviderRegistry(), McpManager(), StubProvider()),
+        "sess_test_enter", "/tmp/atelier-tui-test")
     tui.runWith(fake)
     // 回车后消息应落库：首条用户 hi，末条助手 ok
     let msgs = store.load("sess_test_enter")
@@ -206,9 +206,9 @@ func chatTui_systemPromptExcludedFromConversation() {
         ArrayList<String>(), ArrayList<String>(), 3, UInt32(20), Float32(0.7),
         UInt32(4096), None, false, UInt32(16384), UInt32(20000), None,
         UInt32(50), UInt32(30), UInt32(0), ArrayList<String>(), None, Int64(0), Int64(0))
-    let tui = ChatTui("default", SlashCommandRegistry(trustMgr), cfg, StubProvider(),
-        ToolRegistry(), store, trustMgr, SkillRegistry(), AgentRegistry(), ProviderRegistry(),
-        "sess_test_prompt", McpManager(), "/tmp/atelier-tui-test")
+    let tui = ChatTui("default", SlashCommandRegistry(trustMgr), cfg,
+        cliTestSpec(ToolRegistry(), store, trustMgr, SkillRegistry(), AgentRegistry(), ProviderRegistry(), McpManager(), StubProvider()),
+        "sess_test_prompt", "/tmp/atelier-tui-test")
     tui.runWith(fake)
     let msgs = store.load("sess_test_prompt")
     @Expect(msgs.size >= 2, true)
@@ -386,9 +386,9 @@ func chatTui_sessionPickerInteractiveSwitch() {
     store.save("sess_b", SessionHeader(1, "sess_b", 0, 0, "", "", "", None),
         ArrayList<Message>([UserMessage(ContentList.ofText("msgB"), 0)]))
     let trustMgr = TrustManager()
-    let tui = ChatTui("default", SlashCommandRegistry(trustMgr), AgentConfig.default(), StubProvider(),
-        ToolRegistry(), store, trustMgr, SkillRegistry(), AgentRegistry(), ProviderRegistry(),
-        "sess_test_picker", McpManager(), "/tmp/atelier-tui-test")
+    let tui = ChatTui("default", SlashCommandRegistry(trustMgr), AgentConfig.default(),
+        cliTestSpec(ToolRegistry(), store, trustMgr, SkillRegistry(), AgentRegistry(), ProviderRegistry(), McpManager(), StubProvider()),
+        "sess_test_picker", "/tmp/atelier-tui-test")
 
     // /session list → 选择模式 → ↓ 选 sess_b → Enter 切换 → 发 hi → Esc 退出
     let keys = textKeys("/session list")
@@ -420,9 +420,9 @@ func chatTui_switchAgentStartsNewSession() {
     let agentReg = AgentRegistry()
     agentReg.create("a1", AgentConfig.default())
     agentReg.create("a2", AgentConfig.default())
-    let tui = ChatTui("a1", SlashCommandRegistry(trustMgr), AgentConfig.default(), StubProvider(),
-        ToolRegistry(), store, trustMgr, SkillRegistry(), agentReg, ProviderRegistry(),
-        "sess_test_agent", McpManager(), "/tmp/atelier-tui-test")
+    let tui = ChatTui("a1", SlashCommandRegistry(trustMgr), AgentConfig.default(),
+        cliTestSpec(ToolRegistry(), store, trustMgr, SkillRegistry(), agentReg, ProviderRegistry(), McpManager(), StubProvider()),
+        "sess_test_agent", "/tmp/atelier-tui-test")
 
     // m1 聊天 → 落在 sess_test_agent；/agent a2 切换（新会话）；m2 聊天 → 新会话。
     // 分步驱动：一次性喂按键会让 /agent 与上一轮回合并发。
@@ -521,9 +521,9 @@ func helpLines_eachEntryOnOwnLine() {
 func chatTui_newAliasStartsNewSession() {
     let store = MemorySessionStore()
     let trustMgr = TrustManager()
-    let tui = ChatTui("default", SlashCommandRegistry(trustMgr), AgentConfig.default(), StubProvider(),
-        ToolRegistry(), store, trustMgr, SkillRegistry(), AgentRegistry(), ProviderRegistry(),
-        "sess_test_new", McpManager(), "/tmp/atelier-tui-test")
+    let tui = ChatTui("default", SlashCommandRegistry(trustMgr), AgentConfig.default(),
+        cliTestSpec(ToolRegistry(), store, trustMgr, SkillRegistry(), AgentRegistry(), ProviderRegistry(), McpManager(), StubProvider()),
+        "sess_test_new", "/tmp/atelier-tui-test")
 
     // m1 聊天 → sess_test_new；/new 开新会话；m2 聊天 → 新会话。分步驱动，同上。
     let fake = FakeTerminal(ArrayList<KeyEvent>())
@@ -885,9 +885,9 @@ class AnswerBox {
 
 func makeAskTui(sessionId: String): ChatTui {
     let trustMgr = TrustManager()
-    ChatTui("default", SlashCommandRegistry(trustMgr), AgentConfig.default(), StubProvider(),
-        ToolRegistry(), MemorySessionStore(), trustMgr, SkillRegistry(), AgentRegistry(),
-        ProviderRegistry(), sessionId, McpManager(), "/tmp/atelier-tui-test")
+    ChatTui("default", SlashCommandRegistry(trustMgr), AgentConfig.default(),
+        cliTestSpec(ToolRegistry(), MemorySessionStore(), trustMgr, SkillRegistry(), AgentRegistry(), ProviderRegistry(), McpManager(), StubProvider()),
+        sessionId, "/tmp/atelier-tui-test")
 }
 
 /** 等到"有提问"（want=true）或"提问已结束"（want=false）；超时返回 false。 */

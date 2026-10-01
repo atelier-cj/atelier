@@ -110,6 +110,25 @@ public class TomlConfig <: Serializable<TomlConfig> {
     }
 }
 
+/**
+ * 把 `[[provider.model]]` 声明的窗口装进装配束（端点层）。
+ *
+ * 未声明的模型沿用模型名层（内置表）与兜底值，运行时会在用到时留一条警告。
+ */
+public func withTomlProviderModels(spec: HarnessSpec, providers: ArrayList<TomlProvider>): HarnessSpec {
+    var out = spec
+    for (p in providers) {
+        for (m in p.model) {
+            // 两个字段各自 <= 0 视为未声明：只写窗口也能只补窗口，完成预算留给 provider 自报
+            if (p.name == "" || m.name == "" || (m.contextWindow <= 0 && m.maxTokens <= 0)) {
+                continue
+            }
+            out = out.withModelFacts(p.name, m.name, ModelInfo(m.contextWindow, m.maxTokens))
+        }
+    }
+    out
+}
+
 public class TomlServer <: Serializable<TomlServer> {
     public var host: String = "0.0.0.0"
     public var port: Int64 = 8080
@@ -320,6 +339,37 @@ public class TomlAgent <: Serializable<TomlAgent> {
     }
 }
 
+/**
+ * `[[provider.model]]`：某个端点上某个模型的**事实**（当前只有上下文窗口）。
+ *
+ * 挂在 provider 下而不是 agent 下，是因为窗口是 `(provider, model)` 这一对路由的属性：
+ * 同名模型走官方端点和走一个截断过的代理，窗口可以不同；agent 只负责**选**这一对。
+ */
+public class TomlProviderModel <: Serializable<TomlProviderModel> {
+    public var name: String = ""
+    // 上下文窗口（token，**含输入与输出**）；<= 0 视为未声明
+    public var contextWindow: Int64 = 0
+    // 默认完成预算（token）；<= 0 视为未声明（压缩要按 窗口 - 完成预算 - 余量 算消息预算）
+    public var maxTokens: Int64 = 0
+    public init() {}
+
+    public func serialize(): DataModel {
+        DataModelStruct()
+            .add(field<String>("name", name))
+            .add(field<Int64>("contextWindow", contextWindow))
+            .add(field<Int64>("maxTokens", maxTokens))
+    }
+
+    public static func deserialize(dm: DataModel): TomlProviderModel {
+        let dms = match (dm) { case s: DataModelStruct => s; case _ => return TomlProviderModel() }
+        let r = TomlProviderModel()
+        r.name = match (dms.get("name")) { case s: DataModelString => s.getValue(); case _ => "" }
+        r.contextWindow = match (dms.get("contextWindow")) { case i: DataModelInt => i.getValue(); case _ => Int64(0) }
+        r.maxTokens = match (dms.get("maxTokens")) { case i: DataModelInt => i.getValue(); case _ => Int64(0) }
+        r
+    }
+}
+
 public class TomlProvider <: Serializable<TomlProvider> {
     public var name: String = ""
     public var providerType: String = "openai"
@@ -331,6 +381,8 @@ public class TomlProvider <: Serializable<TomlProvider> {
     // （典型：stdx 在 Windows 上拿不到系统证书库，任何 https 都以 unknown CA 失败）
     // 与本地抓包/自签调试；默认 false，保持系统 CA 校验。
     public var skipTlsVerify: Bool = false
+    // 本端点上的模型事实（`[[provider.model]]`）
+    public var model: ArrayList<TomlProviderModel> = ArrayList()
     public init() {}
 
     public func serialize(): DataModel {
@@ -342,6 +394,7 @@ public class TomlProvider <: Serializable<TomlProvider> {
             .add(field<ArrayList<String>>("headers", headers))
             .add(Field("extra", this.extra))
             .add(field<Bool>("skipTlsVerify", skipTlsVerify))
+            .add(field<ArrayList<TomlProviderModel>>("model", this.model))
     }
 
     public static func deserialize(dm: DataModel): TomlProvider {
@@ -361,6 +414,13 @@ public class TomlProvider <: Serializable<TomlProvider> {
         r.extra = dms.get("extra")
         match (dms.get("skipTlsVerify")) {
             case b: DataModelBool => r.skipTlsVerify = b.getValue()
+            case _ => ()
+        }
+        match (dms.get("model")) {
+            case seq: DataModelSeq =>
+                for (e in seq.getItems()) {
+                    r.model.add(TomlProviderModel.deserialize(e))
+                }
             case _ => ()
         }
         r

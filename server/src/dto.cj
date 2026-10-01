@@ -85,7 +85,6 @@ public struct AgentConfigDTO <: JsonDeserializable<AgentConfigDTO> {
     public let maxTurns: Int64
     public let temperature: Float64
     public let mcpCooldownTurns: Int64
-
     public init(name: String, description: Option<String>, systemPrompt: String,
         model: String, provider: Option<String>, tools: ArrayList<String>,
         skills: ArrayList<String>, maxTurns: Int64, temperature: Float64,

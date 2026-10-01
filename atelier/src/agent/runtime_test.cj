@@ -68,7 +68,7 @@ func makeMcpRuntime(provider: Provider, hooks: ArrayList<Hook>, mcpManager: McpM
     let providerReg = ProviderRegistry()
     providerReg.register("default", provider)
     let store = MemorySessionStore()
-    AgentRuntime(mcpRuntimeConfig(), provider, toolReg, store, trustMgr,
+    testRuntime(mcpRuntimeConfig(), provider, toolReg, store, trustMgr,
         skillReg, agentReg, providerReg, hooks, mcpManager)
 }
 
@@ -223,7 +223,7 @@ func makeCompactionRuntime(config: AgentConfig, provider: Provider): AgentRuntim
     let providerReg = ProviderRegistry()
     providerReg.register("default", provider)
     let store = MemorySessionStore()
-    AgentRuntime(config, provider, toolReg, store, trustMgr,
+    testRuntime(config, provider, toolReg, store, trustMgr,
         skillReg, agentReg, providerReg, McpManager())
 }
 
@@ -476,7 +476,7 @@ func makeCancelRuntime(provider: Provider, slowMs: Int64): AgentRuntime {
     let providerReg = ProviderRegistry()
     providerReg.register("default", provider)
     let store = MemorySessionStore()
-    AgentRuntime(compactionRuntimeConfig(false, UInt32(16384), UInt32(20000), None), provider,
+    testRuntime(compactionRuntimeConfig(false, UInt32(16384), UInt32(20000), None), provider,
         toolReg, store, trustMgr, skillReg, agentReg, providerReg, McpManager())
 }
 
@@ -671,7 +671,7 @@ func makeApprovalRuntime(provider: Provider, decision: String, rec: ApprovalReco
         rec.lastToolCallId = req.toolCallId
         approvalAnswerOf(req, decision)
     }
-    AgentRuntime(compactionRuntimeConfig(false, UInt32(16384), UInt32(20000), None), provider,
+    testRuntime(compactionRuntimeConfig(false, UInt32(16384), UInt32(20000), None), provider,
         toolReg, store, trustMgr, skillReg, agentReg, providerReg,
         ArrayList<Hook>(), McpManager(), ask: Some(askFn))
 }
@@ -732,7 +732,7 @@ func runtime_withoutAskChannel_deniesAndDoesNotHang() {
     toolReg.register(SequentialSlowTool())
     let providerReg = ProviderRegistry()
     providerReg.register("default", provider)
-    let runtime = AgentRuntime(compactionRuntimeConfig(false, UInt32(16384), UInt32(20000), None), provider,
+    let runtime = testRuntime(compactionRuntimeConfig(false, UInt32(16384), UInt32(20000), None), provider,
         toolReg, MemorySessionStore(), TrustManager(), SkillRegistry(), AgentRegistry(), providerReg,
         McpManager())
     let result = approvalRunResult(runtime)
@@ -786,7 +786,7 @@ public func runtime_middlewaresWrappedInOrderAndApplied() {
     providerReg.register("default", inner)
     let store = MemorySessionStore()
     let mcpMgr = McpManager()
-    let runtime = AgentRuntime(subConfig(), inner, toolReg, store, trustMgr,
+    let runtime = testRuntime(subConfig(), inner, toolReg, store, trustMgr,
         skillReg, agentReg, providerReg, ArrayList<Hook>(),
         SessionEnvironment(), mcpMgr, middlewares: mws)
     let msgs = ArrayList<Message>()
@@ -816,7 +816,7 @@ public func sessionLoop_forwardsMiddlewares() {
     providerReg.register("default", inner)
     let store = MemorySessionStore()
     let mcpMgr = McpManager()
-    let loop = SessionLoop(toolReg, trustMgr, skillReg, agentReg, providerReg, store, mcpMgr,
+    let loop = testSessionLoop(toolReg, trustMgr, skillReg, agentReg, providerReg, store, mcpMgr,
         middlewares: mws)
     let cfg = subConfig()
     let outcome = loop.run("sess_mw", "你好", cfg, inner, None, SessionEnvironment(),
@@ -835,8 +835,8 @@ class TrackingRuntime <: AgentRuntime {
         trustMgr: TrustManager, skillReg: SkillRegistry,
         agentReg: AgentRegistry, providerReg: ProviderRegistry,
         mcpMgr: McpManager) {
-        super(config, provider, toolReg, store, trustMgr, skillReg,
-            agentReg, providerReg, ArrayList<Hook>(), mcpMgr)
+        super(testSpec(toolReg, trustMgr, skillReg, agentReg, providerReg, store, mcpMgr)
+            .withProvider(providerNameOf(config), provider), config)
     }
     public override func chat(messages: ArrayList<Message>): EventStream<AgentEvent, ArrayList<Message>> {
         this.chatCalls++
@@ -913,7 +913,7 @@ func runtime_providerFailureIsVisibleInMessages() {
     let provider = StubStreamFailingProvider()
     let providerReg = ProviderRegistry()
     providerReg.register("default", provider)
-    let runtime = AgentRuntime(mcpRuntimeConfig(), provider, ToolRegistry(),
+    let runtime = testRuntime(mcpRuntimeConfig(), provider, ToolRegistry(),
         MemorySessionStore(), TrustManager(), SkillRegistry(), AgentRegistry(),
         providerReg, ArrayList<Hook>(), McpManager())
 
@@ -931,7 +931,7 @@ func runtime_shortCircuitIsVisibleInMessages() {
     let provider = StubProvider()
     let providerReg = ProviderRegistry()
     providerReg.register("default", provider)
-    let runtime = AgentRuntime(mcpRuntimeConfig(), provider, ToolRegistry(),
+    let runtime = testRuntime(mcpRuntimeConfig(), provider, ToolRegistry(),
         MemorySessionStore(), TrustManager(), SkillRegistry(), AgentRegistry(),
         providerReg, hooks, McpManager())
 

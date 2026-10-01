@@ -15,10 +15,9 @@ import atelier.provider.EchoProvider
 // atelier acp [agent]：以 ACP v1 Agent（stdio 服务端）身份被外部 ACP Client 拉起。
 // 约束：本进程 stdout 只允许 ACP 帧，一切诊断走 stderr；serve() 阻塞至 stdin EOF。
 // sessionDirOverride：非空时覆盖会话目录（远程子进程隔离用，不与父共享 bstorm/映射文件）
-public func runAcp(agentNameArg: String, toolReg: ToolRegistry, trustMgr: TrustManager,
-    skillReg: SkillRegistry, agentReg: AgentRegistry, providerReg: ProviderRegistry,
-    sessionStore: SessionStore, mcpMgr: McpManager, sessionDir: String,
+public func runAcp(agentNameArg: String, spec: HarnessSpec, sessionDir: String,
     sessionDirOverride: String): Unit {
+    let agentReg = spec.agents
     // agent 启动时选择：参数优先，未注册则回退 default（不存在则补建）
     let agentName: String
     if (agentNameArg != "" && agentReg.has(agentNameArg)) {
@@ -50,6 +49,7 @@ public func runAcp(agentNameArg: String, toolReg: ToolRegistry, trustMgr: TrustM
         case Some(v) => v == "echo"
         case None => false
     }
+    // 离线通道优先；否则按 agent 配置在装配束里解析（解析不到会明确报错）
     let provider: Provider = if (echoMode) {
         let delayMs = match (getVariable("ATELIER_ECHO_DELAY_MS")) {
             case Some(v) =>
@@ -58,14 +58,11 @@ public func runAcp(agentNameArg: String, toolReg: ToolRegistry, trustMgr: TrustM
         }
         EchoProvider(delayMs)
     } else {
-        resolveProviderFor(cfg, providerReg)
+        spec.resolveProvider(cfg)
     }
     // 会话映射文件与会话数据同目录（已由调用方创建）
     let mappingFile = if (effectiveSessionDir != "") { effectiveSessionDir + "/acp-sessions.json" } else { "acp-sessions.json" }
-    let modelReg = ModelContextRegistry()
-    let bridge = AcpBridge(agentName, cfg, provider, toolReg, trustMgr, skillReg,
-        agentReg, providerReg, sessionStore, mcpMgr, modelReg, mappingFile,
-        "atelier", "0.1.0")
+    let bridge = AcpBridge(agentName, cfg, provider, spec, mappingFile, "atelier", "0.1.0")
     try {
         let err = getStdErr()
         err.write(("[atelier-acp] agent='" + agentName + "' ready (ACP v1, stdio)\n").toArray())

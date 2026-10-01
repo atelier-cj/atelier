@@ -40,21 +40,52 @@ cjpm build -j 16
 
 ## 集成方式
 
-**库模式** — 在 `cjpm.toml` 添加依赖，调用 `AgentRuntime.chat()`：
+**库模式** — 在 `cjpm.toml` 添加依赖，装一个**装配束**（HarnessSpec）就能跑：
 
 ```cangjie
-import atelier.*
-// askFn：(UserRequest) -> UserAnswer —— 审批/选择/表单的宿主侧入口
-// 不传 = 没有提问通道：需要用户拍板的地方按「取消」处理（等同拒绝）
-let runtime = AgentRuntime(config, provider, toolReg, ..., ask: Some(askFn))
-let stream = runtime.chat(messages)
-for (event in stream) { ... }
+import atelier.agent.*
+
+// 零配置：内置工具 + 内存会话 + 环境变量里的 provider
+let h = Harness.open()
+println(h.run("你好"))
+h.close()
 ```
 
-**HTTP 挂载** — 路由挂到既有 HTTP 服务：
+要换组件就派生装配束 —— 每个组件都是接口，`with*` 只影响这一份（不写穿共享组件）：
 
 ```cangjie
-let atelier = AtelierHttpHandler(...)
+let spec = HarnessSpec.default()
+    .withProvider("default", OpenAIProvider("default", baseUrl, apiKey))  // 换模型服务
+    .withStore(StormSessionStore("./sessions"))                           // 换会话存储
+    .withTool(SqlTool())                                                  // 加/换工具（同名覆盖）
+    .withHook(AuditHook())                                                // 横切钩子
+    .withModelContext("deepseek", "deepseek-chat", 65536)                 // 声明端点上的模型窗口
+    // askFn：(UserRequest) -> UserAnswer —— 审批/选择/表单的宿主侧入口。
+    // 不挂 = 没有提问通道：需要用户拍板的地方按「取消」处理（等同拒绝）
+    .withAsk({ req => myApprovalUi(req) })
+
+let h = Harness.open(spec)
+```
+
+> 上下文窗口是 **`(provider, model)` 这一对的事实**，不是 agent 的属性：同名模型走官方端点和走
+> 一个截断过的代理，窗口可以不同。所以它声明在 provider 下（配置里 `[[provider.model]]`、
+> 代码里上面的 `withModelContext`），agent 只负责**选**这一对。想让它更早压缩是另一回事，
+> 用 `compactionReserveTokens` / `keepRecentTokens` 这类策略旋钮。
+
+需要会话 id、事件流、取消、子 Agent 这些细粒度能力时，从**同一个装配束**下钻到运行时
+（没有第二套配置）：
+
+```cangjie
+let runtime = AgentRuntime(spec, cfg)          // cfg: AgentConfig
+let stream = runtime.chatWithSessionId(sid, msgs, env)
+for (event in stream) { ... }
+runtime.cancelSession(sid)
+```
+
+**HTTP 挂载** — 路由挂到既有 HTTP 服务，用的还是同一份装配束：
+
+```cangjie
+let atelier = AtelierHttpHandler(spec)
 atelier.registerRoutes(server.distributor)
 ```
 
@@ -103,13 +134,21 @@ curl http://localhost:8080/agent/run \
 
 ```toml
 [[provider]]
-name = "default"
-baseURL = "https://api.openai.com/v1"
-apiKey = "${OPENAI_API_KEY}"
+name = "deepseek"
+baseURL = "https://api.deepseek.com"
+apiKey = "${DEEPSEEK_API_KEY}"
+
+  # 端点上的模型事实：窗口是 (provider, model) 这一对的属性
+  # （同名模型走官方端点和走截断过的代理，窗口可以不同）
+  [[provider.model]]
+  name = "deepseek-chat"
+  contextWindow = 65536        # 窗口含输入与输出
+  maxTokens = 8192             # 默认完成预算（压缩要按它留余量）
 
 [[agent]]
 name = "assistant"
-model = "gpt-4o"
+model = "deepseek-chat"
+provider = "deepseek"          # agent 只负责「选」这一对（provider + model）
 systemPrompt = "你是一个有用的助手"
 tools = ["bash", "read_file", "grep", "glob"]
 
