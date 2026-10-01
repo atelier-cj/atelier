@@ -49,6 +49,8 @@ public class A2aTranslator {
     private var textAppended: Bool = false
     // 本回合文本产物是否已收尾（收尾只能做一次，重复调用是空操作）
     private var textFinished: Bool = false
+    // 宿主已知本次运行被取消（A2A 的 tasks/cancel）：终态一律判为 CANCELED
+    private var cancelled: Bool = false
     private var pendingText: ?String = None
     // toolCallId → 工具产物是否已闭合（lastChunk 已发）
     private let toolArtifacts = HashMap<String, Bool>()
@@ -68,6 +70,7 @@ public class A2aTranslator {
         this.textFinished = false
         this.pendingText = None
         this.toolArtifacts.clear()
+        this.cancelled = false
         this.phase = A2aTaskPhase.Idle
     }
 
@@ -79,6 +82,12 @@ public class A2aTranslator {
     // 终态是否已下发（宿主据此拒绝后续更新 / 决定是否新建 task）
     public func isFinished(): Bool {
         this.phase == A2aTaskPhase.Terminal
+    }
+
+    // 宿主已知本次运行被取消（服务端 tasks/cancel 置位）：provider 在中断时的 stopReason
+    // 不可靠，取消是外部事实，因此由宿主显式告知 —— 后续终态判为 CANCELED 而不是 COMPLETED。
+    public func markCancelled(): Unit {
+        this.cancelled = true
     }
 
     // 外部驱动的终态（如服务端已回 CANCELED 的 tasks/cancel）：置终态并下发状态事件。
@@ -176,7 +185,7 @@ public class A2aTranslator {
                         // 带工具结果的回合之后还有新回合，提前收终态会让后续更新违反协议
                         if (te.toolResults.size == 0) {
                             this.phase = A2aTaskPhase.Terminal
-                            this.emitStatus(TaskState.Completed, None, out)
+                            this.emitStatus(this.terminalState(), None, out)
                         }
                     case _ =>
                         // ToolUse：工具批次（或挂起）之后继续；Length：截断续跑或由 AgentEnd 收尾
@@ -197,7 +206,7 @@ public class A2aTranslator {
                             this.closeText("", out)
                             this.closeOpenTools(out)
                             this.phase = A2aTaskPhase.Terminal
-                            this.emitStatus(TaskState.Completed, None, out)
+                            this.emitStatus(this.terminalState(), None, out)
                     }
                 }
             case _ => ()
@@ -302,6 +311,14 @@ public class A2aTranslator {
 
     private func toolArtifactId(callId: String): String {
         "tool_t" + this.turnNo.toString() + "_" + callId
+    }
+
+    // 运行正常收尾时的终态：宿主报过取消就是 CANCELED
+    private func terminalState(): TaskState {
+        if (this.cancelled) {
+            return TaskState.Canceled
+        }
+        TaskState.Completed
     }
 
     // ---------- 状态消息 ----------

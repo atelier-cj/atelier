@@ -431,6 +431,25 @@ func a2aTranslator_finishDrivesExternalTerminal() {
     @Expect(threw, true)
 }
 
+// 宿主报过取消：运行正常收尾时终态是 CANCELED 而不是 COMPLETED（provider 在中断时的
+// stopReason 不可靠，取消是外部事实）；reset 后标记清掉，新回合照常收 COMPLETED
+@Test
+func a2aTranslator_hostCancelledTurnsTerminalIntoCanceled() {
+    let t = A2aTranslator("task_1", "ctx_1")
+    t.translate(TurnStartEvent())
+    t.markCancelled()
+    let out = t.translate(TurnEndEvent(
+        a2aAssistantMsg(ContentList.ofText("停"), StopReason.EndTurn), ArrayList<ToolResultMessage>()))
+    @Expect(a2aStatusEvents(out)[0].status.state, TaskState.Canceled)
+    @Expect(t.isFinished(), true)
+
+    t.reset()
+    t.translate(TurnStartEvent())
+    let out2 = t.translate(TurnEndEvent(
+        a2aAssistantMsg(ContentList.ofText("再跑"), StopReason.EndTurn), ArrayList<ToolResultMessage>()))
+    @Expect(a2aStatusEvents(out2)[0].status.state, TaskState.Completed)
+}
+
 // ---------- 挂起 → INPUT_REQUIRED → 同 taskId 续聊 ----------
 
 @Test
