@@ -1,4 +1,4 @@
-package server
+package atelier.config
 
 import jsonvalue.*
 import std.collection.*
