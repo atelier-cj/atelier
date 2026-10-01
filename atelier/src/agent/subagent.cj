@@ -112,6 +112,16 @@ public open class SubAgentHandle {
         }
     }
 
+    /**
+     * 子代理此刻是否阻塞在 `send_message(waitReply=true)` 上。
+     *
+     * 与 [respond] 的分派判据是同一个标志：为 true 时回复走回合内通道（立刻解锁当前回合），
+     * 为 false 时作为回合中/后续消息排队。宿主界面可用它显示"等待回复"状态。
+     */
+    public func isWaitingForReply(): Bool {
+        this.waitingForReply.load()
+    }
+
     public func state(): SubagentState {
         synchronized(this.stateLock) { this.st }
     }
@@ -380,14 +390,16 @@ public class SubAgentManager {
         let childToolReg = ToolRegistry()
         for (t in this.spec.tools.list()) { childToolReg.register(t) }
         let sendTool = SendMessageTool(
-            { body, kind =>
+            { body, kind, willWaitReply =>
+                // 顺序要紧：**先**登记等待再投递提问。父收到提问后可能立刻回复，
+                // 若登记晚于投递，那道窗口里的回复会被 respond 当成"回合中消息"投进 inbox，
+                // 本次 waitReply 只能干等到超时（表现为"父明明回了，子却说超时"）
+                if (willWaitReply) { h.waitingForReply.store(true) }
                 let mail = AgentMail(h.subSessionId, h.parentSessionId, kind, body)
                 h.outbox.add(mail)
                 this.parentBoxFor(h.parentSessionId).add(mail)
             },
             { timeoutMs =>
-                // 置位等待标志：respond 据此走 replyQueue 直通；超时/收到回复即复位
-                h.waitingForReply.store(true)
                 var res: ?String = None
                 try {
                     match (h.replyQueue.remove(Duration.millisecond * timeoutMs)) {
@@ -399,6 +411,7 @@ public class SubAgentManager {
                     // 当成「子 Agent 没回复」（std 文档未声明该调用会抛，属防御性兜底）
                     eprintln("[atelier] subagent reply queue read failed: ${e.toString()}")
                 }
+                // 收到回复或超时都复位：停在"等待中"会让父后续回复一直走 replyQueue 没人取
                 h.waitingForReply.store(false)
                 res
             })
