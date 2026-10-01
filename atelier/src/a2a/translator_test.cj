@@ -88,7 +88,10 @@ func a2aTranslator_turnStartEmitsWorking() {
     @Expect(sts[0].taskId, "task_1")
     @Expect(sts[0].contextId, "ctx_1")
     match (sts[0].status.timestamp) {
-        case Some(ts) => @Expect(ts.endsWith("Z"), true)
+        case Some(ts) =>
+            // 毫秒精度、Z 结尾的定宽 ISO 8601（"2026-10-02T01:02:03.123Z"）
+            @Expect(ts.size, 24)
+            @Expect(ts.endsWith("Z"), true)
         case None => @Fail("status update missing timestamp")
     }
     @Expect(t.turnCount(), 1)
