@@ -88,8 +88,6 @@ public open class AgentRuntime {
     // PTC 子调用授权在深层调用栈里，拿不到开跑时的局部变量，故用瞬态字段传递。
     private var resumedAnswersForSub: HashMap<String, UserAnswer> = HashMap()
     private let modelRegistry: ModelContextRegistry
-    // 本 agent 自报的上下文窗口（优先于模型表；None = 用表）
-    private let contextWindowOverride: Option<Int64>
     // 未命中模型表只提醒一次（每回合一条会把日志淹掉）
     private let warnedModels = HashSet<String>()
     private let warnLock = Mutex()
@@ -127,7 +125,6 @@ public open class AgentRuntime {
         this.hooks = spec.hooks
         this.askFn = spec.ask
         this.modelRegistry = spec.models
-        this.contextWindowOverride = config.contextWindow
         this.sessionEnv = sessionEnv
         this.mcpManager = spec.mcp
         this.promptContributors = spec.contributors
@@ -148,10 +145,12 @@ public open class AgentRuntime {
         this.resolveContextWindow(this.pickModel(this.config.model))
     }
 
-    // 上下文窗口：agent 自报优先，其次模型表；未命中表时提醒一次
-    // （静默按偏小兜底值提前压缩，是「模型无缘无故失忆」类问题的常见根因）
+    // 上下文窗口：端点层（provider + model）→ 模型名层（含内置表）→ 兜底。
+    // 未命中任何声明时提醒一次 —— 静默按偏小的兜底值提前压缩，是「模型无缘无故失忆」
+    // 类问题的常见根因，而下游看不到任何线索。
     private func resolveContextWindow(model: String): Int64 {
-        match (this.contextWindowOverride) {
+        let providerName = providerNameOf(this.config)
+        match (this.modelRegistry.windowFor(providerName, model)) {
             case Some(w) => return w
             case None => ()
         }
@@ -165,7 +164,7 @@ public open class AgentRuntime {
             }
             if (first) {
                 let log = getGlobalLogger([("name", "AgentRuntime")])
-                log.warn("model '${model}' not in context window table: assuming ${this.modelRegistry.get(model)} tokens; declare it with [[model]] / AgentConfig.contextWindow", Array<Attr>())
+                log.warn("no context window declared for provider '${providerName}' model '${model}': assuming ${this.modelRegistry.get(model)} tokens; declare it with [[provider.model]] contextWindow", Array<Attr>())
             }
         }
         this.modelRegistry.get(model)

@@ -74,8 +74,8 @@ main(): Int64 {
         skills: skillReg, agents: agentReg, mcp: mcpMgr)
     spec = HarnessSpec.withBuiltinTools(spec)
     spec = HarnessSpec.withEnvProvider(spec)
-    // [[model]] 声明的上下文窗口（未声明的新模型会落回内置表 + 兜底并留痕）
-    spec = withTomlModels(spec, config.model)
+    // [[provider.model]] 声明的上下文窗口（未声明的新模型会落回内置表 + 兜底并留痕）
+    spec = withTomlProviderModels(spec, config.provider)
     try { skillReg.loadDirectory(configDir + "/.agents/skills") } catch (e: Exception) {
         // 技能目录整体加载失败 = 全部技能静默消失，模型只会「不会用」而无任何线索
         eprintln("[atelier] skills load failed (${configDir}/.agents/skills): ${e.toString()}")

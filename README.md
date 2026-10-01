@@ -59,7 +59,7 @@ let spec = HarnessSpec.default()
     .withStore(StormSessionStore("./sessions"))                           // 换会话存储
     .withTool(SqlTool())                                                  // 加/换工具（同名覆盖）
     .withHook(AuditHook())                                                // 横切钩子
-    .withModelContext("vendor-model", 262144)                             // 声明模型上下文窗口
+    .withModelContext("deepseek", "deepseek-chat", 65536)                 // 声明端点上的模型窗口
     // askFn：(UserRequest) -> UserAnswer —— 审批/选择/表单的宿主侧入口。
     // 不挂 = 没有提问通道：需要用户拍板的地方按「取消」处理（等同拒绝）
     .withAsk({ req => myApprovalUi(req) })
@@ -67,9 +67,10 @@ let spec = HarnessSpec.default()
 let h = Harness.open(spec)
 ```
 
-> 上下文窗口两条路等价：配置文件里写 `[[model]]`（模型级）或 `[[agent]] contextWindow`
-> （本 agent 覆盖）；代码里就是上面的 `withModelContext` 与 `AgentConfig.contextWindow`。
-> 单个 agent 优先用后者 —— 它跟着配置走（进注册表、导出、子 agent 都在）。
+> 上下文窗口是 **`(provider, model)` 这一对的事实**，不是 agent 的属性：同名模型走官方端点和走
+> 一个截断过的代理，窗口可以不同。所以它声明在 provider 下（配置里 `[[provider.model]]`、
+> 代码里上面的 `withModelContext`），agent 只负责**选**这一对。想让它更早压缩是另一回事，
+> 用 `compactionReserveTokens` / `keepRecentTokens` 这类策略旋钮。
 
 需要会话 id、事件流、取消、子 Agent 这些细粒度能力时，从**同一个装配束**下钻到运行时
 （没有第二套配置）：
@@ -133,23 +134,22 @@ curl http://localhost:8080/agent/run \
 
 ```toml
 [[provider]]
-name = "default"
-baseURL = "https://api.openai.com/v1"
-apiKey = "${OPENAI_API_KEY}"
+name = "deepseek"
+baseURL = "https://api.deepseek.com"
+apiKey = "${DEEPSEEK_API_KEY}"
 
-# 模型 → 上下文窗口（token）。内置表只认常见模型名，新模型/代理截断都会与它不符：
-# 没声明的模型会按兜底值（8192）压缩上下文并留一条警告
-[[model]]
-name = "deepseek-chat"
-contextWindow = 65536
+  # 端点上的模型事实：窗口是 (provider, model) 这一对的属性
+  # （同名模型走官方端点和走截断过的代理，窗口可以不同）
+  [[provider.model]]
+  name = "deepseek-chat"
+  contextWindow = 65536
 
 [[agent]]
 name = "assistant"
 model = "deepseek-chat"
+provider = "deepseek"          # agent 只负责「选」这一对（provider + model）
 systemPrompt = "你是一个有用的助手"
 tools = ["bash", "read_file", "grep", "glob"]
-# 可选：本 agent 的窗口覆盖 [[model]]（预算控制、走代理被截断这类特例）
-# contextWindow = 32768
 
 [logging]
 level = "info"

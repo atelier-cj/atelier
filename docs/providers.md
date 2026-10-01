@@ -197,12 +197,15 @@ Atelier 内置 `ModelContextRegistry` 查表：
 
 | 优先级 | 声明位置 |
 |---|---|
-| 1 | `[[agent]] contextWindow`（或代码里 `AgentConfig.contextWindow`） |
-| 2 | `[[model]] name = ... / contextWindow = ...`（或代码里 `HarnessSpec.withModelContext`） |
-| 3 | 内置表（上表） |
-| 4 | 兜底值（默认 8192；`HarnessSpec.withDefaultContextWindow` 可改） |
+| 1 | `[[provider.model]] contextWindow`（代码：`HarnessSpec.withModelContext(provider, model, n)`）—— 端点层 |
+| 2 | 模型名层：内置表（上表）+ 按名字的全局声明（`withModelContextByName`） |
+| 3 | 兜底值（默认 8192；`HarnessSpec.withDefaultContextWindow` 可改） |
 
-走到 4 时运行时会在日志里打一条警告（每个模型一次），提示声明窗口 —— 兜底值偏小会让上下文
+**为什么按 `(provider, model)` 而不是只按模型名**：窗口是端点的事实。同一个 `deepseek-chat`，
+官方端点是 64k，经由一个截断过的代理可能就是 32k —— 只按模型名声明，等于让两个端点共用一个数，
+必有一个是错的。agent 只负责选这一对，不持有这个事实。
+
+走到兜底值时运行时会在日志里打一条警告（每个 `provider` × 模型一次），提示声明窗口 —— 兜底值偏小会让上下文
 **提前被压缩**，表现为"模型聊着聊着忘了前面"，而调用方看不到任何线索。窗口为 0 表示禁用压缩。
 
 ## 自定义 Provider

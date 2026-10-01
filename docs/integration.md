@@ -498,7 +498,7 @@ let spec = HarnessSpec.default()
     .withMcp(myMcpManager)
     .withHook(AuditHook())
     .withAsk(askFn)                           // (UserRequest) -> UserAnswer
-    .withModelContext("vendor-model", 262144) // 模型上下文窗口
+    .withModelContext("deepseek", "deepseek-chat", 65536) // 端点上的模型窗口
     .withMiddlewares(middlewares)
     .withEventBus(bus)
 
@@ -516,13 +516,13 @@ let runtime = AgentRuntime(spec, cfg)
 | MCP 连接 | `McpManager` | `withMcp` |
 | 钩子 | `ArrayList<Hook>` | `withHook` / `withHooks` |
 | 提问通道 | `Option<AskFn>` | `withAsk`（审批/选择/表单） |
-| 模型窗口表 | `ModelContextRegistry` | `withModelContext` / `withModels` / `withDefaultContextWindow` |
+| 模型窗口表 | `ModelContextRegistry` | `withModelContext(provider, model, n)`（端点层）/ `withModelContextByName` / `withModels` / `withDefaultContextWindow` |
 | 请求级中间件 | `ArrayList<ProviderMiddleware>` | `withMiddlewares` |
 | 系统提示段 | `ArrayList<PromptSegmentContributor>` | `withContributors` |
 | 事件总线 | `EventBus` | `withEventBus` |
 
 `AgentConfig` 里的 `provider` 决定用哪个 provider（缺省 `"default"`）；装配束里找不到会**明确报错**，
-不会静默退化成某个默认端点。`AgentConfig.contextWindow` 优先于模型表。
+不会静默退化成某个默认端点。上下文窗口按 `(provider, model)` 查（见 docs/providers.md「上下文窗口」）。
 
 ------|------|------|
 | `config` | `AgentConfig` | Agent 身份、模型、参数 |

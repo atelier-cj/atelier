@@ -580,41 +580,7 @@ func agentConfigFrom_verifyPasses() {
     @Expect(agentConfigFrom(bad).maxVerifyPasses, UInt32(0))
 }
 
-// ---------- 上下文窗口：[[model]] 与 agent 级声明 ----------
-
-@Test
-func agentConfigFrom_contextWindow() {
-    let ta = TomlAgent()
-    ta.model = "vendor-model"
-    ta.contextWindow = 262144
-    @Expect(agentConfigFrom(ta).contextWindow, Some(262144))
-
-    // 未声明（0）= 交给装配束的模型表；写成 0/负数不该被当成窗口
-    @Expect(agentConfigFrom(TomlAgent()).contextWindow, None)
-
-    let zero = TomlAgent()
-    zero.contextWindow = 0
-    @Expect(agentConfigFrom(zero).contextWindow, None)
-}
-
-@Test
-func tomlModel_roundTrip() {
-    // 用户是在配置文件里写 [[model]] 的：读路径必须真的认它
-    let file = writeTempToml("""
-[[model]]
-name = "vendor-model"
-contextWindow = 262144
-""")
-    let cfg = unmarshal<TomlConfig>(file)
-    @Expect(cfg.model.size, 1)
-    @Expect(cfg.model[0].name, "vendor-model")
-    @Expect(cfg.model[0].contextWindow, 262144)
-
-    // 写路径也要带上（不然改配置再存回就丢声明）
-    let text = String.fromUtf8(marshal(cfg))
-    @Expect(text.contains("[[model]]"), true)
-    @Expect(text.contains("262144"), true)
-}
+// ---------- 上下文窗口：声明在端点（provider × model）上 ----------
 
 func writeTempToml(body: String): String {
     let dir = "/tmp/atelier-cfg-test-model-window"
@@ -627,23 +593,67 @@ func writeTempToml(body: String): String {
 }
 
 @Test
-func withTomlModels_appliesDeclaredWindows() {
-    var models = ArrayList<TomlModel>()
-    let declared = TomlModel()
-    declared.name = "vendor-model"
-    declared.contextWindow = 262144
-    models.add(declared)
-    // 声明的窗口 <= 0 = 未声明，不该覆盖内置表
-    let bogus = TomlModel()
+func withTomlProviderModels_appliesEndpointWindows() {
+    var providers = ArrayList<TomlProvider>()
+    let p = TomlProvider()
+    p.name = "proxy"
+    let m = TomlProviderModel()
+    m.name = "vendor-model"
+    m.contextWindow = 32768
+    p.model.add(m)
+    // 未声明（0）= 不该覆盖模型名层
+    let bogus = TomlProviderModel()
     bogus.name = "gpt-4o"
     bogus.contextWindow = 0
-    models.add(bogus)
+    p.model.add(bogus)
+    providers.add(p)
 
-    let spec = withTomlModels(HarnessSpec(), models)
-    @Expect(spec.models.has("vendor-model"), true)
-    @Expect(spec.models.get("vendor-model"), 262144)
-    // 内置表没被 0 覆盖
+    let spec = withTomlProviderModels(HarnessSpec(), providers)
+    @Expect(spec.models.windowFor("proxy", "vendor-model"), Some(32768))
+    // 端点层与模型名层互不干扰：别的端点上没有这条声明
+    @Expect(spec.models.windowFor("other", "vendor-model"), None)
     @Expect(spec.models.get("gpt-4o"), 128000)
-    // 原装配束（未调用 withTomlModels 的）不受影响
-    @Expect(HarnessSpec().models.has("vendor-model"), false)
+    // 原装配束不受影响
+    @Expect(HarnessSpec().models.windowFor("proxy", "vendor-model"), None)
 }
+
+// ---------- provider × model：模型事实挂在端点上 ----------
+
+@Test
+func tomlProviderModel_nestedTableParses() {
+    // 形状：模型表嵌在它所属的 provider 里（同一个模型名走不同端点可以是不同窗口）
+    let file = writeTempToml("""
+[[provider]]
+name = "deepseek"
+baseURL = "https://api.deepseek.com"
+apiKey = "k"
+
+  [[provider.model]]
+  name = "deepseek-chat"
+  contextWindow = 65536
+
+  [[provider.model]]
+  name = "deepseek-reasoner"
+  contextWindow = 65536
+
+[[provider]]
+name = "proxy"
+baseURL = "https://proxy.internal/v1"
+
+  [[provider.model]]
+  name = "deepseek-chat"
+  contextWindow = 32768
+""")
+    let cfg = unmarshal<TomlConfig>(file)
+    @Expect(cfg.provider.size, 2)
+    @Expect(cfg.provider[0].name, "deepseek")
+    @Expect(cfg.provider[0].model.size, 2)
+    @Expect(cfg.provider[0].model[0].name, "deepseek-chat")
+    @Expect(cfg.provider[0].model[0].contextWindow, 65536)
+    @Expect(cfg.provider[1].name, "proxy")
+    @Expect(cfg.provider[1].model.size, 1)
+    // 同名模型在不同端点下各有一个窗口 —— 这正是不能只按模型名做键的原因
+    @Expect(cfg.provider[1].model[0].contextWindow, 32768)
+}
+
+

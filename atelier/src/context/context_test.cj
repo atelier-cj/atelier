@@ -70,6 +70,40 @@ func modelRegistry_hasDistinguishesKnownFromFallback() {
 }
 
 @Test
+func modelRegistry_providerLayerOverridesNameLayer() {
+    let reg = ModelContextRegistry()
+    reg.register("vendor-model", 111)
+    reg.registerFor("proxy", "vendor-model", 32768)
+
+    // 端点层：同一模型名在不同端点下各是各的
+    @Expect(reg.windowFor("proxy", "vendor-model"), Some(32768))
+    @Expect(reg.hasFor("proxy", "vendor-model"), true)
+    @Expect(reg.windowFor("other", "vendor-model"), None)
+    @Expect(reg.hasFor("other", "vendor-model"), false)
+    // 模型名层不受端点层影响
+    @Expect(reg.get("vendor-model"), 111)
+
+    // 派生：端点层声明落在副本上，原表不动
+    let derived = reg.mergedFor("other", "vendor-model", 4096)
+    @Expect(derived.windowFor("other", "vendor-model"), Some(4096))
+    @Expect(reg.hasFor("other", "vendor-model"), false)
+    // 已有层照旧带过去
+    @Expect(derived.windowFor("proxy", "vendor-model"), Some(32768))
+    @Expect(derived.get("gpt-4o"), 128000)
+}
+
+@Test
+func modelRegistry_listCoversBothLayers() {
+    let reg = ModelContextRegistry()
+    reg.register("only-name", 1000)
+    reg.registerFor("p", "only-endpoint", 2000)
+    let names = reg.list()
+    @Expect(names.contains("only-name"), true)
+    @Expect(names.contains("only-endpoint"), true)
+    @Expect(names.contains("gpt-4o"), true)
+}
+
+@Test
 func modelRegistry_mergedOverridesOnCopy() {
     let base = ModelContextRegistry()
     let derived = base.merged("vendor-new-model", 262144)

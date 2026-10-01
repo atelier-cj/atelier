@@ -201,13 +201,18 @@ public class HarnessSpec {
     }
 
     /**
-     * 声明某个模型的上下文窗口（覆盖内置表；副本语义，不动共享表）。
+     * 声明**某个端点上的某个模型**的上下文窗口（副本语义，不动共享表）。
      *
-     * 这是**配置文件里 `[[model]]` 的代码对应物**（TOML 加载就是调它写进表里的）。
-     * 单个 agent 的窗口请优先写在 `AgentConfig.contextWindow` —— 它跟着配置走
-     * （进注册表、导出、子 agent 都在）；这张表用于「一个模型被多个 agent 共用」。
+     * 这是配置文件里 `[[provider.model]] contextWindow` 的代码对应物（TOML 加载就是调它）。
+     * 窗口是 `(provider, model)` 这一对路由的事实、不是 agent 的属性：同名模型走官方端点
+     * 和走截断过的代理可以不同，所以按对声明，agent 只负责选这一对。
      */
-    public func withModelContext(model: String, contextWindow: Int64): HarnessSpec {
+    public func withModelContext(provider: String, model: String, contextWindow: Int64): HarnessSpec {
+        HarnessSpec(this, models: this.models.mergedFor(provider, model, contextWindow))
+    }
+
+    /** 按模型名全局声明窗口（不分端点；端点层未声明时用它） */
+    public func withModelContextByName(model: String, contextWindow: Int64): HarnessSpec {
         HarnessSpec(this, models: this.models.merged(model, contextWindow))
     }
 

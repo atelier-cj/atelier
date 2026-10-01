@@ -12,10 +12,6 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
     public let userPromptTemplate: Option<String>
     public let model: String
     public let provider: Option<String>
-    // 本 agent 所用模型的上下文窗口（token）。None = 交给装配层的模型表
-    // （HarnessSpec.withModelContext / [[model]] / 内置表 + 兜底）。
-    // 有值时优先：代理服务截断后的窗口、超长上下文变体这类「同名模型不同窗口」靠它兜住。
-    public let contextWindow: Option<Int64>
     public let tools: ArrayList<String>
     public let skills: ArrayList<String>
     public let mcpCooldownTurns: Int64
@@ -73,8 +69,7 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
         ptcMaxSubCalls!: UInt32 = 64,
         sideEffectToolTimeout!: UInt32 = 300,
         maxLengthContinuations!: UInt32 = 3,
-        maxVerifyPasses!: UInt32 = 0,
-        contextWindow!: Option<Int64> = None
+        maxVerifyPasses!: UInt32 = 0
     ) {
         this.name = name; this.description = description
         this.systemPrompt = systemPrompt; this.userPromptTemplate = userPromptTemplate
@@ -98,7 +93,6 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
         this.ptcMaxSubCalls = ptcMaxSubCalls
         this.maxLengthContinuations = maxLengthContinuations
         this.maxVerifyPasses = maxVerifyPasses
-        this.contextWindow = contextWindow
     }
 
     // 派生一份「额外挂上若干工具名」的配置。
@@ -122,8 +116,7 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
             ptcMaxSubCalls: this.ptcMaxSubCalls,
             sideEffectToolTimeout: this.sideEffectToolTimeout,
             maxLengthContinuations: this.maxLengthContinuations,
-            maxVerifyPasses: this.maxVerifyPasses,
-            contextWindow: this.contextWindow)
+            maxVerifyPasses: this.maxVerifyPasses)
     }
 
     /**
@@ -145,8 +138,7 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
             ptcMaxSubCalls: this.ptcMaxSubCalls,
             sideEffectToolTimeout: this.sideEffectToolTimeout,
             maxLengthContinuations: this.maxLengthContinuations,
-            maxVerifyPasses: this.maxVerifyPasses,
-            contextWindow: this.contextWindow)
+            maxVerifyPasses: this.maxVerifyPasses)
     }
 
     public static func default(): AgentConfig {
@@ -191,7 +183,6 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
         w.writeName("toolPresentation").writeValue(this.toolPresentation.toString())
         w.writeName("ptcTimeoutSeconds").writeValue(Int64(this.ptcTimeoutSeconds))
         w.writeName("ptcMaxSubCalls").writeValue(Int64(this.ptcMaxSubCalls))
-        w.writeName("contextWindow").writeValue(this.contextWindow)
         w.endObject()
     }
 
@@ -218,7 +209,6 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
         var toolPresentation = ToolPresentationMode.Native
         var ptcTimeoutSeconds = UInt32(30)
         var ptcMaxSubCalls = UInt32(64)
-        var contextWindow: Option<Int64> = None
 
         r.startObject()
         while (r.peek() != EndObject) {
@@ -254,7 +244,6 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
                 case "toolPresentation" => toolPresentation = ToolPresentationMode.fromString(r.readValue<String>())
                 case "ptcTimeoutSeconds" => ptcTimeoutSeconds = UInt32(r.readValue<Int64>())
                 case "ptcMaxSubCalls" => ptcMaxSubCalls = UInt32(r.readValue<Int64>())
-                case "contextWindow" => contextWindow = r.readValue<Option<Int64>>()
                 case _ => r.skip()
             }
         }
@@ -271,8 +260,7 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
             ptcMaxSubCalls: ptcMaxSubCalls,
             sideEffectToolTimeout: sideEffectToolTimeout,
             maxLengthContinuations: maxLengthContinuations,
-            maxVerifyPasses: maxVerifyPasses,
-            contextWindow: contextWindow)
+            maxVerifyPasses: maxVerifyPasses)
     }
 
     public func toString(): String {

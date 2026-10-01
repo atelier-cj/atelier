@@ -744,7 +744,6 @@ struct AgentConfig {
     // 模型
     model: String                       // 如 "gpt-4o"
     provider: Option<String>            // 可选，缺省 "default"（在装配束里解析）
-    contextWindow: Option<Int64>        // 可选，本 agent 的上下文窗口（优先于 [[model]] / 内置表）
     
     // 工具与技能
     tools: List<String>                 // 工具名称列表
@@ -899,10 +898,13 @@ Provider 直接对接 LLM REST API，初始实现 `OpenAIProvider`（兼容 Open
 
 | 优先级 | 来源 | 说明 |
 |---|---|---|
-| 1 | `AgentConfig.contextWindow` | agent 自报（TOML `[[agent]] contextWindow` / 代码） |
-| 2 | `HarnessSpec.withModelContext` / TOML `[[model]]` | 模型级声明（库/配置两条路，都进同一张表） |
-| 3 | 内置查找表 | 常见模型名 |
-| 4 | 兜底值（默认 8192，可配） | **未命中即打一条警告**，提示声明窗口 |
+| 1 | TOML `[[provider.model]] contextWindow` / `HarnessSpec.withModelContext` | **端点层**：`(provider, model)` 这一对路由的事实（同名模型走不同端点可以不同） |
+| 2 | 内置查找表 + 按模型名的全局声明 | 模型名层 |
+| 3 | 兜底值（默认 8192，可配） | **未命中即打一条警告**，提示声明窗口 |
+
+agent **不持有**窗口（它的 `provider` / `model` 只是选型）：把端点的事实写进 agent，等于同一个
+端点被两个 agent 声明成两个数、必有一个是错的。想让某个 agent 更早压缩用 `compactionReserveTokens`
+/ `keepRecentTokens`。
 
 取兜底值时必须留痕：静默按偏小的值提前压缩，表现为"模型无缘无故失忆"，而下游看不到任何线索。
 
@@ -1084,7 +1086,7 @@ public interface Hook {
 | 最大输出 Token | 4096 | `maxOutputTokens` |
 | 压缩缓冲 Token | 16384 | `compactionReserveTokens` |
 | 保留最近 Token | 20000 | `keepRecentTokens` |
-| 上下文窗口（未知模型） | 兜底 8192 并警告 | `[[model]]` / `AgentConfig.contextWindow` / `withDefaultContextWindow`（0 = 禁用压缩） |
+| 上下文窗口（未知模型） | 兜底 8192 并警告 | `[[provider.model]]` / `withModelContext(provider, model, n)` / `withDefaultContextWindow`（0 = 禁用压缩） |
 | 并发工具执行 | 根据 `ExecutionMode` | 串行/并行 |
 | 最大工具结果字符 | 2000（摘要场景） | 硬编码 |
 

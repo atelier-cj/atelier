@@ -20,11 +20,11 @@ class SpecProbeTool <: Tool {
     public func executionMode(): ToolExecutionMode { ToolExecutionMode.Parallel }
 }
 
-func cfgOf(model: String, provider: Option<String>, contextWindow!: Option<Int64> = None): AgentConfig {
+func cfgOf(model: String, provider: Option<String>): AgentConfig {
     AgentConfig("t", None, "", None, model, provider, ArrayList<String>(), ArrayList<String>(), Int64(0),
         UInt32(20), Float32(0.7), UInt32(4096), None,
         false, UInt32(16384), UInt32(20000), None, UInt32(50), UInt32(30), UInt32(0),
-        ArrayList<String>(), None, Int64(0), Int64(0), contextWindow: contextWindow)
+        ArrayList<String>(), None, Int64(0), Int64(0))
 }
 
 @Test
@@ -121,18 +121,31 @@ func harnessSpec_resolveProviderMissingIsExplicit() {
 // ---------- 上下文窗口 ----------
 
 @Test
-func contextWindow_specTableIsUsed() {
-    let spec = HarnessSpec.forTests(EchoProvider()).withModelContext("vendor-model", 262144)
+func contextWindow_providerPairIsUsed() {
+    // 窗口是 (provider, model) 这一对路由的事实：声明在端点上，agent 只负责选
+    let spec = HarnessSpec.forTests(EchoProvider())
+        .withModelContext("default", "vendor-model", 262144)
     let runtime = AgentRuntime(spec, cfgOf("vendor-model", None))
     @Expect(runtime.contextWindowInUse(), 262144)
 }
 
 @Test
-func contextWindow_agentDeclaredWins() {
-    let spec = HarnessSpec.forTests(EchoProvider()).withModelContext("vendor-model", 262144)
-    // agent 自报（[[agent]] contextWindow / AgentConfig.contextWindow）优先于模型表
-    let runtime = AgentRuntime(spec, cfgOf("vendor-model", None, contextWindow: Some(4096)))
-    @Expect(runtime.contextWindowInUse(), 4096)
+func contextWindow_pairBeatsModelNameLayer() {
+    // 同名模型走不同端点：官方 262144，截断过的代理 32768 —— 各按各的端点取值
+    let spec = HarnessSpec.forTests(EchoProvider())
+        .withModelContextByName("vendor-model", 111)
+        .withModelContext("proxy", "vendor-model", 32768)
+
+    let viaProxy = AgentRuntime(spec.withProvider("proxy", EchoProvider()), cfgOf("vendor-model", Some("proxy")))
+    @Expect(viaProxy.contextWindowInUse(), 32768)
+
+    // 走没声明过的端点 → 回退模型名层（不是拿代理那个数）
+    let viaDefault = AgentRuntime(spec, cfgOf("vendor-model", None))
+    @Expect(viaDefault.contextWindowInUse(), 111)
+
+    // 端点层与模型名层都没声明 → 兜底 + 警告
+    let bare = AgentRuntime(HarnessSpec.forTests(EchoProvider()), cfgOf("vendor-model", None))
+    @Expect(bare.contextWindowInUse(), Int64(8192))
 }
 
 @Test
@@ -148,17 +161,6 @@ func contextWindow_unknownModelFallsBackToDefault() {
 func contextWindow_builtinTableStillApplies() {
     let runtime = AgentRuntime(HarnessSpec.forTests(EchoProvider()), cfgOf("deepseek-chat", None))
     @Expect(runtime.contextWindowInUse(), 65536)
-}
-
-@Test
-func agentConfig_contextWindowSurvivesDerivationAndJson() {
-    let cfg = cfgOf("m", None, contextWindow: Some(65536))
-    @Expect(cfg.withTools(ArrayList<String>(["bash"])).contextWindow, Some(65536))
-
-    let back = fromJsonString<AgentConfig>(toJsonString(cfg))
-    @Expect(back.contextWindow, Some(65536))
-    // 没声明（None）也要能往返，不能退化成 0 之类的伪值
-    @Expect(fromJsonString<AgentConfig>(toJsonString(cfgOf("m", None))).contextWindow, None)
 }
 
 // ---------- 便利层 ----------

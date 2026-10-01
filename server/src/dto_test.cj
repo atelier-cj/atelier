@@ -144,15 +144,3 @@ func inputFrame_carriesWholeRequest() {
     @Assert(json.contains("\"prod\""))
 }
 
-// 动态建 agent：窗口声明必须能从请求体传进来（否则 HTTP 那条路的配置形态是缺的）
-@Test
-func agentConfigDTO_contextWindow() {
-    let withWindow = fromJsonString<AgentConfigDTO>("{\"name\":\"a\",\"model\":\"m\",\"contextWindow\":262144}")
-    @Expect(withWindow.contextWindow, Some(262144))
-    @Expect(configFromDTO(withWindow).contextWindow, Some(262144))
-
-    // 不传 = None：交给 [[model]] / 内置表 / 兜底
-    let without = fromJsonString<AgentConfigDTO>("{\"name\":\"a\",\"model\":\"m\"}")
-    @Expect(without.contextWindow, None)
-    @Expect(configFromDTO(without).contextWindow, None)
-}
