@@ -14,12 +14,18 @@ import stdx.log.*
 // 工具为 Parallel 执行模式：信任闸门对 Parallel 直接放行（子回合无人批准流程），
 // execute 内部自行阻塞不影响并发正确性（每工具独立线程）。
 public class SendMessageTool <: Tool {
-    // 向父投递消息（text, kind）
-    private let postFn: (String, String) -> Unit
-    // 阻塞等待父回复（毫秒），None = 超时/未回复
+    /**
+     * 向父投递消息（text, kind, willWaitReply）。
+     *
+     * [willWaitReply] 为 true 时，实现**必须先登记"即将等待回复"再投递消息**：
+     * 父收到提问后可能立刻回复，若登记晚于投递，那道窗口里的回复会被当成"回合中消息"
+     * 排队到下一回合，本次 waitReply 就白等到超时。
+     */
+    private let postFn: (String, String, Bool) -> Unit
+    // 阻塞等待父回复（毫秒），None = 超时/未回复。返回前必须复位"等待中"登记
     private let waitFn: (Int64) -> ?String
 
-    public init(postFn: (String, String) -> Unit, waitFn: (Int64) -> ?String) {
+    public init(postFn: (String, String, Bool) -> Unit, waitFn: (Int64) -> ?String) {
         this.postFn = postFn
         this.waitFn = waitFn
     }
@@ -84,7 +90,7 @@ public class SendMessageTool <: Tool {
             case _ => 300000
         }
         log.info("send_message kind=${kind} wait=${waitReply}", Array<Attr>())
-        this.postFn(text, kind)
+        this.postFn(text, kind, waitReply)
         if (!waitReply) {
             return ToolResult("消息已发送给父 Agent", None, false, false)
         }

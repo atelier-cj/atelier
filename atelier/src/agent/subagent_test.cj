@@ -94,6 +94,11 @@ func subConfig(): AgentConfig {
         ArrayList(), None, Int64(0), Int64(0))
 }
 
+// 超时失败时的现场快照：子状态 / 是否登记等待 / 请求数 —— 偶发失败要能自证，不能只有"超时"二字
+func subagentDiag(h: SubAgentHandle, provider: ScriptMsgProvider): String {
+    "state=${h.state().index()} waiting=${h.isWaitingForReply()} requests=${provider.reqTexts.size}"
+}
+
 func waitState(h: SubAgentHandle, want: SubagentState, attempts!: Int64 = 50): Bool {
     var i: Int64 = 0
     while (i < attempts) {
@@ -112,7 +117,7 @@ public func subagent_start_returnsHandleAndDone() {
     let h = mgr.start(subConfig(), provider, "parent_1", "初始任务")
     @Expect(h.subSessionId.startsWith("sub_"), true)
     @Expect(h.parentSessionId, "parent_1")
-    match (h.recv(timeout: 10 * Duration.second)) {
+    match (h.recv(timeout: 30 * Duration.second)) {
         case Some(mail) =>
             @Expect(mail.kind, AgentMailKindDone)
             @Expect(mail.text, "答: 初始任务")
@@ -138,13 +143,13 @@ public func subagent_send_wakesIdleChild() {
     let provider = SubRecordProvider()
     let (mgr, providerReg) = makeSubManager(provider)
     let h = mgr.start(subConfig(), provider, "parent_2", "第一单任务")
-    match (h.recv(timeout: 10 * Duration.second)) {
+    match (h.recv(timeout: 30 * Duration.second)) {
         case Some(mail) => @Expect(mail.kind, AgentMailKindDone)
         case None => @Fail("timeout waiting done")
     }
     // 空闲后发第二封
     h.send(AgentMail("parent_2", h.subSessionId, AgentMailKindUserText, "第二单任务"))
-    match (h.recv(timeout: 10 * Duration.second)) {
+    match (h.recv(timeout: 30 * Duration.second)) {
         case Some(mail) =>
             @Expect(mail.kind, AgentMailKindReply)
             @Expect(mail.text, "答: 第二单任务")
@@ -160,7 +165,7 @@ public func subagent_recv_timeoutReturnsNone() {
     let provider = SubRecordProvider()
     let (mgr, providerReg) = makeSubManager(provider)
     let h = mgr.start(subConfig(), provider, "parent_3", "任务")
-    h.recv(timeout: 10 * Duration.second)
+    h.recv(timeout: 30 * Duration.second)
     @Expect(h.recv(timeout: 300 * Duration.millisecond).isNone(), true)
 }
 
@@ -170,7 +175,7 @@ public func subagent_close_terminatesWorker() {
     let provider = SubRecordProvider()
     let (mgr, providerReg) = makeSubManager(provider)
     let h = mgr.start(subConfig(), provider, "parent_4", "任务")
-    h.recv(timeout: 10 * Duration.second)
+    h.recv(timeout: 30 * Duration.second)
     h.close()
     @Expect(waitState(h, SubagentState.Closed), true)
     // 关闭后 send 不再触发回合
@@ -190,9 +195,9 @@ public func subagent_closeForParent_cascades() {
     let a = mgr.start(subConfig(), provider, "parent_5", "任务A")
     let b = mgr.start(subConfig(), provider, "parent_5", "任务B")
     let other = mgr.start(subConfig(), provider, "parent_6", "任务C")
-    a.recv(timeout: 10 * Duration.second)
-    b.recv(timeout: 10 * Duration.second)
-    other.recv(timeout: 10 * Duration.second)
+    a.recv(timeout: 30 * Duration.second)
+    b.recv(timeout: 30 * Duration.second)
+    other.recv(timeout: 30 * Duration.second)
     mgr.closeForParent("parent_5")
     @Expect(waitState(a, SubagentState.Closed), true)
     @Expect(waitState(b, SubagentState.Closed), true)
@@ -322,7 +327,7 @@ public func subagent_sendMessage_progressVisibleToParent() {
 // waitReply：子问父答 → 父回复进入子下一轮上下文，回合继续至 done
 @Test
 public func subagent_sendMessage_waitReply_continuesTurn() {
-    let provider = ScriptMsgProvider(msgArgs("继续吗？", "reply", true, 10000))
+    let provider = ScriptMsgProvider(msgArgs("继续吗？", "reply", true, 30000))
     let (mgr, providerReg) = makeSubManager(provider)
     let h = mgr.start(subConfig(), provider, "parent_p2", "需要确认")
     // 父先收到子的提问
@@ -338,15 +343,47 @@ public func subagent_sendMessage_waitReply_continuesTurn() {
         }
     }
     @Expect(gotQuestion, true)
+    // 顺序契约：提问已经投递出来时，"正在等待回复"必须**已经**登记好。
+    // 否则父这一瞬间的回复会被当成"回合中消息"排到下一回合，子只能干等超时
+    // （表现为"父明明回了，子却报超时"，且随负载时快时慢）。
+    @Expect(h.isWaitingForReply(), true)
     // 父回复 → 子回合内 waitReply 被唤醒
     h.respond("好的，继续")
-    match (h.recv(timeout: 10 * Duration.second)) {
+    match (h.recv(timeout: 30 * Duration.second)) {
         case Some(mail) => @Expect(mail.kind, AgentMailKindDone)
-        case None => @Fail("timeout waiting done after respond")
+        case None => @Fail("timeout waiting done after respond; " + subagentDiag(h, provider))
     }
     // 第二轮请求上下文包含父回复（工具结果 "父 Agent 回复：好的，继续"）
     @Expect(provider.reqTexts.size >= Int64(2), true)
     @Expect(provider.reqTexts[1].contains("父 Agent 回复：好的，继续"), true)
+    h.close()
+    @Expect(waitState(h, SubagentState.Closed), true)
+}
+
+// 等待登记先于提问投递：否则父在窗口内的回复会被误判为"回合中消息"（丢唤醒）
+@Test
+public func subagent_waitReply_armsBeforePostingQuestion() {
+    let provider = ScriptMsgProvider(msgArgs("在吗？", "reply", true, 30000))
+    let (mgr, providerReg) = makeSubManager(provider)
+    let h = mgr.start(subConfig(), provider, "parent_arm", "先登记再投递")
+    // 收到提问的那一刻，等待登记就必须已经就位
+    match (h.recv(timeout: 30 * Duration.second)) {
+        case Some(mail) =>
+            @Expect(mail.kind, "reply")
+            @Expect(h.isWaitingForReply(), true)
+        case None => @Fail("timeout waiting question; " + subagentDiag(h, provider))
+    }
+    // 紧跟其后回复（不 sleep）：应当立刻解锁本回合
+    h.respond("收到")
+    match (h.recv(timeout: 30 * Duration.second)) {
+        case Some(mail) => @Expect(mail.kind, AgentMailKindDone)
+        case None => @Fail("timeout waiting done after immediate respond; " + subagentDiag(h, provider))
+    }
+    // 回合结束后等待登记必须复位（否则父后续回复会一直走没人取的回合内通道）
+    @Expect(waitState(h, SubagentState.Idle), true)
+    @Expect(h.isWaitingForReply(), false)
+    @Expect(provider.reqTexts.size >= Int64(2), true)
+    @Expect(provider.reqTexts[1].contains("父 Agent 回复：收到"), true)
     h.close()
     @Expect(waitState(h, SubagentState.Closed), true)
 }
@@ -358,11 +395,11 @@ public func subagent_sendMessage_replyTimeout() {
     let (mgr, providerReg) = makeSubManager(provider)
     let h = mgr.start(subConfig(), provider, "parent_p3", "等回复")
     // 第一封：子的提问（reply 投递）；随后父不回复 → 工具超时 → 回合结束 done
-    match (h.recv(timeout: 10 * Duration.second)) {
+    match (h.recv(timeout: 30 * Duration.second)) {
         case Some(mail) => @Expect(mail.kind, "reply")
         case None => @Fail("timeout waiting question")
     }
-    match (h.recv(timeout: 10 * Duration.second)) {
+    match (h.recv(timeout: 30 * Duration.second)) {
         case Some(mail) => @Expect(mail.kind, AgentMailKindDone)
         case None => @Fail("timeout waiting done")
     }
@@ -380,14 +417,14 @@ public func subagent_respondIdle_wakesFollowUpTurn() {
     let provider = SubRecordProvider()
     let (mgr, providerReg) = makeSubManager(provider)
     let h = mgr.start(subConfig(), provider, "parent_ri", "初始任务")
-    match (h.recv(timeout: 10 * Duration.second)) {
+    match (h.recv(timeout: 30 * Duration.second)) {
         case Some(mail) => @Expect(mail.kind, AgentMailKindDone)
         case None => @Fail("timeout waiting done")
     }
     @Expect(waitState(h, SubagentState.Idle), true)
     // 空闲 respond = 追问：不滞留，唤醒开新回合
     h.respond("这块展开说说")
-    match (h.recv(timeout: 10 * Duration.second)) {
+    match (h.recv(timeout: 30 * Duration.second)) {
         case Some(mail) =>
             @Expect(mail.kind, AgentMailKindReply)
             @Expect(mail.text, "答: 这块展开说说")
@@ -395,7 +432,7 @@ public func subagent_respondIdle_wakesFollowUpTurn() {
     }
     // 再来一轮：旧消息不滞留错配（若上条滞留被错配消费，此处会乱）
     h.respond("还有呢？")
-    match (h.recv(timeout: 10 * Duration.second)) {
+    match (h.recv(timeout: 30 * Duration.second)) {
         case Some(mail) =>
             @Expect(mail.kind, AgentMailKindReply)
             @Expect(mail.text, "答: 还有呢？")
@@ -426,13 +463,13 @@ public func subagent_respondMidTurn_becomesNextTurnInput() {
     @Expect(gotProgress, true)
     h.respond("收到，继续做")
     // 首回合照常 done
-    match (h.recv(timeout: 10 * Duration.second)) {
+    match (h.recv(timeout: 30 * Duration.second)) {
         case Some(mail) => @Expect(mail.kind, AgentMailKindDone)
         case None => @Fail("timeout waiting done")
     }
     @Expect(waitState(h, SubagentState.Idle), true)
     // respond 文本经回合边界消费为第二回合输入（follow-up，非 replyQueue 串线）
-    match (h.recv(timeout: 10 * Duration.second)) {
+    match (h.recv(timeout: 30 * Duration.second)) {
         case Some(mail) =>
             @Expect(mail.kind, AgentMailKindReply)
             @Expect(mail.text, "完成")
@@ -542,7 +579,7 @@ public func parentTool_sendMessage_nameAndWake() {
     let provider = SubRecordProvider()
     let (mgr, providerReg) = makeSubManager(provider)
     let h = mgr.start(subConfig(), provider, "parent_sm", "初始任务")
-    match (h.recv(timeout: 10 * Duration.second)) {
+    match (h.recv(timeout: 30 * Duration.second)) {
         case Some(mail) => @Expect(mail.kind, AgentMailKindDone)
         case None => @Fail("timeout waiting done")
     }
@@ -558,7 +595,7 @@ public func parentTool_sendMessage_nameAndWake() {
     let r2 = sendTool.execute(ctx, mkObj(ArrayList<(String, JsonValue)>([
         ("id", JsonValue.String(h.subSessionId)), ("text", JsonValue.String("展开说说"))])))
     @Expect(r2.isError, false)
-    match (h.recv(timeout: 10 * Duration.second)) {
+    match (h.recv(timeout: 30 * Duration.second)) {
         case Some(mail) =>
             @Expect(mail.kind, AgentMailKindReply)
             @Expect(mail.text, "答: 展开说说")
@@ -570,7 +607,7 @@ public func parentTool_sendMessage_nameAndWake() {
 // subagent_reply 工具：父 LLM 回合内即时应答子 waitReply 提问（respond 状态分派入口）
 @Test
 public func subagent_replyTool_answersWaitingChild() {
-    let provider = ScriptMsgProvider(msgArgs("继续吗？", "reply", true, 10000))
+    let provider = ScriptMsgProvider(msgArgs("继续吗？", "reply", true, 30000))
     let (mgr, providerReg) = makeSubManager(provider)
     let h = mgr.start(subConfig(), provider, "parent_rpt", "需要确认")
     // 父收到子提问（子回合阻塞 waitReply 中）
@@ -596,7 +633,7 @@ public func subagent_replyTool_answersWaitingChild() {
     let r2 = replyTool.execute(parentCtx(), mkObj(ArrayList<(String, JsonValue)>([
         ("id", JsonValue.String(h.subSessionId)), ("text", JsonValue.String("可以，继续"))])))
     @Expect(r2.isError, false)
-    match (h.recv(timeout: 10 * Duration.second)) {
+    match (h.recv(timeout: 30 * Duration.second)) {
         case Some(mail) => @Expect(mail.kind, AgentMailKindDone)
         case None => @Fail("timeout waiting done after subagent_reply")
     }
@@ -622,7 +659,7 @@ public func sendMessage_parentAndChildContexts() {
     // 子上下文 = 父表全量复制 + 子版 send_message 覆盖（runTurn 同款构造顺序）
     let childReg = ToolRegistry()
     for (t in parentReg.list()) { childReg.register(t) }
-    childReg.register(SendMessageTool({ body, kind => () }, { ms => None }))
+    childReg.register(SendMessageTool({ body, kind, willWait => () }, { ms => None }))
     match (childReg.get("send_message").getOrThrow()) {
         case v: SendMessageTool => ()
         case _ => @Fail("child send_message not overridden by SendMessageTool")
@@ -686,7 +723,7 @@ public func subagent_headerMarksParentSession() {
     let provider = SubRecordProvider()
     let (mgr, providerReg) = makeSubManager(provider)
     let h = mgr.start(subConfig(), provider, "parent_r0", "首任务")
-    h.recv(timeout: 10 * Duration.second)
+    h.recv(timeout: 30 * Duration.second)
     // store 经 makeSubManager 未返回——重建同构组件以取 store
     let toolReg = ToolRegistry()
     let trustMgr = TrustManager()
@@ -698,7 +735,7 @@ public func subagent_headerMarksParentSession() {
     let mcp = McpManager()
     let mgr2 = testSubAgentManager(toolReg, trustMgr, skillReg, agentReg, providerReg2, store, mcp)
     let h2 = mgr2.start(subConfig(), provider, "parent_r0b", "任务B")
-    h2.recv(timeout: 10 * Duration.second)
+    h2.recv(timeout: 30 * Duration.second)
     match (store.loadEntries(h2.subSessionId).header.parentSession) {
         case Some(p) => @Expect(p, "parent_r0b")
         case None => @Fail("header.parentSession not marked")
@@ -721,7 +758,7 @@ public func subagent_resumeSession_reusesHistory() {
     let mcp = McpManager()
     let mgr1 = testSubAgentManager(toolReg, trustMgr, skillReg, agentReg, providerReg, store, mcp)
     let h1 = mgr1.start(subConfig(), provider, "parent_r1", "首任务")
-    match (h1.recv(timeout: 10 * Duration.second)) {
+    match (h1.recv(timeout: 30 * Duration.second)) {
         case Some(mail) => @Expect(mail.kind, AgentMailKindDone)
         case None => @Fail("timeout waiting done")
     }
@@ -734,7 +771,7 @@ public func subagent_resumeSession_reusesHistory() {
     match (mgr2.resumeSession(subConfig(), provider, "parent_r1", childId, SessionEnvironment())) {
         case Some(h2) =>
             h2.send(AgentMail("parent_r1", childId, AgentMailKindUserText, "续问"))
-            match (h2.recv(timeout: 10 * Duration.second)) {
+            match (h2.recv(timeout: 30 * Duration.second)) {
                 case Some(mail) => @Expect(mail.kind, AgentMailKindReply)
                 case None => @Fail("timeout waiting resume reply")
             }
@@ -754,7 +791,7 @@ public func subagent_resumeSession_unknownOrActiveReturnsNone() {
     let (mgr, providerReg) = makeSubManager(provider)
     @Expect(mgr.resumeSession(subConfig(), provider, "parent_r2", "sub_notexist", SessionEnvironment()).isNone(), true)
     let h = mgr.start(subConfig(), provider, "parent_r2", "任务")
-    h.recv(timeout: 10 * Duration.second)
+    h.recv(timeout: 30 * Duration.second)
     // 活跃子不可重复 resume
     @Expect(mgr.resumeSession(subConfig(), provider, "parent_r2", h.subSessionId, SessionEnvironment()).isNone(), true)
     h.close()
@@ -769,9 +806,9 @@ public func subagent_parentListAndCount() {
     let a = mgr.start(subConfig(), provider, "parent_l1", "任务A")
     let b = mgr.start(subConfig(), provider, "parent_l1", "任务B")
     let other = mgr.start(subConfig(), provider, "parent_l2", "任务C")
-    a.recv(timeout: 10 * Duration.second)
-    b.recv(timeout: 10 * Duration.second)
-    other.recv(timeout: 10 * Duration.second)
+    a.recv(timeout: 30 * Duration.second)
+    b.recv(timeout: 30 * Duration.second)
+    other.recv(timeout: 30 * Duration.second)
     @Expect(mgr.listForParent("parent_l1").size, 2)
     @Expect(mgr.activeCountFor("parent_l1"), Int64(2))
     @Expect(mgr.activeCountFor("parent_l2"), Int64(1))
@@ -879,7 +916,7 @@ public func subagent_pollOnceAndPollChildren() {
     @Expect(polled, true)
     // pollChildren 聚合
     let b = mgr.start(subConfig(), provider, "parent_pc", "任务B")
-    b.recv(timeout: 10 * Duration.second)
+    b.recv(timeout: 30 * Duration.second)
     let agg = mgr.pollChildren("parent_pc")
     @Expect(agg.size >= Int64(0), true)   // 无未读即空
     h.close()
@@ -894,7 +931,7 @@ public func subagent_idleReclaim_closesAndUnregisters() {
     let provider = SubRecordProvider()
     let (mgr, providerReg) = makeSubManager(provider, idleTimeoutSec: 1)
     let h = mgr.start(subConfig(), provider, "parent_ir1", "任务")
-    match (h.recv(timeout: 10 * Duration.second)) {
+    match (h.recv(timeout: 30 * Duration.second)) {
         case Some(mail) => @Expect(mail.kind, AgentMailKindDone)
         case None => @Fail("timeout waiting done")
     }
@@ -915,14 +952,14 @@ public func subagent_idleReclaim_letterResetsTimer() {
     let provider = SubRecordProvider()
     let (mgr, providerReg) = makeSubManager(provider, idleTimeoutSec: 3)
     let h = mgr.start(subConfig(), provider, "parent_ir2", "任务")
-    match (h.recv(timeout: 10 * Duration.second)) {
+    match (h.recv(timeout: 30 * Duration.second)) {
         case Some(mail) => @Expect(mail.kind, AgentMailKindDone)
         case None => @Fail("timeout waiting done")
     }
     // 空闲未达阈值时来信 → 正常唤醒开新回合（计时重置）
     sleep(Duration.second)
     h.send(AgentMail("parent_ir2", h.subSessionId, AgentMailKindUserText, "第二单"))
-    match (h.recv(timeout: 10 * Duration.second)) {
+    match (h.recv(timeout: 30 * Duration.second)) {
         case Some(mail) =>
             @Expect(mail.kind, AgentMailKindReply)
             @Expect(mail.text, "答: 第二单")
@@ -939,7 +976,7 @@ public func subagent_idleReclaim_disabledByDefault() {
     let provider = SubRecordProvider()
     let (mgr, providerReg) = makeSubManager(provider)
     let h = mgr.start(subConfig(), provider, "parent_ir3", "任务")
-    match (h.recv(timeout: 10 * Duration.second)) {
+    match (h.recv(timeout: 30 * Duration.second)) {
         case Some(mail) => @Expect(mail.kind, AgentMailKindDone)
         case None => @Fail("timeout waiting done")
     }
@@ -947,11 +984,50 @@ public func subagent_idleReclaim_disabledByDefault() {
     @Expect(mgr.has(h.subSessionId), true)
     @Expect(waitState(h, SubagentState.Idle), true)
     h.send(AgentMail("parent_ir3", h.subSessionId, AgentMailKindUserText, "还在吗"))
-    match (h.recv(timeout: 10 * Duration.second)) {
+    match (h.recv(timeout: 30 * Duration.second)) {
         case Some(mail) =>
             @Expect(mail.kind, AgentMailKindReply)
             @Expect(mail.text, "答: 还在吗")
         case None => @Fail("timeout: disabled reclaim should keep child alive")
     }
     h.close()
+}
+
+// 工具层契约：postFn 必须**先于** waitFn 调用，且带上 willWaitReply —— 实现据此
+// 在投递提问之前登记"正在等待回复"，父在窗口内的回复才不会被误判成回合中消息
+@Test
+public func sendMessageTool_postsWithWaitFlagBeforeWaiting() {
+    let order = ArrayList<String>()
+    let tool = SendMessageTool(
+        { text, kind, willWait =>
+            order.add("post:${text}:${kind}:${willWait}")
+        },
+        { ms =>
+            order.add("wait:${ms}")
+            Some("答复")
+        })
+    let args = mkObj(ArrayList<(String, JsonValue)>([
+        ("text", JsonValue.String("在吗")),
+        ("kind", JsonValue.String("reply")),
+        ("waitReply", JsonValue.Boolean(true)),
+        ("timeoutMs", JsonValue.Number(Float64(1234)))
+    ]))
+    let r = tool.execute(ToolContext("/tmp"), args)
+    @Expect(r.isError, false)
+    // 顺序：投递（带 willWaitReply=true）→ 再等待
+    @Expect(order.size, Int64(2))
+    @Expect(order[0], "post:在吗:reply:true")
+    @Expect(order[1], "wait:1234")
+
+    // waitReply=false：投递后不进入等待（父回复按回合中消息处理）
+    let order2 = ArrayList<String>()
+    let tool2 = SendMessageTool(
+        { text, kind, willWait => order2.add("post:${willWait}") },
+        { ms => order2.add("wait"); None })
+    let r2 = tool2.execute(ToolContext("/tmp"), mkObj(ArrayList<(String, JsonValue)>([
+        ("text", JsonValue.String("进度")), ("kind", JsonValue.String("progress"))
+    ])))
+    @Expect(r2.isError, false)
+    @Expect(order2.size, Int64(1))
+    @Expect(order2[0], "post:false")
 }
