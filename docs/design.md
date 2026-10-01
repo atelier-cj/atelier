@@ -1094,6 +1094,7 @@ public interface Hook {
 | 摘要子调用 | 复用主对话前缀（system + tools + 被压区域回放） | `promptTemplate` / `summaryModel` |
 | 检查点框架 | 前言 + `<compacted-summary>` 标签（随替换消息落库） | `CompactionConfig`（代码级常量） |
 | 压缩事务 | `compaction_start` / `compaction_end` 成对；同一会话同时只允许一次压缩 | `CompactionLedger`（进程级，代码级） |
+| 压缩台账 | 开/合各一条落库（审计 + 中断残留检测）；有开无合只作提示，不当锁 | `SessionStore.appendCompaction` / `loadCompactions` |
 | 上下文窗口（未知模型） | 兜底 8192 并警告 | `[[provider.model]]` / `withModelContext(provider, model, n)` / `withDefaultContextWindow`（0 = 禁用压缩） |
 | 并发工具执行 | 根据 `ExecutionMode` | 串行/并行 |
 | 最大工具结果字符 | 2000（摘要场景） | 硬编码 |

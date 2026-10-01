@@ -1,6 +1,7 @@
 package atelier.session
 
 import atelier.message.*
+import atelier.util.{toJsonString, fromJsonString}
 import std.collection.*
 import std.fs.*
 
@@ -183,4 +184,102 @@ func sameMessage_ignoresMetadata() {
     let a = UserMessage(ContentList.ofText("hello"), 0, metadata: md1)
     let b = UserMessage(ContentList.ofText("hello"), 0, metadata: md2)
     @Expect(sameMessage(a, b), true)
+}
+
+// ========== 压缩事务台账（审计 + 中断残留） ==========
+
+func openRecord(id: String, sessionId: String, trigger: String, startedAt: Int64): CompactionRecord {
+    CompactionRecord(id, sessionId, trigger, startedAt, 0, 100, 0, 5, 0, "open")
+}
+
+func finishRecord(id: String, sessionId: String, trigger: String, startedAt: Int64): CompactionRecord {
+    CompactionRecord(id, sessionId, trigger, startedAt, startedAt + 7, 100, 40, 5, 2, "replaced")
+}
+
+@Test
+func compactionJournal_memoryStoreRoundTrip() {
+    let store = MemorySessionStore()
+    store.appendCompaction(openRecord("c1", "s1", "manual", 100))
+    store.appendCompaction(finishRecord("c1", "s1", "manual", 100))
+    store.appendCompaction(openRecord("c2", "s1", "pressure", 200))
+    store.appendCompaction(finishRecord("c2", "s1", "pressure", 200))
+    // 别的会话互不干扰
+    store.appendCompaction(openRecord("c3", "s2", "overflow", 300))
+
+    let s1 = store.loadCompactions("s1")
+    @Expect(s1.size, 4)
+    @Expect(s1[0].compactionId, "c1")
+    @Expect(s1[0].outcome, "open")
+    @Expect(s1[0].finishedAt, 0)
+    @Expect(s1[1].outcome, "replaced")
+    @Expect(s1[1].tokensAfter, 40)
+    @Expect(s1[1].messagesAfter, 2)
+    @Expect(store.loadCompactions("s2").size, 1)
+    @Expect(store.loadCompactions("nope").size, 0)
+}
+
+@Test
+func compactionJournal_stormStoreRoundTrip() {
+    let (store, dir) = stormStore()
+    store.appendCompaction(openRecord("c1", "sess_j", "manual", 100))
+    store.appendCompaction(finishRecord("c1", "sess_j", "manual", 100))
+    // 重新打开连接读：确认真落盘（不是内存里记得）
+    store.close()
+    let reopened = StormSessionStore(dir.toString())
+    let records = reopened.loadCompactions("sess_j")
+    @Expect(records.size, 2)
+    @Expect(records[0].compactionId, "c1")
+    @Expect(records[0].trigger, "manual")
+    @Expect(records[0].tokensBefore, 100)
+    @Expect(records[1].finishedAt, 107)
+    @Expect(records[1].outcome, "replaced")
+    // 没有台账的会话读到空列表，不抛
+    @Expect(reopened.loadCompactions("other").size, 0)
+    closeAndClean(reopened, dir)
+}
+
+@Test
+func compactionJournal_interruptedDetection() {
+    let records = ArrayList<CompactionRecord>()
+    records.add(openRecord("c1", "s1", "manual", 100))
+    records.add(finishRecord("c1", "s1", "manual", 100))
+    records.add(openRecord("c2", "s1", "pressure", 200))
+    records.add(finishRecord("c3", "s1", "overflow", 300))
+
+    let interrupted = interruptedCompactions(records)
+    @Expect(interrupted.size, 1)
+    @Expect(interrupted[0].compactionId, "c2")
+    // 全部闭合：没有残留
+    let clean = ArrayList<CompactionRecord>()
+    clean.add(openRecord("c9", "s1", "manual", 1))
+    clean.add(finishRecord("c9", "s1", "manual", 1))
+    @Expect(interruptedCompactions(clean).size, 0)
+    // 记录 JSON 往返不丢字段（落盘走这条）
+    let back = fromJsonString<ArrayList<CompactionRecord>>(toJsonString(records))
+    @Expect(back.size, 4)
+    @Expect(back[3].tokensAfter, 40)
+    @Expect(back[2].outcome, "open")
+}
+
+// 默认实现：不落台账的存储按契约返回空、写入不抛
+@Test
+func compactionJournal_defaultImplementationIsNoop() {
+    let store = NoJournalStore()
+    store.appendCompaction(openRecord("c1", "s1", "manual", 1))
+    @Expect(store.loadCompactions("s1").size, 0)
+}
+
+class NoJournalStore <: SessionStore {
+    private let inner = MemorySessionStore()
+    public func save(id: String, header: SessionHeader, messages: ArrayList<Message>): Unit {
+        this.inner.save(id, header, messages)
+    }
+    public func appendBranch(id: String, parentLeafId: String, messages: ArrayList<Message>): String {
+        this.inner.appendBranch(id, parentLeafId, messages)
+    }
+    public func load(id: String): ArrayList<Message> { this.inner.load(id) }
+    public func loadEntries(id: String): SessionData { this.inner.loadEntries(id) }
+    public func list(): ArrayList<SessionHeader> { this.inner.list() }
+    public func delete(id: String): Unit { this.inner.delete(id) }
+    public func fork(sourceId: String, leafId: String): SessionData { this.inner.fork(sourceId, leafId) }
 }

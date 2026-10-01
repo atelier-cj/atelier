@@ -313,6 +313,7 @@ public func helpLines(): ArrayList<String> {
     out.add("/model <name>         切换模型")
     out.add("/models               列出配置的所有模型")
     out.add("/tools                列出当前 agent 工具")
+    out.add("/compact              压缩当前会话（手动触发，绕过阈值）")
     out.add("/subagent [list|poll|start [--remote] <agent> <prompt>|send <id> <text>|respond <id> <text>|close <id>]")
     out.add("/trust <path>         信任目录（平行工具免审）")
     out.add("/untrust <path>       撤销信任")
@@ -1032,6 +1033,7 @@ public class ChatTui {
         if (line.startsWith("/agent")) { this.handleAgentCommand(line); return }
         if (line.startsWith("/session")) { this.handleSessionCommand(line); return }
         if (line == "/tools") { this.handleToolsCommand(); return }
+        if (line == "/compact") { this.handleCompactCommand(); return }
         if (line.startsWith("/model")) { this.handleModelCommand(line); return }
         if (line.startsWith("/subagent")) { this.handleSubagentCommand(line); return }
         match (this.registry.dispatch(line)) {
@@ -1039,6 +1041,48 @@ public class ChatTui {
             case Some(msg) => this.status = msg
             case None => ()
         }
+    }
+
+    /**
+     * `/compact`：手动压缩当前会话（绕过阈值，仍守保留策略与不变量）。
+     *
+     * 历史被改写，落库必须**整份 save**而不是 appendBranch —— 追加式会把检查点与旧头部
+     * 叠在一起（同一段历史在会话里出现两次）。压缩失败/压无可压时历史与落库都不动。
+     */
+    private func handleCompactCommand(): Unit {
+        if (this.busy.load()) {
+            this.status = "上一轮仍在进行中（等它结束再压缩）"
+            return
+        }
+        if (this.messages.size == 0) {
+            this.status = "当前会话没有可压缩的消息"
+            return
+        }
+        let model = if (this.modelOverride != "") { this.modelOverride } else { this.agentConfig.model }
+        // 不挂提问通道：压缩不向用户提问
+        let runtime = AgentRuntime(this.spec, this.agentConfig.withModel(model))
+        let report = runtime.compactNow(this.sessionId, this.messages, SessionEnvironment())
+        if (!report.compacted) {
+            let why = if (report.reason == "") { "无可压缩的头部" } else { report.reason }
+            this.status = "未压缩：" + why
+            return
+        }
+        this.messages = report.messages
+        this.scroll = 0
+        let header = try {
+            this.spec.store.loadEntries(this.sessionId).header
+        } catch (e: Exception) {
+            SessionHeader(1, this.sessionId, 0, 0, "", "", "", None)
+        }
+        try {
+            this.spec.store.save(this.sessionId, header, this.messages)
+        } catch (e: Exception) {
+            this.status = "已压缩但会话落盘失败: " + e.message
+            return
+        }
+        this.status = "已压缩：" + report.messagesBefore.toString() + " → " +
+            report.messagesAfter.toString() + " 条，" + report.tokensBefore.toString() + " → " +
+            report.tokensAfter.toString() + " tokens"
     }
 
     private func handleSessionCommand(line: String): Unit {

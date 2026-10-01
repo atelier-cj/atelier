@@ -515,6 +515,145 @@ func runtime_overflowRecoveryEmitsBracketedEvents() {
     @Expect(globalCompactionLedger.isOpen("sess_ov2"), false)
 }
 
+// ========== 手动压缩（/compact 的库入口） ==========
+
+// 手动入口绕过阈值：历史远低于阈值也照压（这是"手动"的意义），并落台账、发 manual 括弧
+@Test
+func runtime_compactNow_forcesBelowThreshold() {
+    let bus = EventBus()
+    let collector = CompactionEventCollector(bus)
+    let store = MemorySessionStore()
+    let provider = StubSummaryProvider("SUM")
+    let runtime = makeCompactionRuntime(
+        compactionRuntimeConfig(true, smallWindowCompaction(retainTokens: 4)), provider,
+        eventBus: Some(bus), sessionStore: store)
+    let msgs = ArrayList<Message>()
+    msgs.add(UserMessage(ContentList.ofText("第一轮"), 0))
+    msgs.add(AssistantMessage(ContentList.ofText("回答"), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0))
+    msgs.add(UserMessage(ContentList.ofText("第二轮"), 0))
+
+    let report = runtime.compactNow("sess_manual", msgs, SessionEnvironment())
+    @Expect(report.compacted, true)
+    @Expect(report.trigger, "manual")
+    @Expect(report.messagesBefore, 3)
+    @Expect(report.messagesAfter < report.messagesBefore, true)
+    @Expect(provider.chatCalls, Int64(1))
+    match (report.messages[0]) {
+        case cm: CompactionMessage => @Expect(checkpointBody(cm.summary), "SUM")
+        case _ => @Fail("expected CompactionMessage first")
+    }
+    // 事件括弧：trigger=manual，同一 id 成对
+    @Expect(collector.starts.size, Int64(1))
+    @Expect(collector.starts[0].trigger, "manual")
+    @Expect(collector.starts[0].compactionId, collector.ends[0].compactionId)
+    // 台账：一开一合，闭合那条记了真实覆盖量
+    let journal = store.loadCompactions("sess_manual")
+    @Expect(journal.size, 2)
+    @Expect(journal[0].outcome, "open")
+    @Expect(journal[0].finishedAt, 0)
+    @Expect(journal[1].outcome, "replaced")
+    @Expect(journal[1].compactionId, journal[0].compactionId)
+    @Expect(journal[1].messagesAfter, report.messagesAfter)
+    @Expect(interruptedCompactions(journal).size, 0)
+}
+
+// 已在飞（同会话另一次压缩未结束）→ 如实报原因，不动历史、不落台账
+@Test
+func runtime_compactNow_reportsBusyWithoutTouchingHistory() {
+    let store = MemorySessionStore()
+    let provider = StubSummaryProvider("SUM")
+    let runtime = makeCompactionRuntime(
+        compactionRuntimeConfig(true, smallWindowCompaction(retainTokens: 4)), provider, sessionStore: store)
+    @Expect(globalCompactionLedger.begin("sess_busy2", "cmp_other"), true)
+    let msgs = ArrayList<Message>()
+    msgs.add(UserMessage(ContentList.ofText("第一轮"), 0))
+    msgs.add(UserMessage(ContentList.ofText("第二轮"), 0))
+    let report = runtime.compactNow("sess_busy2", msgs, SessionEnvironment())
+    globalCompactionLedger.end("sess_busy2")
+
+    @Expect(report.compacted, false)
+    @Expect(report.reason.contains("in flight"), true)
+    @Expect(report.messages.size, 2)              // 原样返回
+    @Expect(provider.chatCalls, Int64(0))         // 没花摘要调用
+    @Expect(store.loadCompactions("sess_busy2").size, 0)
+}
+
+// 配置算不出预算（不变量不成立）→ 报原因，不压
+@Test
+func runtime_compactNow_reportsUnresolvableSpec() {
+    let provider = StubSummaryProvider("SUM")
+    // 窗口 8192 / 输出预留 4096，余量 65536 → 压力预算为负
+    let runtime = makeCompactionRuntime(compactionRuntimeConfig(true, None), provider)
+    let msgs = ArrayList<Message>()
+    msgs.add(UserMessage(ContentList.ofText("hi"), 0))
+    let report = runtime.compactNow("sess_nospec", msgs, SessionEnvironment())
+    @Expect(report.compacted, false)
+    @Expect(report.reason.contains("headroom") || report.reason.contains("context window"), true)
+    @Expect(provider.chatCalls, Int64(0))
+}
+
+// retain=0：整段历史换成一份检查点 —— 变短了才算压成
+@Test
+func runtime_compactNow_replacesWholeHistoryWhenRetainZero() {
+    let store = MemorySessionStore()
+    let provider = StubSummaryProvider("SUM")
+    let runtime = makeCompactionRuntime(
+        compactionRuntimeConfig(true, smallWindowCompaction(retainTokens: 0)), provider, sessionStore: store)
+    let msgs = ArrayList<Message>()
+    msgs.add(UserMessage(ContentList.ofText("第一轮"), 0))
+    msgs.add(AssistantMessage(ContentList.ofText("回答"), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0))
+    msgs.add(UserMessage(ContentList.ofText("第二轮"), 0))
+    let report = runtime.compactNow("sess_retain0", msgs, SessionEnvironment())
+    @Expect(report.compacted, true)
+    @Expect(report.messages.size, 1)
+    match (report.messages[0]) {
+        case _: CompactionMessage => ()
+        case _ => @Fail("expected single checkpoint message")
+    }
+    @Expect(store.loadCompactions("sess_retain0").size, 2)
+}
+
+// 压不成"更短"就不算压成：单条历史换成检查点仍是 1 条 → 如实报 noop，历史原样
+@Test
+func runtime_compactNow_reportsNoShrink() {
+    let store = MemorySessionStore()
+    let provider = StubSummaryProvider("SUM")
+    let runtime = makeCompactionRuntime(
+        compactionRuntimeConfig(true, smallWindowCompaction(retainTokens: 0)), provider, sessionStore: store)
+    let msgs = ArrayList<Message>()
+    msgs.add(UserMessage(ContentList.ofText("唯一一条"), 0))
+    let report = runtime.compactNow("sess_noop", msgs, SessionEnvironment())
+    @Expect(report.compacted, false)
+    @Expect(report.reason.contains("nothing to compact"), true)
+    @Expect(report.messages.size, 1)
+    var isCompaction = false
+    match (report.messages[0]) {
+        case _: CompactionMessage => isCompaction = true
+        case _ => ()
+    }
+    @Expect(isCompaction, false)   // 原样返回，不是被换掉的
+    // 台账仍记了这次尝试（一开一合，outcome=noop）
+    let journal = store.loadCompactions("sess_noop")
+    @Expect(journal.size, 2)
+    @Expect(journal[1].outcome, "noop")
+}
+
+// 关闭压缩开关 → 手动入口也拒绝（开关是总闸；嵌套配置显式 enabled=false）
+@Test
+func runtime_compactNow_respectsDisabledSwitch() {
+    let provider = StubSummaryProvider("SUM")
+    let off = Some(CompactionConfig(false, 0.8, 1024, 0.16, Some(Int64(4)), 1,
+        DEFAULT_PROMPT_TEMPLATE, None, None))
+    let runtime = makeCompactionRuntime(
+        compactionRuntimeConfig(false, off), provider)
+    let msgs = ArrayList<Message>()
+    msgs.add(UserMessage(ContentList.ofText("第一轮"), 0))
+    msgs.add(UserMessage(ContentList.ofText("第二轮"), 0))
+    let report = runtime.compactNow("sess_off", msgs, SessionEnvironment())
+    @Expect(report.compacted, false)
+    @Expect(report.reason, "compaction disabled")
+}
+
 // chat 抛异常：验证子调用失败降级为占位符
 class StubFailingProvider <: Provider {
     public func name(): String { "stub-failing" }
@@ -550,14 +689,17 @@ func smallWindowCompaction(retainTokens!: Int64 = 2000): Option<CompactionConfig
 }
 
 func makeCompactionRuntime(config: AgentConfig, provider: Provider,
-    eventBus!: ?EventBus = None): AgentRuntime {
+    eventBus!: ?EventBus = None, sessionStore!: ?SessionStore = None): AgentRuntime {
     let toolReg = ToolRegistry()
     let trustMgr = TrustManager()
     let skillReg = SkillRegistry()
     let agentReg = AgentRegistry()
     let providerReg = ProviderRegistry()
     providerReg.register("default", provider)
-    let store = MemorySessionStore()
+    let store: SessionStore = match (sessionStore) {
+        case Some(s) => s
+        case None => MemorySessionStore()
+    }
     testRuntime(config, provider, toolReg, store, trustMgr,
         skillReg, agentReg, providerReg, ArrayList<Hook>(), SessionEnvironment(),
         McpManager(), eventBus: eventBus)

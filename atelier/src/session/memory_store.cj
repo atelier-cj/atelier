@@ -8,6 +8,29 @@ public class MemorySessionStore <: SessionStore {
 
     public init() {}
 
+    // 压缩台账：按会话存（内存实现同样保留语义，测试与进程内审计可用）
+    private let compactions = HashMap<String, ArrayList<CompactionRecord>>()
+
+    public func appendCompaction(record: CompactionRecord): Unit {
+        match (this.compactions.get(record.sessionId)) {
+            case Some(list) => list.add(record)
+            case None =>
+                let list = ArrayList<CompactionRecord>()
+                list.add(record)
+                this.compactions[record.sessionId] = list
+        }
+    }
+
+    public func loadCompactions(sessionId: String): ArrayList<CompactionRecord> {
+        match (this.compactions.get(sessionId)) {
+            case Some(list) =>
+                let out = ArrayList<CompactionRecord>()
+                for (r in list) { out.add(r) }
+                out
+            case None => ArrayList<CompactionRecord>()
+        }
+    }
+
     public func save(id: String, header: SessionHeader, messages: ArrayList<Message>): Unit {
         var entries = ArrayList<Entry>()
         var parentId: Option<String> = None

@@ -57,6 +57,7 @@ REPL，现已移除），与 `tui` 等价；不带子命令直接运行 `cli.app
 | `/model <name>` | 切换模型 |
 | `/models` | 列出配置的所有模型 |
 | `/tools` | 列出当前 agent 的可用工具 |
+| `/compact` | 手动压缩当前会话（绕过阈值；历史被改写后整份重写落库） |
 | `/subagent list \| poll \| start [--remote] <agent> <prompt> \| send <id> <text> \| respond <id> <text> \| close <id>` | 可持续子 Agent |
 | `/trust <path>` | 信任目录 |
 | `/untrust <path>` | 取消信任 |

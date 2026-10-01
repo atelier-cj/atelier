@@ -466,6 +466,15 @@ spawn {
 let messages = stream.result()
 ```
 
+宿主也可以**手动触发**一次压缩（对应 TUI 的 `/compact`）：`runtime.compactNow(sessionId, messages, env)`
+返回 `CompactionReport`（新历史 + 覆盖量 + 未压成的原因）；它绕过阈值，但走同一条管线、
+同一个会话级互斥与同一份台账。压缩会改写历史，落库要**整份重写**（`store.save`），
+不能追加——追加会让检查点与旧头部叠在一起。
+
+每次压缩还会往 `SessionStore` 的台账里写一开一合两条记录（`appendCompaction` / `loadCompactions`，
+接口有默认空实现）：`interruptedCompactions(records)` 能捞出有开无合的**中断残留**（进程在压缩中途
+没了）。它只是提示，**不当锁用**——残留会一直在，当锁会让会话永远压不动。
+
 压缩事件（`CompactionStartEvent` / `CompactionEndEvent`）以同一个 `compactionId` 成对出现，
 中途放弃时也会闭合（`messagesAfter == messagesBefore` 表示"尝试过但没替换"），所以消费端
 不会看到悬挂的事务。同一会话同时只允许一次压缩：另一次进来的压缩会**跳过**并留一条警告
