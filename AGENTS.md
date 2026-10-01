@@ -61,10 +61,13 @@ cjpm clean
 
 | 依赖 | 用途 | 说明 |
 |------|------|------|
-| `ystyle::mcp` | MCP 协议层 | 工具发现/调用/传输；注册表 2.3.11（stdlibio env/args 完整注入） |
+| `ystyle::mcp` | MCP 协议层 | 工具发现/调用/传输；注册表 2.3.15（stdlibio env/args 完整注入） |
+| `llm_api` | 消息 / 事件 / Provider 类型层 | 跨产品共享的公共类型与 REST+SSE 的 Provider 实现；本仓只 `public import` 再导出并扩展 |
 | `bstorm` | 会话持久化 | 基于 badger-cj 的 ORM 库 |
-| `acp` | ACP v1 协议层 | 注册表 0.2.2（Agent/Client 双端，acp-cj） |
+| `acp` | ACP v1 协议层 | 注册表 0.2.6（Agent/Client 双端，acp-cj） |
 | `ystyle::xisp` | PTC 程序执行引擎 | 注册表 0.4.1（`registerPure` 纯函数子集 / 求值中断检查点 / 严格解析；此前为本地 path 依赖） |
+| `tomlcj` | TOML 配置装载 | `atelier.config` 的 Agent / Provider 配置模型；下游宿主与 `server` 共用同一套 |
+| `ystyle::jsonrpc` | JSON-RPC 传输 | 0.7.8；MCP 传输侧依赖 |
 
 ## 项目结构
 
@@ -80,7 +83,8 @@ atelier/                     # 仓库根 = cjpm 工作区（[workspace]，产品
 │       ├── message/         # 消息模型（地基，零外部依赖）
 │       ├── agent/           # Agent 配置/运行时/事件
 │       ├── tool/            # Tool 接口 + 内置工具 + MCP 适配
-│       ├── provider/        # LLM Provider 接口 + OpenAI 实现
+│       ├── provider/        # Provider 类型再导出（REST+SSE 的实现在 llm_api）
+│       ├── config/          # TOML 配置模型（Agent / Provider / 信任 / 压缩）
 │       ├── session/         # 会话模型 + 存储（内存/bstorm）
 │       ├── context/         # 上下文压缩
 │       ├── trust/           # 信任闸门
@@ -105,9 +109,12 @@ atelier/                     # 仓库根 = cjpm 工作区（[workspace]，产品
 
 - **装配束（HarnessSpec）**：组件一次装配，`AgentRuntime(spec, cfg)` 是**唯一**构造；`with*` 派生
   是值语义（不动共享组件），run 作用域的工具叠加走 `ToolRegistry.derived` 视图而不是复制表
-- **自研优先**：除 MCP 协议（`ystyle::mcp`）和会话存储（`bstorm`）外，全部自研
+- **依赖边界**：协议与共享类型用现成库（`ystyle::mcp` 工具协议、`llm_api` 消息/事件/Provider 类型与
+  REST+SSE 实现、`acp` ACP v1、`ystyle::jsonrpc` 传输），会话存储用 `bstorm`；Agent 循环 / 工具 /
+  压缩 / 会话树自研
 - **运行时动态**：Agent 通过 JSON/YAML 在运行时定义，不依赖编译期宏
 - **消息密封接口**：4 种角色（User/Assistant/ToolResult/Compaction），通过 `role()` 判别
 - **树形会话**：Entry + ParentID 链，支持 fork/clone，JSONL 持久化
 - **两阶段压缩**：Provider 报告用量优先，本地估算兜底
-- **直接对接 REST**：Provider 直接实现 HTTP + SSE，不通过 MCP 代理 LLM
+- **配置模型在核心**：`atelier.config`（TOML）是 Agent / Provider / 信任 / 压缩配置的唯一来源，
+  `server` 只再导出 —— 宿主与下游从核心取用，不必依赖 `server` 成员
