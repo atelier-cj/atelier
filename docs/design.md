@@ -1092,6 +1092,7 @@ public interface Hook {
 | 溢出恢复重试 | 1 次 | `maxOverflowRetries`（0 = 关闭） |
 | 工具结果修剪 | 8192 码点 → 头 4096 + 标记 + 尾 1024 | `[agent.compaction.prune]` |
 | 摘要子调用 | 复用主对话前缀（system + tools + 被压区域回放） | `promptTemplate` / `summaryModel` |
+| 检查点框架 | 前言 + `<compacted-summary>` 标签（随替换消息落库） | `CompactionConfig`（代码级常量） |
 | 上下文窗口（未知模型） | 兜底 8192 并警告 | `[[provider.model]]` / `withModelContext(provider, model, n)` / `withDefaultContextWindow`（0 = 禁用压缩） |
 | 并发工具执行 | 根据 `ExecutionMode` | 串行/并行 |
 | 最大工具结果字符 | 2000（摘要场景） | 硬编码 |

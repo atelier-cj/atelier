@@ -129,6 +129,9 @@ compactionEnabled = true           # 开关（可选，默认 true）
   等硬规则）；指令里说的"上面这段对话"就是被回放的那批消息，提示词本身**不内联对话**
   （内联会毁掉前缀复用）。`promptTemplate` 可整段替换；自定义模板仍可用
   `{{conversation}}`（被压区域的扁平文本）/ `{{previous_summary}}` / `{{max_tokens}}`
+- 压缩后的替换消息带**检查点框架**：一段前言（"这是自动生成的检查点…当作既定背景，不要复述、
+  也不要提及"）+ `<compacted-summary>…</compacted-summary>` 标签。落库的就是这份文本 ——
+  模型看到的即所存的，续跑/回放不会变样；界面与"上一份检查点"复用会剥掉框架取裸摘要。
 - 摘要子调用**复用主对话前缀**：同样的 system 提示词 + 工具声明 + 被压区域消息原样回放，
   压缩指令只追加在最后一条 user 消息里。provider 的前缀缓存按"缓存前缀单元完整匹配"计费
   （[DeepSeek 的硬盘缓存](https://api-docs.deepseek.com/zh-cn/guides/kv_cache/) 即如此），

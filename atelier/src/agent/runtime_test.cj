@@ -13,7 +13,7 @@ import atelier.session.*
 import atelier.trust.*
 import atelier.skill.*
 import atelier.event.EventStream
-import atelier.context.{DEFAULT_PROMPT_TEMPLATE, CompactionConfig}
+import atelier.context.{DEFAULT_PROMPT_TEMPLATE, CompactionConfig, checkpointBody}
 
 import atelier.context.CompactionConfig
 
@@ -316,7 +316,7 @@ func runtime_overflowRecoveryCompactsAndRetries() {
     @Expect(provider.streamCalls, Int64(2))     // 失败一次 + 恢复后重试一次
     @Expect(provider.chatCalls, Int64(1))       // 一次摘要子调用
     match (result[0]) {
-        case cm: CompactionMessage => @Expect(cm.summary, "SUM")
+        case cm: CompactionMessage => @Expect(checkpointBody(cm.summary), "SUM")
         case _ => @Fail("expected CompactionMessage as first message")
     }
     // 恢复成功：不该留 [provider error]
@@ -489,7 +489,7 @@ func runtime_compactionSummaryViaLLM() {
     let result = runtime.chat(msgs).result()
     @Expect(provider.chatCalls, Int64(1))
     let cm = requireCompaction(result)
-    @Expect(cm.summary, summaryText)
+    @Expect(checkpointBody(cm.summary), summaryText)
     // 触发点在请求前：首轮还没有 provider 用量可锚，记的是当时的本地估算
     @Expect(cm.tokensBefore, Int64(4505))
     // 子调用请求体：被压区域原样回放 + 末尾追加指令（复用主对话前缀，命中 provider 缓存）
@@ -557,7 +557,7 @@ func runtime_compactionUsagePriority() {
     let result = runtime.chat(msgs).result()
     @Expect(provider.chatCalls, Int64(1))
     let cm = requireCompaction(result)
-    @Expect(cm.summary, "{\"goal\":\"test\"}")
+    @Expect(checkpointBody(cm.summary), "{\"goal\":\"test\"}")
     // 锚 + 其后新增消息的估算（不是把整段历史重新估一遍）
     @Expect(cm.tokensBefore > Int64(500000), true)
 }

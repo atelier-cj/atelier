@@ -7,7 +7,7 @@ import atelier.provider.*
 import atelier.skill.*
 import atelier.session.*
 import atelier.trust.*
-import atelier.context.{resolveCompactSpec, CompactSpec, compactFrom, retainedCutIndex, lastUserIndex, isContextOverflowError, pruneToolResults, ToolResultPruneConfig}
+import atelier.context.{resolveCompactSpec, CompactSpec, compactFrom, retainedCutIndex, lastUserIndex, isContextOverflowError, pruneToolResults, ToolResultPruneConfig, checkpointBody}
 import atelier.context.ContextBuilder
 import atelier.context.PromptSegmentContributor
 import atelier.context.ModelContextRegistry
@@ -1237,7 +1237,7 @@ func summarizeText(msgs: ArrayList<Message>, limit: Int64): String {
             case um: UserMessage => plainTextOf(um)
             case am: AssistantMessage => plainTextOf(am)
             case tm: ToolResultMessage => "[tool " + tm.toolName + "]: " + plainTextOf(tm)
-            case cm: CompactionMessage => "[summary] " + cm.summary
+            case cm: CompactionMessage => "[summary] " + checkpointBody(cm.summary)
             case am2: ArchiveMessage => "[archived " + am2.startIndex.toString() + "-" + am2.endIndex.toString() + "]: " + am2.summary
             case _ => ""
         }

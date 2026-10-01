@@ -291,7 +291,7 @@ public func findPreviousSummary(messages: ArrayList<Message>): Option<String> {
     var i = messages.size - 1
     while (i >= 0) {
         match (messages[i]) {
-            case cm: CompactionMessage => return Some(cm.summary)
+            case cm: CompactionMessage => return Some(checkpointBody(cm.summary))
             case am: ArchiveMessage => return Some(am.summary)
             case _ => ()
         }
@@ -362,11 +362,46 @@ public func compactWithSummary(messages: ArrayList<Message>, retainTokens: Int64
     let cut = retainedCutIndex(messages, retainTokens)
     if (cut <= 0) { return messages }
     let compacted = ArrayList<Message>()
-    compacted.add(CompactionMessage(summary, tokensBefore, 0))
+    compacted.add(CompactionMessage(frameCheckpoint(summary), tokensBefore, 0))
     for (j in cut..Int64(messages.size)) {
         compacted.add(messages[Int64(j)])
     }
     compacted
+}
+
+/**
+ * 检查点前言（照 dsh 的 `CHECKPOINT_PREAMBLE`）：让模型把这段摘要当**既定背景**，
+ * 而不是一条新指令 —— 否则它容易"复述摘要"或对压缩这件事做出反应。
+ */
+public let COMPACTION_CHECKPOINT_PREAMBLE = "这是自动生成的检查点，用于压缩较早的一段对话以腾出上下文。把它当作既定的背景信息，直接在此基础上继续，不要复述它；从它之后的消息继续任务，也不要提及这份检查点。"
+
+public let SUMMARY_OPEN_TAG = "<compacted-summary>"
+public let SUMMARY_CLOSE_TAG = "</compacted-summary>"
+
+/** 把裸摘要包成检查点：前言 + 标签。**落库的替换消息用这份文本**（模型看到的即所存的） */
+public func frameCheckpoint(summary: String): String {
+    COMPACTION_CHECKPOINT_PREAMBLE + "\n\n" + SUMMARY_OPEN_TAG + "\n" + summary + "\n" + SUMMARY_CLOSE_TAG
+}
+
+/**
+ * 从检查点文本里取回裸摘要（显示、以及作为"上一份检查点"再喂给模板时用）。
+ * 没有框架（历史会话里的旧摘要）时原样返回。
+ */
+public func checkpointBody(framed: String): String {
+    let open = framed.indexOf(SUMMARY_OPEN_TAG)
+    match (open) {
+        case Some(i) =>
+            let start = i + SUMMARY_OPEN_TAG.size
+            match (framed.indexOf(SUMMARY_CLOSE_TAG)) {
+                case Some(j) =>
+                    if (j > start) {
+                        return framed[start..j].trimAscii()
+                    }
+                case None => ()
+            }
+        case None => ()
+    }
+    framed
 }
 
 /**
@@ -380,7 +415,7 @@ public func compactFrom(messages: ArrayList<Message>, keepFrom: Int64,
     let cut = protectCutPoint(messages, keepFrom)
     if (cut <= 0) { return messages }
     let out = ArrayList<Message>()
-    out.add(CompactionMessage(summary, tokensBefore, 0))
+    out.add(CompactionMessage(frameCheckpoint(summary), tokensBefore, 0))
     for (j in cut..Int64(messages.size)) {
         out.add(messages[Int64(j)])
     }

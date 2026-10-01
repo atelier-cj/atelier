@@ -227,7 +227,7 @@ func compactionConfig_summaryReplacesAllWhenKeepZero() {
     let out = compactWithSummary(msgs, 0, "摘要", 10)
     @Expect(out.size, 1)
     match (out[0]) {
-        case cm: CompactionMessage => @Expect(cm.summary, "摘要")
+        case cm: CompactionMessage => @Expect(checkpointBody(cm.summary), "摘要")
         case _ => @Fail("expected CompactionMessage")
     }
 }
@@ -264,7 +264,7 @@ func compactWithSummary_singleBigMessageTriggersCut() {
     let out = compactWithSummary(msgs, 10, "摘要", 36)
     @Expect(out.size, 2)
     match (out[0]) {
-        case cm: CompactionMessage => @Expect(cm.summary, "摘要")
+        case cm: CompactionMessage => @Expect(checkpointBody(cm.summary), "摘要")
         case _ => @Fail("expected CompactionMessage")
     }
     match (out[1]) {
@@ -281,7 +281,7 @@ func compactWithSummary_multiMessageReach() {
     let out = compactWithSummary(msgs, 8, "摘要", 30)
     @Expect(out.size, 2)
     match (out[0]) {
-        case cm: CompactionMessage => @Expect(cm.summary, "摘要")
+        case cm: CompactionMessage => @Expect(checkpointBody(cm.summary), "摘要")
         case _ => @Fail("expected CompactionMessage")
     }
     match (out[1]) {
@@ -401,7 +401,7 @@ func compactFrom_keepsTailAndProtectsPairing() {
     let out = compactFrom(msgs, 2, "摘要", 100)
     @Expect(out.size, 2)
     match (out[0]) {
-        case cm: CompactionMessage => @Expect(cm.summary, "摘要")
+        case cm: CompactionMessage => @Expect(checkpointBody(cm.summary), "摘要")
         case _ => @Fail("expected CompactionMessage first")
     }
     match (out[1]) {
@@ -515,5 +515,45 @@ func pruneToolResults_disabledIsNoOp() {
     match (out[0]) {
         case tr: ToolResultMessage => @Expect(Int64(textOfMsg(tr).toRuneArray().size), Int64(500))
         case _ => @Fail("expected untouched tool result")
+    }
+}
+
+// ---------- 检查点框架（前言 + 标签） ----------
+
+@Test
+func checkpointFrame_wrapsAndUnwraps() {
+    let framed = frameCheckpoint("裸摘要内容")
+    // 模型看到的是"既定背景"，不是一条新指令
+    @Expect(framed.startsWith(COMPACTION_CHECKPOINT_PREAMBLE), true)
+    @Expect(framed.contains(SUMMARY_OPEN_TAG + "\n裸摘要内容\n" + SUMMARY_CLOSE_TAG), true)
+    // 显示/复用要拿回裸摘要
+    @Expect(checkpointBody(framed), "裸摘要内容")
+    // 旧会话里的裸摘要（没有框架）原样返回，不报错也不截断
+    @Expect(checkpointBody("旧格式的摘要"), "旧格式的摘要")
+}
+
+@Test
+func checkpointFrame_replacementMessageCarriesFraming() {
+    let msgs = ArrayList<Message>()
+    msgs.add(UserMessage(ContentList.ofText("m1"), 0))
+    msgs.add(UserMessage(ContentList.ofText("m2"), 0))
+    let compacted = compactWithSummary(msgs, 1, "SUM", 100)
+    match (compacted[0]) {
+        case cm: CompactionMessage =>
+            // 落库的替换消息就带框架：模型看到的即所存的（回放/续跑一致）
+            @Expect(cm.summary.startsWith(COMPACTION_CHECKPOINT_PREAMBLE), true)
+            @Expect(checkpointBody(cm.summary), "SUM")
+        case _ => @Fail("expected CompactionMessage")
+    }
+}
+
+@Test
+func checkpointFrame_findPreviousSummaryStripsFraming() {
+    let msgs = ArrayList<Message>()
+    msgs.add(CompactionMessage(frameCheckpoint("上一份摘要"), 10, 0))
+    msgs.add(UserMessage(ContentList.ofText("m"), 0))
+    match (findPreviousSummary(msgs)) {
+        case Some(s) => @Expect(s, "上一份摘要")
+        case None => @Fail("expected previous summary")
     }
 }
