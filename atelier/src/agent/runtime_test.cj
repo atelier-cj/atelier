@@ -225,6 +225,82 @@ func overflowPolicy(maxOverflowRetries: Int64): Option<CompactionConfig> {
         DEFAULT_PROMPT_TEMPLATE, None, None))
 }
 
+// 记录两个通道的请求：主请求（chatStreaming）与摘要子调用（chat）
+class StubRecordingProvider <: Provider {
+    public var mainReq: Option<ChatRequest> = None
+    public var summaryReq: Option<ChatRequest> = None
+    public func name(): String { "stub-recording" }
+    public func chat(req: ChatRequest): ChatResponse {
+        this.summaryReq = Some(req)
+        ChatResponse(AssistantMessage(ContentList.ofText("SUM"), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0))
+    }
+    public func chatStreaming(req: ChatRequest): EventStream<ChatDelta, AssistantMessage> {
+        this.mainReq = Some(req)
+        let stream = EventStream<ChatDelta, AssistantMessage>()
+        let msg = AssistantMessage(ContentList.ofText("ok"), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0)
+        stream.emit(ChatDelta("", "", Some(msg.stopReason)))
+        stream.setResult(msg)
+        stream
+    }
+}
+
+/**
+ * 摘要子调用复用主对话前缀：provider 的前缀缓存按"缓存前缀单元完整匹配"计费
+ * （DeepSeek 的硬盘缓存即如此），所以子调用必须带同样的 system 与工具、并把被压区域
+ * 原样当作开头消息回放，指令只追加在最后。
+ */
+@Test
+func runtime_summaryCallReusesConversationPrefix() {
+    let provider = StubRecordingProvider()
+    let runtime = makeCompactionRuntime(
+        compactionRuntimeConfig(true, smallWindowCompaction(retainTokens: 4)), provider)
+
+    // 第一轮：正常请求（它的前缀就是 provider 会落盘的缓存单元）
+    let first = ArrayList<Message>()
+    first.add(UserMessage(ContentList.ofText("第一轮的问题"), 0))
+    runtime.chat(first).result()
+
+    // 第二轮：同一前缀 + 上一轮用量锚 + 一大段新内容 → 请求前触发压缩
+    let sb = StringBuilder()
+    var i = 0
+    while (i < 4000) {
+        sb.append("y")
+        i++
+    }
+    let second = ArrayList<Message>()
+    second.add(UserMessage(ContentList.ofText("第一轮的问题"), 0))
+    second.add(AssistantMessage(ContentList.ofText("ok"), "", "", StopReason.EndTurn, TokenUsage(500000, 0), 0))
+    second.add(UserMessage(ContentList.ofText(sb.toString()), 0))
+    runtime.chat(second).result()
+
+    match (provider.mainReq) {
+        case Some(reqMain) =>
+            match (provider.summaryReq) {
+                case Some(reqSum) =>
+
+                // 同样的 system 与工具：前缀一致才谈得上命中
+                @Expect(reqSum.systemPrompt, reqMain.systemPrompt)
+                @Expect(reqSum.tools.size, reqMain.tools.size)
+                // 被压区域逐条原样回放（内容与压缩前的历史一致），指令只在最后
+                @Expect(reqSum.messages.size >= 2, true)
+                var j = 0
+                while (j < reqSum.messages.size - 1) {
+                    @Expect(textOfMsg(reqSum.messages[j]), textOfMsg(second[j]))
+                    j++
+                }
+                let last = reqSum.messages[reqSum.messages.size - 1]
+                match (last) {
+                    case um: UserMessage =>
+                        // 最后一条是指令本身，不含被压的正文（正文在消息里，不在提示词里）
+                        @Expect(textOfMsg(um).contains("这一份检查点") || textOfMsg(um).contains("压缩引擎"), true)
+                    case _ => @Fail("expected instruction as final user message")
+                }
+                case None => @Fail("summary sub-call not issued")
+            }
+        case None => @Fail("main request not issued")
+    }
+}
+
 // 溢出恢复：报超窗 → 压掉最大一段头部 → 用新历史重试同一请求，run 正常收尾
 @Test
 func runtime_overflowRecoveryCompactsAndRetries() {
@@ -416,11 +492,18 @@ func runtime_compactionSummaryViaLLM() {
     @Expect(cm.summary, summaryText)
     // 触发点在请求前：首轮还没有 provider 用量可锚，记的是当时的本地估算
     @Expect(cm.tokensBefore, Int64(4505))
-    // 子调用请求体：仅一条用户消息（无 system/tools），不污染主对话
+    // 子调用请求体：被压区域原样回放 + 末尾追加指令（复用主对话前缀，命中 provider 缓存）
     match (provider.lastReq) {
         case Some(req) =>
-            @Expect(req.messages.size, 1)
-            @Expect(req.tools.size, 0)
+            @Expect(req.messages.size >= 2, true)
+            // 倒数第二条是被压区域的消息本体，最后一条是指令
+            let last = req.messages[req.messages.size - 1]
+            match (last) {
+                case um: UserMessage => @Expect(textOfMsg(um).contains("Summarize:"), true)
+                case _ => @Fail("expected instruction as the final user message")
+            }
+            // 区域里的第一条就是被压的那段历史本体（18000 字符的输入）
+            @Expect(Int64(textOfMsg(req.messages[0]).toRuneArray().size), Int64(18000))
         case None => @Fail("summary sub-call not issued")
     }
 }

@@ -93,19 +93,11 @@ public func resolveCompactSpec(cc: CompactionConfig, contextWindow: Int64,
  * 与 dsh 的两点差异，都是刻意的：
  * - 指令用中文：本工程其余提示词与用户会话都是中文，摘要必须服务同一场对话
  *   （dsh 的规则里写的是 "concise English engineering prose"）
- * - 对话由 `{{conversation}}` 内联在同一个 user 消息里（dsh 是回放整段消息再追加指令）
+ * - 默认模板**不内联对话**：被压区域的消息原样回放成 messages，指令作为最后一条 user 消息追加。
+ *   这是为了命中 provider 的前缀缓存（DeepSeek 按"缓存前缀单元完整匹配"计费），内联会把
+ *   整段长输入变成未命中。`{{conversation}}` 变量仍保留给自定义模板（填的是被压区域的扁平文本）
  */
 public let DEFAULT_PROMPT_TEMPLATE = """
-<conversation>
-{{conversation}}
-</conversation>
-
-{{#previous_summary}}
-<previous_summary>
-{{previous_summary}}
-</previous_summary>
-{{/previous_summary}}
-
 你是这个 AI 编程助手的压缩引擎。把上面这段对话压缩成一份结构化检查点，让另一个模型能在不丢失关键上下文的前提下接续工作。
 
 严格按下面的 Markdown 结构输出：每一节都要保留、顺序不变。用简短要点，不要写大段散文；某一节没有内容就写 "(none)"，不要省略该节。
@@ -139,7 +131,8 @@ public let DEFAULT_PROMPT_TEMPLATE = """
 - 忠实记录用户反馈与明确指令，尤其是纠正。
 - 不要提到这次摘要请求，也不要提到上下文被压缩过。
 - 只输出检查点文本：不要调用任何工具，不要做其它动作。
-- 若上面给出了 <previous_summary>（那是上一份检查点），不要原样照抄：保留仍然成立的事实、丢掉过时的，把新信息并进同一套结构。"""
+- 若上面已经出现过历史摘要，那是**上一份检查点**：不要原样照抄，保留仍然成立的事实、丢掉过时的，把新信息并进同一套结构。"""
+
 public struct CompactionConfig <: JsonSerializable & JsonDeserializable<CompactionConfig> {
     public let enabled: Bool
     /** 触发阈值占窗口的比例（dsh 默认 0.8） */
@@ -344,29 +337,33 @@ public func validateSummary(config: CompactionConfig, schema: HashMap<String, Js
     true
 }
 
-// 切点替换：保留最近 retainTokens，之前替换为 CompactionMessage(summary, tokensBefore, 0)
-// retainTokens <= 0 时全部替换；单条消息即达标时仅保留其后消息
-public func compactWithSummary(messages: ArrayList<Message>, retainTokens: Int64,
-    summary: String, tokensBefore: Int64): ArrayList<Message> {
-    if (retainTokens <= 0) {
-        let r = ArrayList<Message>()
-        r.add(CompactionMessage(summary, tokensBefore, 0))
-        return r
-    }
+/**
+ * 按保留预算算切点：从尾部往回累加，够 [retainTokens] 就停；再过一遍工具配对保护。
+ * 返回"保留区第一条"的下标（0 = 整个历史都在保留区里，压不动）。
+ *
+ * 摘要子调用也要用它切出**被压区域**（回放给模型的那一段），两处必须是同一个切点。
+ */
+public func retainedCutIndex(messages: ArrayList<Message>, retainTokens: Int64): Int64 {
+    if (retainTokens <= 0) { return Int64(messages.size) }
     var running: Int64 = 0
-    var cutIndex: Int64 = 0
     var i = messages.size - 1
     while (i >= 0 && running < retainTokens) {
         running += estimateMessageTokens(messages[i])
         if (running >= retainTokens) { break }
         i--
     }
-    cutIndex = i + 1
-    cutIndex = protectCutPoint(messages, cutIndex)
-    if (cutIndex <= 0) { return messages }
+    protectCutPoint(messages, i + 1)
+}
+
+// 切点替换：保留最近 retainTokens，之前替换为 CompactionMessage(summary, tokensBefore, 0)
+// retainTokens <= 0 时全部替换；单条消息即达标时仅保留其后消息
+public func compactWithSummary(messages: ArrayList<Message>, retainTokens: Int64,
+    summary: String, tokensBefore: Int64): ArrayList<Message> {
+    let cut = retainedCutIndex(messages, retainTokens)
+    if (cut <= 0) { return messages }
     let compacted = ArrayList<Message>()
     compacted.add(CompactionMessage(summary, tokensBefore, 0))
-    for (j in cutIndex..Int64(messages.size)) {
+    for (j in cut..Int64(messages.size)) {
         compacted.add(messages[Int64(j)])
     }
     compacted

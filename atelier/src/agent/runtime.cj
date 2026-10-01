@@ -7,7 +7,7 @@ import atelier.provider.*
 import atelier.skill.*
 import atelier.session.*
 import atelier.trust.*
-import atelier.context.{resolveCompactSpec, CompactSpec, compactFrom, lastUserIndex, isContextOverflowError, pruneToolResults, ToolResultPruneConfig}
+import atelier.context.{resolveCompactSpec, CompactSpec, compactFrom, retainedCutIndex, lastUserIndex, isContextOverflowError, pruneToolResults, ToolResultPruneConfig}
 import atelier.context.ContextBuilder
 import atelier.context.PromptSegmentContributor
 import atelier.context.ModelContextRegistry
@@ -213,21 +213,37 @@ public open class AgentRuntime {
         estimateTokens(messages)
     }
 
-    // 摘要 + 切点替换：摘要失败时退化为占位摘要（保住会话可继续，而不是把 run 打断）
+    /**
+     * 摘要 + 切点替换：摘要失败时退化为占位摘要（保住会话可继续，而不是把 run 打断）。
+     *
+     * 摘要子调用**复用主对话的前缀**：system 提示词 + 工具声明 + 被压区域消息原样回放，
+     * 指令作为最后一条 user 消息追加。provider 的前缀缓存按"缓存前缀单元完整匹配"计费
+     * （DeepSeek 的硬盘缓存即如此），这样那段长输入走缓存价；若把对话内联进一个 user 消息，
+     * 前缀从第一个 token 就不同，整段按未命中计价。
+     */
     private func summarizeAndCompact(messages: ArrayList<Message>, cc: CompactionConfig,
-        spec: CompactSpec, total: Int64, actualModel: String, log: Logger): ArrayList<Message> {
-        // 独立子调用（请求体无 system/tools，缓存 Key 独立，不污染主对话）
+        spec: CompactSpec, total: Int64, actualModel: String, systemText: String,
+        tools: ArrayList<OpenAITool>, log: Logger): ArrayList<Message> {
+        let cut = retainedCutIndex(messages, spec.retainTokens)
         let summary = try {
-            let conversation = summarizeText(messages, spec.retainTokens)
-            let prev = findPreviousSummary(messages)
+            let region = ArrayList<Message>()
+            var i: Int64 = 0
+            while (i < cut) {
+                region.add(messages[i])
+                i++
+            }
+            let conversation = summarizeText(region, 0)
+            let prev = findPreviousSummary(region)
             let prompt = renderCompactionPrompt(cc, conversation, prev, spec.summaryMaxTokens)
             let summaryModel = match (cc.summaryModel) {
                 case Some(m) => m
                 case None => actualModel
             }
-            let req = ChatRequest(summaryModel,
-                ArrayList<Message>([UserMessage(ContentList.ofText(prompt), 0)]),
-                Float64(0.2), spec.summaryMaxTokens, None, ArrayList<OpenAITool>())
+            // 被压区域原样回放 + 末尾追加指令：前缀与主请求一致，才能吃到缓存
+            let reqMessages = ArrayList<Message>(region)
+            reqMessages.add(UserMessage(ContentList.ofText(prompt), 0))
+            let req = ChatRequest(summaryModel, reqMessages, Float64(0.2), spec.summaryMaxTokens,
+                None, tools, systemPrompt: systemText)
             let resp = this.provider.chat(req)
             let raw = plainTextOf(resp.message)
             match (cc.outputSchema) {
@@ -273,16 +289,24 @@ public open class AgentRuntime {
         }
         let total = estimateTokens(messages)
         let summary = try {
-            let conversation = summarizeText(messages, 0)
-            let prev = findPreviousSummary(messages)
+            let region = ArrayList<Message>()
+            var k: Int64 = 0
+            while (k < keepFrom) {
+                region.add(messages[k])
+                k++
+            }
+            let conversation = summarizeText(region, 0)
+            let prev = findPreviousSummary(region)
             let prompt = renderCompactionPrompt(cc, conversation, prev, cc.headroomTokens)
             let summaryModel = match (cc.summaryModel) {
                 case Some(m) => m
                 case None => actualModel
             }
-            let req = ChatRequest(summaryModel,
-                ArrayList<Message>([UserMessage(ContentList.ofText(prompt), 0)]),
-                Float64(0.2), cc.headroomTokens, None, ArrayList<OpenAITool>())
+            // 同样复用主对话前缀（system + tools + 被压区域），让恢复用的摘要也走缓存价
+            let reqMessages = ArrayList<Message>(region)
+            reqMessages.add(UserMessage(ContentList.ofText(prompt), 0))
+            let req = ChatRequest(summaryModel, reqMessages, Float64(0.2), cc.headroomTokens,
+                None, tools, systemPrompt: systemText)
             plainTextOf(this.provider.chat(req).message)
         } catch (e: Exception) {
             log.warn("context overflow: summary failed (${e.message}); giving up recovery", Array<Attr>())
@@ -495,7 +519,7 @@ public open class AgentRuntime {
                                 let total = this.pressureForNextRequest(measureMessages)
                                 if (total > cSpec.thresholdTokens) {
                                     currentMessages = this.summarizeAndCompact(currentMessages,
-                                        cc, cSpec, total, actualModel, log)
+                                        cc, cSpec, total, actualModel, systemText, tools, log)
                                 }
                             // 配置算不出预算（窗口未知 / 留不出余量 / 保留不小于阈值）：
                             // 留痕一次并跳过**主动**压缩 —— 配置坏了不该让会话不可用

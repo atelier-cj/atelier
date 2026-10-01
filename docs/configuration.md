@@ -126,8 +126,13 @@ compactionEnabled = true           # 开关（可选，默认 true）
   时，绕过阈值压掉最大的一段头部（只保最后一条用户消息起的内容，不拆散工具调用对），
   再用新历史重试同一请求，次数受 `maxOverflowRetries` 限制。
 - 默认摘要指令是 dsh 同款的 Markdown 检查点骨架（八个固定小节 + "空节写 (none)"/"不照抄上一份"
-  等硬规则），对话在前、指令在后；`promptTemplate` 可整段替换
-- 压缩摘要通过**独立子调用**生成（无 system/tools，不影响主对话缓存命中）
+  等硬规则）；指令里说的"上面这段对话"就是被回放的那批消息，提示词本身**不内联对话**
+  （内联会毁掉前缀复用）。`promptTemplate` 可整段替换；自定义模板仍可用
+  `{{conversation}}`（被压区域的扁平文本）/ `{{previous_summary}}` / `{{max_tokens}}`
+- 摘要子调用**复用主对话前缀**：同样的 system 提示词 + 工具声明 + 被压区域消息原样回放，
+  压缩指令只追加在最后一条 user 消息里。provider 的前缀缓存按"缓存前缀单元完整匹配"计费
+  （[DeepSeek 的硬盘缓存](https://api-docs.deepseek.com/zh-cn/guides/kv_cache/) 即如此），
+  这样那段长输入按缓存价结算；若把对话内联进提示词，前缀从第一个 token 就不同，整段按未命中计价。
 - `promptTemplate` 支持 mustache 变量：`{{conversation}}` / `{{previous_summary}}` / `{{max_tokens}}` / `{{#previous_summary}}` 条件块
 - `outputSchema` 极简校验（required 必填 + types 类型断言），校验失败自动降级为占位摘要
 

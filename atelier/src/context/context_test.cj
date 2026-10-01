@@ -167,8 +167,10 @@ func modelRegistry_defaultWindowIsConfigurable() {
 func compactionConfig_defaultTemplateRenders() {
     let cfg = CompactionConfig()
     let out = renderCompactionPrompt(cfg, "对话内容", None, 16384)
-    // 对话在前、指令在后（与 dsh 的顺序一致）
-    @Expect(out.contains("<conversation>\n对话内容\n</conversation>"), true)
+    // 默认模板**不内联对话**：被压区域以消息形式回放，指令单独追加
+    // （内联会让前缀与主请求不同，DeepSeek 的硬盘缓存按"缓存前缀单元完整匹配"计费）
+    @Expect(out.contains("<conversation>"), false)
+    @Expect(out.contains("对话内容"), false)
     // dsh 的检查点骨架：每节都在，一节不能少
     for (section in ["## Primary Request and Intent", "## Key Technical Concepts", "## Files and Code",
         "## Errors and Fixes", "## Pending Jobs", "## Current Work", "## Next Step", "## Critical Context"]) {
@@ -177,16 +179,19 @@ func compactionConfig_defaultTemplateRenders() {
     // 空节写 "(none)"、不照抄上一份检查点这两条硬规则要在
     @Expect(out.contains("(none)"), true)
     @Expect(out.contains("上一份检查点"), true)
-    // 没有历史摘要时不渲染 previous_summary 段（规则文本里提到该标签是另一回事：
-    // 渲染出来的段一定以换行紧跟标签）
-    @Expect(out.contains("<previous_summary>\n"), false)
+    // 默认模板也不内联历史摘要：区域里若有上一份检查点，它本身就在回放的消息里
+    @Expect(out.contains("<previous_summary>"), false)
 }
 
 @Test
 func compactionConfig_previousSummaryConditional() {
-    let cfg = CompactionConfig()
+    // 默认模板已不用它（历史摘要随区域回放），但自定义模板仍可引用
+    let cfg = CompactionConfig(true, 0.8, 16384, 0.16, None, 1,
+        "{{#previous_summary}}<previous_summary>\n{{previous_summary}}\n</previous_summary>{{/previous_summary}}\n对话：{{conversation}}",
+        None, None)
     let out = renderCompactionPrompt(cfg, "对话内容", Some("历史摘要"), 16384)
     @Expect(out.contains("<previous_summary>\n历史摘要\n</previous_summary>"), true)
+    @Expect(out.contains("对话：对话内容"), true)
 }
 
 @Test
