@@ -88,7 +88,7 @@ func activityTestConfig(toolName: String): AgentConfig {
     tools.add(toolName)
     AgentConfig("tui-activity", None, "", None, "m", None, tools, ArrayList<String>(), Int64(0),
         UInt32(3), Float32(0.7), UInt32(4096), None,
-        false, UInt32(16384), UInt32(20000), None, UInt32(50), UInt32(30), UInt32(0),
+        false, None, UInt32(50), UInt32(30), UInt32(0),
         ArrayList<String>(), None, Int64(0), Int64(0))
 }
 

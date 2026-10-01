@@ -65,8 +65,7 @@ func withVerify(base: AgentConfig, n: UInt32): AgentConfig {
     AgentConfig(base.name, base.description, base.systemPrompt, base.userPromptTemplate,
         base.model, base.provider, base.tools, base.skills, base.mcpCooldownTurns,
         base.maxTurns, base.temperature, base.maxOutputTokens, base.thinkingLevel,
-        base.compactionEnabled, base.compactionReserveTokens, base.keepRecentTokens,
-        base.compaction, base.maxToolCalls, base.toolTimeout, base.minToolInterval,
+        base.compactionEnabled, base.compaction, base.maxToolCalls, base.toolTimeout, base.minToolInterval,
         base.tags, base.createdBy, base.createdAt, base.updatedAt,
         maxVerifyPasses: n)
 }
@@ -75,8 +74,7 @@ func withContinuations(base: AgentConfig, n: UInt32): AgentConfig {
     AgentConfig(base.name, base.description, base.systemPrompt, base.userPromptTemplate,
         base.model, base.provider, base.tools, base.skills, base.mcpCooldownTurns,
         base.maxTurns, base.temperature, base.maxOutputTokens, base.thinkingLevel,
-        base.compactionEnabled, base.compactionReserveTokens, base.keepRecentTokens,
-        base.compaction, base.maxToolCalls, base.toolTimeout, base.minToolInterval,
+        base.compactionEnabled, base.compaction, base.maxToolCalls, base.toolTimeout, base.minToolInterval,
         base.tags, base.createdBy, base.createdAt, base.updatedAt,
         maxLengthContinuations: n)
 }

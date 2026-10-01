@@ -755,10 +755,9 @@ struct AgentConfig {
     maxOutputTokens: UInt32             // 最大输出 Token
     thinkingLevel: Option<String>       // "off" | "low" | "medium" | "high"
     
-    // 上下文压缩
+    // 上下文压缩（开关在平面上，预算口径收在 CompactionConfig，见 §8.5）
     compactionEnabled: Bool             // 默认 true
-    compactionReserveTokens: UInt32     // 保留缓冲，默认 16384
-    keepRecentTokens: UInt32            // 保留最近 Token 数，默认 20000
+    compaction: Option<CompactionConfig>  // 阈值/余量/保留/摘要调用；None = 用默认值
     
     // 元数据
     tags: List<String>
@@ -907,8 +906,8 @@ Provider 直接对接 LLM REST API，初始实现 `OpenAIProvider`（兼容 Open
 `contextWindow` 是 input+output 的总和 —— 压缩要按 `窗口 - 完成预算 - 余量` 算消息预算。
 
 agent **不持有**窗口（它的 `provider` / `model` 只是选型）：把端点的事实写进 agent，等于同一个
-端点被两个 agent 声明成两个数、必有一个是错的。想让某个 agent 更早压缩用 `compactionReserveTokens`
-/ `keepRecentTokens`。
+端点被两个 agent 声明成两个数、必有一个是错的。想让某个 agent 更早压缩用 `[agent.compaction]`
+的 `thresholdRatio` / `retainRatio` / `headroomTokens`。
 
 取兜底值时必须留痕：静默按偏小的值提前压缩，表现为"模型无缘无故失忆"，而下游看不到任何线索。
 
@@ -1088,8 +1087,9 @@ public interface Hook {
 | :--- | :--- | :--- |
 | 最大对话轮次 | 20 | `maxTurns` |
 | 最大输出 Token | 4096 | `maxOutputTokens` |
-| 压缩缓冲 Token | 16384 | `compactionReserveTokens` |
-| 保留最近 Token | 20000 | `keepRecentTokens` |
+| 压缩触发阈值 | `min(W × 0.8, W − O − headroom)` | `[agent.compaction] thresholdRatio` / `headroomTokens` |
+| 压缩保留近期历史 | 消息预算的 16% | `retainRatio` / `retainTokens` |
+| 溢出恢复重试 | 1 次 | `maxOverflowRetries`（0 = 关闭） |
 | 上下文窗口（未知模型） | 兜底 8192 并警告 | `[[provider.model]]` / `withModelContext(provider, model, n)` / `withDefaultContextWindow`（0 = 禁用压缩） |
 | 并发工具执行 | 根据 `ExecutionMode` | 串行/并行 |
 | 最大工具结果字符 | 2000（摘要场景） | 硬编码 |

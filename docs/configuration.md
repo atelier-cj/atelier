@@ -77,25 +77,43 @@ command = "npx @playwright/mcp"
 - 系统提示中的 `[可用 MCP 服务]` 目录段展示全部服务（名称/版本/工具清单），激活服务标注 `[已加载]`
 - 服务名不能包含下划线（工具名 `mcp_<server>_<tool>` 前缀解析依赖）
 
-### 压缩增强（可选）
+### 上下文压缩（可选）
 
-不配置 `[agent.compaction]` 时使用平铺字段（`compactionEnabled`/`compactionReserveTokens`/`keepRecentTokens`），配置后嵌套优先：
+`compactionEnabled` 是开关；预算口径全在 `[agent.compaction]` 里（dsh 同款）：
+
+```text
+W = 本路由的上下文窗口（[[provider.model]] / provider 自报）
+O = 本次请求的输出上限（maxOutputTokens；0 = 用模型事实）
+messageBudget  = W − O              留给消息的部分
+pressureBudget = messageBudget − B  B = headroomTokens
+threshold      = floor(min(W × thresholdRatio, pressureBudget))   越过它才压
+retain         = retainTokens ?? floor(messageBudget × retainRatio)  压完逐字保留多少
+```
 
 ```toml
 [[agent]]
 name = "assistant"
-# ... 其他字段 ...
-compactionEnabled = true          # 平铺配置（可选，兼容旧配置）
+compactionEnabled = true           # 开关（可选，默认 true）
 
-# [agent.compaction]              # 嵌套配置（可选，优先于平铺字段）
+# [agent.compaction]               # 预算与摘要调用（可选，缺省值见下）
 # enabled = true
-# reserveTokens = 16384
-# keepRecentTokens = 20000
+# thresholdRatio = 0.8             # 阈值占窗口比例
+# headroomTokens = 65536           # 完成预算之外的额外余量（估算误差/图片/工具声明的缓冲）
+# retainRatio = 0.16               # 逐字保留的近期历史占"消息预算"的比例
+# retainTokens = 20000             # 绝对保留预算（与 retainRatio 互斥，给了就以它为准）
+# maxOverflowRetries = 1           # provider 报超窗后的最大恢复重试次数（0 = 关闭恢复）
+# summaryMaxTokens = 0             # 摘要子调用输出上限；0 = 跟随 headroomTokens
 # summaryModel = "deepseek-chat"   # 摘要模型，缺省复用主模型
 # promptTemplate = "压缩以下对话：\n{{conversation}}"
 # outputSchema = { required = ["goal"], types = { goal = "string" } }
 ```
 
+- **三个不变量**：`W − O > 0`、`− B > 0`、`retain < threshold`。任一不成立就**不压**：
+  日志留一条警告（每个原因一次），而**溢出恢复仍然可用** —— 配置坏了不该让会话不可用。
+  小窗口部署要么调大窗口，要么把 `headroomTokens` 收小（默认 64k 是为大窗口模型留的余量）。
+- **溢出恢复**：provider 明确报"超上下文窗口"（`maximum context length` / `prompt is too long` 等）
+  时，绕过阈值压掉最大的一段头部（只保最后一条用户消息起的内容，不拆散工具调用对），
+  再用新历史重试同一请求，次数受 `maxOverflowRetries` 限制。
 - 压缩摘要通过**独立子调用**生成（无 system/tools，不影响主对话缓存命中）
 - `promptTemplate` 支持 mustache 变量：`{{conversation}}` / `{{previous_summary}}` / `{{max_tokens}}` / `{{#previous_summary}}` 条件块
 - `outputSchema` 极简校验（required 必填 + types 类型断言），校验失败自动降级为占位摘要
@@ -147,8 +165,7 @@ let config = AgentConfig(
     maxOutputTokens: UInt32(4096),
     thinkingLevel: None,
     compactionEnabled: true,
-    compactionReserveTokens: UInt32(16384),
-    keepRecentTokens: UInt32(20000),
+    compaction: None,                       // 预算口径见「上下文压缩」节
     maxToolCalls: UInt32(50),
     toolTimeout: UInt32(30),
     minToolInterval: UInt32(0),
@@ -178,8 +195,7 @@ let config = AgentConfig(
 | `maxVerifyPasses` | `UInt32` | `0` | 收尾前自验次数上限：宣布完成时先要求实操核对再收尾；`0` = 关闭 |
 | `thinkingLevel` | `Option<String>` | `None` | 思考模式（deepseek-reasoner 可用） |
 | `compactionEnabled` | `Bool` | `true` | 启用上下文压缩 |
-| `compactionReserveTokens` | `UInt32` | `16384` | 压缩保留缓冲 |
-| `keepRecentTokens` | `UInt32` | `20000` | 保留最近 Token 数 |
+| `compaction` | `Option<CompactionConfig>` | `None` | 压缩预算与摘要调用（阈值/余量/保留/溢出恢复），见「上下文压缩」节 |
 | `maxToolCalls` | `UInt32` | `50` | 单次运行最大工具调用数 |
 | `toolTimeout` | `UInt32` | `30` | **只读**（`Parallel`）工具的单次墙钟预算（秒）；`0` = 不限时 |
 | `sideEffectToolTimeout` | `UInt32` | `300` | **有副作用**（`Sequential`）工具的预算（秒）；`0` = 不限时 |

@@ -90,7 +90,7 @@ func makeSubManager(provider: Provider, idleTimeoutSec!: Int64 = 0): (SubAgentMa
 func subConfig(): AgentConfig {
     AgentConfig("t", None, "", None, "m", None, ArrayList(), ArrayList(), Int64(0),
         UInt32(20), Float32(0.7), UInt32(4096), None,
-        false, UInt32(16384), UInt32(20000), None, UInt32(50), UInt32(30), UInt32(0),
+        false, None, UInt32(50), UInt32(30), UInt32(0),
         ArrayList(), None, Int64(0), Int64(0))
 }
 
@@ -662,7 +662,7 @@ public func parentTools_startAndWatchInTurn() {
     // 父 config：provider 显式 parent
     let parentCfg = AgentConfig("p", None, "", None, "m", Some("parent"), ArrayList(), ArrayList(), Int64(0),
         UInt32(20), Float32(0.7), UInt32(4096), None,
-        false, UInt32(16384), UInt32(20000), None, UInt32(50), UInt32(30), UInt32(0),
+        false, None, UInt32(50), UInt32(30), UInt32(0),
         ArrayList(), None, Int64(0), Int64(0))
     let runtime = testRuntime(parentCfg, parentProvider, toolReg, store, trustMgr,
         skillReg, agentReg, providerReg, McpManager())

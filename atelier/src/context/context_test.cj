@@ -16,18 +16,72 @@ func estimateText() {
 }
 
 @Test
-func compactLarge() {
-    let msgs = ArrayList<Message>()
-    for (i in 0..20) { msgs.add(msg("message number ${i}")) }
-    let result = compactMessages(msgs, 100, 20, 20)
-    @Expect(result.size > 0, true)
+func compactSpec_thresholdIsMinOfRatioAndPressureBudget() {
+    let cc = CompactionConfig()   // ratio 0.8 / headroom 65536
+    // W=200000, O=8192 → messageBudget=191808, pressureBudget=126272
+    // 0.8×W=160000 > pressureBudget → 取 pressureBudget
+    let r = resolveCompactSpec(cc, 200000, 8192)
+    match (r.spec) {
+        case Some(spec) =>
+            @Expect(spec.messageBudget, 191808)
+            @Expect(spec.thresholdTokens, 126272)
+            // retain = messageBudget × 0.16
+            @Expect(spec.retainTokens, Int64(Float64(191808) * 0.16))
+            // 摘要输出上限默认跟随 headroom
+            @Expect(spec.summaryMaxTokens, 65536)
+        case None => @Fail("spec should resolve: " + r.reason)
+    }
+
+    // 中小窗口：默认 64k 余量吃掉大部分压力预算 → 取 pressureBudget（这正是"小窗口要自己调余量"）
+    let narrow = resolveCompactSpec(cc, 100000, 8192)
+    match (narrow.spec) {
+        case Some(spec) => @Expect(spec.thresholdTokens, 26272)
+        case None => @Fail("spec should resolve: " + narrow.reason)
+    }
+
+    // 收紧余量后：0.8×W 才是更小的那一侧
+    let tightened = CompactionConfig(true, 0.8, 1024, 0.16, None, 1, DEFAULT_PROMPT_TEMPLATE, None, None)
+    match (resolveCompactSpec(tightened, 100000, 8192).spec) {
+        case Some(spec) => @Expect(spec.thresholdTokens, 80000)
+        case None => @Fail("spec should resolve")
+    }
 }
 
 @Test
-func smallFits() {
-    let msgs = ArrayList<Message>([msg("hi")])
-    let result = compactMessages(msgs, 100, 20, 20)
-    @Expect(result.size, 1)
+func compactSpec_invariantsBecomeReasons() {
+    let cc = CompactionConfig()
+    // 窗口未知：不压缩（也不该猜）
+    match (resolveCompactSpec(cc, 0, 8192).spec) {
+        case None => ()
+        case Some(_) => @Fail("unknown window must not compact")
+    }
+    // 输出预留吃掉整个窗口
+    match (resolveCompactSpec(cc, 8192, 8192).spec) {
+        case None => ()
+        case Some(_) => @Fail("zero message budget must not compact")
+    }
+    // 余量吃掉整个消息预算
+    let tight = CompactionConfig(true, 0.8, 8192, 0.16, None, 1, DEFAULT_PROMPT_TEMPLATE, None, None)
+    match (resolveCompactSpec(tight, 16384, 8192).spec) {
+        case None => ()
+        case Some(_) => @Fail("zero pressure budget must not compact")
+    }
+    // 保留不小于阈值
+    let bad = CompactionConfig(true, 0.8, 65536, 0.16, Some(999999), 1, DEFAULT_PROMPT_TEMPLATE, None, None)
+    let r = resolveCompactSpec(bad, 200000, 8192)
+    match (r.spec) {
+        case None => @Expect(r.reason.contains("retain"), true)
+        case Some(_) => @Fail("retain >= threshold must not compact")
+    }
+}
+
+@Test
+func compactSpec_absoluteRetainWins() {
+    let cc = CompactionConfig(true, 0.8, 1024, 0.16, Some(4096), 1, DEFAULT_PROMPT_TEMPLATE, None, None)
+    match (resolveCompactSpec(cc, 100000, 8192).spec) {
+        case Some(spec) => @Expect(spec.retainTokens, 4096)
+        case None => @Fail("spec should resolve")
+    }
 }
 
 @Test
@@ -128,7 +182,7 @@ func compactionConfig_previousSummaryConditional() {
 @Test
 func compactionConfig_customTemplate() {
     let cfg = CompactionConfig(
-        true, 16384, 20000,
+        true, 0.8, 16384, 0.16, None, 1,
         "压缩以下对话：\n{{conversation}}\n{{#previous_summary}}旧摘要：{{previous_summary}}{{/previous_summary}}",
         None, None)
     let out = renderCompactionPrompt(cfg, "对话", Some("旧"), 16384)
@@ -201,21 +255,6 @@ func compactWithSummary_singleBigMessageTriggersCut() {
     match (out[1]) {
         case um: UserMessage => @Expect(um.content.blocks().size, 1)
         case _ => @Fail("expected tail user message")
-    }
-}
-
-// 回归：compactMessages 同样修复（单条大消息达标时替换为摘要）
-@Test
-func compactMessages_singleBigMessageTriggersCut() {
-    let msgs = ArrayList<Message>()
-    msgs.add(UserMessage(ContentList.ofText(bigText()), 0))  // 30 tokens
-    msgs.add(UserMessage(ContentList.ofText("tail"), 0))     // 6 tokens
-    // total=36 > reserve=5，threshold=30-5=25 < 36 → 触发压缩
-    let out = compactMessages(msgs, 30, 5, 10)
-    @Expect(out.size, 2)
-    match (out[0]) {
-        case cm: CompactionMessage => @Expect(cm.tokensBefore, 30)
-        case _ => @Fail("expected CompactionMessage")
     }
 }
 
@@ -317,4 +356,51 @@ func compactionConfig_cutCrossPairsConverges() {
     msgs.add(UserMessage(ContentList.ofText("m1"), 0))
     let cut = protectCutPoint(msgs, 3)
     @Expect(cut, 0)  // 前移保留全部对，配对完整
+}
+
+// ---------- 溢出恢复的纯函数 ----------
+
+@Test
+func overflowErrorMatcher_knownPhrasings() {
+    // 各家措辞不同：按已知措辞匹配，大小写不敏感
+    @Expect(isContextOverflowError("Error 400: This model's maximum context length is 8192 tokens"), true)
+    @Expect(isContextOverflowError("invalid_request_error: context_length_exceeded"), true)
+    @Expect(isContextOverflowError("prompt is too long: 210000 tokens > 200000 maximum"), true)
+    @Expect(isContextOverflowError("Input is too long for requested model"), true)
+    @Expect(isContextOverflowError("Please reduce the length of the messages"), true)
+    // 无关错误不能误判（误判会白花一次摘要调用）
+    @Expect(isContextOverflowError("connection reset by peer"), false)
+    @Expect(isContextOverflowError("401 Unauthorized: invalid api key"), false)
+    @Expect(isContextOverflowError(""), false)
+}
+
+@Test
+func compactFrom_keepsTailAndProtectsPairing() {
+    let msgs = ArrayList<Message>()
+    msgs.add(UserMessage(ContentList.ofText("m1"), 0))
+    msgs.add(AssistantMessage(ContentList.ofText("a1"), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0))
+    msgs.add(UserMessage(ContentList.ofText("m2"), 0))
+
+    // 保留最后一条用户消息起的内容，前面换成摘要
+    @Expect(lastUserIndex(msgs), 2)
+    let out = compactFrom(msgs, 2, "摘要", 100)
+    @Expect(out.size, 2)
+    match (out[0]) {
+        case cm: CompactionMessage => @Expect(cm.summary, "摘要")
+        case _ => @Fail("expected CompactionMessage first")
+    }
+    match (out[1]) {
+        case um: UserMessage => @Expect(um.content.blocks().size, 1)
+        case _ => @Fail("expected tail user message")
+    }
+
+    // 切点落在 0 = 没有可压的头部 → 原样返回（绝不把事情弄得更糟）
+    @Expect(compactFrom(msgs, 0, "摘要", 100).size, 3)
+}
+
+@Test
+func lastUserIndex_noneWhenNoUserMessage() {
+    let msgs = ArrayList<Message>()
+    msgs.add(AssistantMessage(ContentList.ofText("a1"), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0))
+    @Expect(lastUserIndex(msgs), -1)
 }

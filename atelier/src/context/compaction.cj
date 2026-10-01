@@ -7,42 +7,83 @@ import stdx.serialization.serialization.*
 import stdx.encoding.json.stream.*
 import jsonvalue.*
 
-public func compactMessages(messages: ArrayList<Message>, contextWindow: Int64, reserveTokens: Int64, keepRecentTokens: Int64): ArrayList<Message> {
-    let total = estimateTokens(messages)
-    if (total <= reserveTokens || contextWindow == 0) {
-        return messages  // no compaction needed
-    }
+/**
+ * 压力预算：把宿主声明的窗口与**生效请求输出上限**换算成"什么时候压、压完保留多少"。
+ *
+ * 口径（与 dsh 一致）：
+ * ```text
+ * messageBudget  = W − O              // 窗口里留给消息的部分（O = 本次请求的输出预留）
+ * pressureBudget = messageBudget − B  // 再留一笔余量 B（估算误差 / 图片 / 工具声明）
+ * threshold      = floor(min(W × ratio, pressureBudget))
+ * retain         = retainTokens ?? floor(messageBudget × retainRatio)
+ * ```
+ *
+ * 三个不变量（`messageBudget > 0`、`pressureBudget > 0`、`retain < threshold`）任一不成立
+ * 都**不压**：`spec = None` + `reason` 说明原因，调用方留痕一次即可 —— 配置坏了不该把会话
+ * 变成不可用（溢出恢复那条路仍然可用）。
+ */
+public struct CompactSpec {
+    /** 本路由的窗口 */
+    public let contextWindow: Int64
+    /** 窗口里留给消息的预算（W − O） */
+    public let messageBudget: Int64
+    /** 越过它就该压缩 */
+    public let thresholdTokens: Int64
+    /** 压缩后逐字保留的近期历史预算 */
+    public let retainTokens: Int64
+    /** 摘要子调用的输出上限 */
+    public let summaryMaxTokens: Int64
 
-    let threshold = contextWindow - reserveTokens
-    if (total <= threshold) {
-        return messages
+    public init(contextWindow: Int64, messageBudget: Int64, thresholdTokens: Int64,
+        retainTokens: Int64, summaryMaxTokens: Int64) {
+        this.contextWindow = contextWindow
+        this.messageBudget = messageBudget
+        this.thresholdTokens = thresholdTokens
+        this.retainTokens = retainTokens
+        this.summaryMaxTokens = summaryMaxTokens
     }
+}
 
-    // Simple strategy: keep the last keepRecentTokens worth of messages,
-    // summarize everything before that
-    var running: Int64 = 0
-    var cutIndex: Int64 = 0
-    var i = messages.size - 1
-    while (i >= 0 && running < keepRecentTokens) {
-        running += estimateMessageTokens(messages[i])
-        if (running >= keepRecentTokens) { break }
-        i--
-    }
-    cutIndex = i + 1
-    cutIndex = protectCutPoint(messages, cutIndex)
-    if (cutIndex <= 0) {
-        return messages  // all messages fit
-    }
+/** 解析结果：`spec` 为 None 时 `reason` 说明为什么不压（配置错误） */
+public struct CompactSpecResolution {
+    public let spec: Option<CompactSpec>
+    public let reason: String
 
-    // Replace cut messages with a summary
-    let compacted = ArrayList<Message>()
-        let subList = ArrayList<Message>()
-        for (k in 0..cutIndex) { subList.add(messages[Int64(k)]) }
-        compacted.add(CompactionMessage("... ${cutIndex} previous messages summarized ...", estimateTokens(subList), 0))
-        for (j in cutIndex..Int64(messages.size)) {
-        compacted.add(messages[Int64(j)])
+    public init(spec: Option<CompactSpec>, reason: String) {
+        this.spec = spec
+        this.reason = reason
     }
-    compacted
+}
+
+public func resolveCompactSpec(cc: CompactionConfig, contextWindow: Int64,
+    reservedCompletionTokens: Int64): CompactSpecResolution {
+    if (contextWindow <= 0) {
+        // 窗口未知 = 不做主动压缩（旧行为一致：拿不到窗口就不猜）
+        return CompactSpecResolution(None, "context window unknown")
+    }
+    let messageBudget = contextWindow - reservedCompletionTokens
+    if (messageBudget <= 0) {
+        return CompactSpecResolution(None,
+            "reserves ${reservedCompletionTokens} completion tokens of a ${contextWindow}-token window, leaving no message budget: raise the model contextWindow above the effective maxOutputTokens")
+    }
+    let pressureBudget = messageBudget - cc.headroomTokens
+    if (pressureBudget <= 0) {
+        return CompactSpecResolution(None,
+            "reserves ${reservedCompletionTokens} completion + ${cc.headroomTokens} headroom of a ${contextWindow}-token window, leaving no pressure budget: reduce maxOutputTokens/headroomTokens or raise the contextWindow")
+    }
+    var threshold = Int64(Float64(contextWindow) * cc.thresholdRatio)
+    if (pressureBudget < threshold) { threshold = pressureBudget }
+    let retain = match (cc.retainTokens) {
+        case Some(v) => v
+        case None => Int64(Float64(messageBudget) * cc.retainRatio)
+    }
+    if (retain >= threshold) {
+        return CompactSpecResolution(None,
+            "retain (${retain}) must be less than the compaction threshold (${threshold})")
+    }
+    let summaryMax = if (cc.summaryMaxTokens > 0) { cc.summaryMaxTokens } else { cc.headroomTokens }
+    CompactSpecResolution(Some(CompactSpec(contextWindow, messageBudget, threshold, retain, summaryMax)),
+        "")
 }
 
 public let DEFAULT_PROMPT_TEMPLATE = """
@@ -71,26 +112,46 @@ public let DEFAULT_PROMPT_TEMPLATE = """
 
 public struct CompactionConfig <: JsonSerializable & JsonDeserializable<CompactionConfig> {
     public let enabled: Bool
-    public let reserveTokens: Int64
-    public let keepRecentTokens: Int64
+    /** 触发阈值占窗口的比例（dsh 默认 0.8） */
+    public let thresholdRatio: Float64
+    /** 输出预留之外的额外压力余量（默认 65536；估算误差/图片/工具声明的缓冲） */
+    public let headroomTokens: Int64
+    /** 逐字保留的近期历史占"消息预算"的比例（默认 0.16） */
+    public let retainRatio: Float64
+    /** 绝对保留预算；给定时压过 [retainRatio] */
+    public let retainTokens: Option<Int64>
+    /** 已确认上下文溢出后的最大重试次数（0 = 关闭溢出恢复） */
+    public let maxOverflowRetries: Int64
+    /** 摘要子调用的输出上限；0 = 跟随 [headroomTokens] */
+    public let summaryMaxTokens: Int64
     public let promptTemplate: String
     public let outputSchema: Option<JsonValue>
     public let summaryModel: Option<String>
 
     public init() {
         this.enabled = true
-        this.reserveTokens = 16384
-        this.keepRecentTokens = 20000
+        this.thresholdRatio = 0.8
+        this.headroomTokens = 65536
+        this.retainRatio = 0.16
+        this.retainTokens = None
+        this.maxOverflowRetries = 1
+        this.summaryMaxTokens = 0
         this.promptTemplate = DEFAULT_PROMPT_TEMPLATE
         this.outputSchema = None
         this.summaryModel = None
     }
 
-    public init(enabled: Bool, reserveTokens: Int64, keepRecentTokens: Int64,
-        promptTemplate: String, outputSchema: Option<JsonValue>, summaryModel: Option<String>) {
+    public init(enabled: Bool, thresholdRatio: Float64, headroomTokens: Int64,
+        retainRatio: Float64, retainTokens: Option<Int64>, maxOverflowRetries: Int64,
+        promptTemplate: String, outputSchema: Option<JsonValue>, summaryModel: Option<String>,
+        summaryMaxTokens!: Int64 = 0) {
         this.enabled = enabled
-        this.reserveTokens = reserveTokens
-        this.keepRecentTokens = keepRecentTokens
+        this.thresholdRatio = thresholdRatio
+        this.headroomTokens = headroomTokens
+        this.retainRatio = retainRatio
+        this.retainTokens = retainTokens
+        this.maxOverflowRetries = maxOverflowRetries
+        this.summaryMaxTokens = summaryMaxTokens
         this.promptTemplate = promptTemplate
         this.outputSchema = outputSchema
         this.summaryModel = summaryModel
@@ -99,8 +160,12 @@ public struct CompactionConfig <: JsonSerializable & JsonDeserializable<Compacti
     public func toJson(w: JsonWriter): Unit {
         w.startObject()
         w.writeName("enabled").writeValue(this.enabled)
-        w.writeName("reserveTokens").writeValue(this.reserveTokens)
-        w.writeName("keepRecentTokens").writeValue(this.keepRecentTokens)
+        w.writeName("thresholdRatio").writeValue(this.thresholdRatio)
+        w.writeName("headroomTokens").writeValue(this.headroomTokens)
+        w.writeName("retainRatio").writeValue(this.retainRatio)
+        w.writeName("retainTokens").writeValue(this.retainTokens)
+        w.writeName("maxOverflowRetries").writeValue(this.maxOverflowRetries)
+        w.writeName("summaryMaxTokens").writeValue(this.summaryMaxTokens)
         w.writeName("promptTemplate").writeValue(this.promptTemplate)
         w.writeName("outputSchema").writeValue(this.outputSchema)
         w.writeName("summaryModel").writeValue(this.summaryModel)
@@ -109,8 +174,12 @@ public struct CompactionConfig <: JsonSerializable & JsonDeserializable<Compacti
 
     public static func fromJson(r: JsonReader): CompactionConfig {
         var enabled = true
-        var reserve = Int64(16384)
-        var keepRecent = Int64(20000)
+        var ratio = Float64(0.8)
+        var headroom = Int64(65536)
+        var retainRatio = Float64(0.16)
+        var retain: Option<Int64> = None
+        var overflowRetries = Int64(1)
+        var summaryMax = Int64(0)
         var template = DEFAULT_PROMPT_TEMPLATE
         var schema: Option<JsonValue> = None
         var summaryModel: Option<String> = None
@@ -118,8 +187,12 @@ public struct CompactionConfig <: JsonSerializable & JsonDeserializable<Compacti
         while (r.peek() != EndObject) {
             match (r.readName()) {
                 case "enabled" => enabled = r.readValue<Bool>()
-                case "reserveTokens" => reserve = r.readValue<Int64>()
-                case "keepRecentTokens" => keepRecent = r.readValue<Int64>()
+                case "thresholdRatio" => ratio = r.readValue<Float64>()
+                case "headroomTokens" => headroom = r.readValue<Int64>()
+                case "retainRatio" => retainRatio = r.readValue<Float64>()
+                case "retainTokens" => retain = r.readValue<Option<Int64>>()
+                case "maxOverflowRetries" => overflowRetries = r.readValue<Int64>()
+                case "summaryMaxTokens" => summaryMax = r.readValue<Int64>()
                 case "promptTemplate" => template = r.readValue<String>()
                 case "outputSchema" =>
                     if (r.peek() == JsonNull) {
@@ -133,7 +206,8 @@ public struct CompactionConfig <: JsonSerializable & JsonDeserializable<Compacti
             }
         }
         r.endObject()
-        CompactionConfig(enabled, reserve, keepRecent, template, schema, summaryModel)
+        CompactionConfig(enabled, ratio, headroom, retainRatio, retain, overflowRetries,
+            template, schema, summaryModel, summaryMaxTokens: summaryMax)
     }
 }
 
@@ -222,11 +296,11 @@ public func validateSummary(config: CompactionConfig, schema: HashMap<String, Js
     true
 }
 
-// 切点替换：保留最近 keepRecentTokens，之前替换为 CompactionMessage(summary, tokensBefore, 0)
-// keepRecentTokens <= 0 时全部替换；单条消息即达标时仅保留其后消息
-public func compactWithSummary(messages: ArrayList<Message>, keepRecentTokens: Int64,
+// 切点替换：保留最近 retainTokens，之前替换为 CompactionMessage(summary, tokensBefore, 0)
+// retainTokens <= 0 时全部替换；单条消息即达标时仅保留其后消息
+public func compactWithSummary(messages: ArrayList<Message>, retainTokens: Int64,
     summary: String, tokensBefore: Int64): ArrayList<Message> {
-    if (keepRecentTokens <= 0) {
+    if (retainTokens <= 0) {
         let r = ArrayList<Message>()
         r.add(CompactionMessage(summary, tokensBefore, 0))
         return r
@@ -234,9 +308,9 @@ public func compactWithSummary(messages: ArrayList<Message>, keepRecentTokens: I
     var running: Int64 = 0
     var cutIndex: Int64 = 0
     var i = messages.size - 1
-    while (i >= 0 && running < keepRecentTokens) {
+    while (i >= 0 && running < retainTokens) {
         running += estimateMessageTokens(messages[i])
-        if (running >= keepRecentTokens) { break }
+        if (running >= retainTokens) { break }
         i--
     }
     cutIndex = i + 1
@@ -248,6 +322,65 @@ public func compactWithSummary(messages: ArrayList<Message>, keepRecentTokens: I
         compacted.add(messages[Int64(j)])
     }
     compacted
+}
+
+/**
+ * 从 `keepFrom` 起保留，之前替换为摘要（**溢出恢复**用：尽量多压，只留最后一段）。
+ *
+ * 与 [compactWithSummary] 的差别是切点由调用方直接指定（不按 token 预算回退），
+ * 仍然过 [protectCutPoint]，保证不拆散工具调用对；切点落到 0 表示压无可压。
+ */
+public func compactFrom(messages: ArrayList<Message>, keepFrom: Int64,
+    summary: String, tokensBefore: Int64): ArrayList<Message> {
+    let cut = protectCutPoint(messages, keepFrom)
+    if (cut <= 0) { return messages }
+    let out = ArrayList<Message>()
+    out.add(CompactionMessage(summary, tokensBefore, 0))
+    for (j in cut..Int64(messages.size)) {
+        out.add(messages[Int64(j)])
+    }
+    out
+}
+
+// 最后一条用户消息的下标（-1 = 没有）；溢出恢复时至少保住它，否则等于把本次输入丢了
+public func lastUserIndex(messages: ArrayList<Message>): Int64 {
+    var i = Int64(messages.size) - 1
+    while (i >= 0) {
+        match (messages[i]) {
+            case _: UserMessage => return i
+            case _ => ()
+        }
+        i--
+    }
+    -1
+}
+
+/**
+ * provider 报的是不是"超上下文窗口"（可恢复）。
+ *
+ * 各家措辞不统一（OpenAI `maximum context length` / Anthropic `prompt is too long` /
+ * DeepSeek 同 OpenAI），所以按**已知措辞**匹配小写文本；匹配不到就当普通失败处理——
+ * 宁可少恢复一次，也不要把无关错误误判成溢出（那会白花一次摘要调用）。
+ *
+ * 长期做法是让 provider 层抛带错误码的异常（llm_api 侧），这里先按文本兜住。
+ */
+public func isContextOverflowError(errorText: String): Bool {
+    let t = errorText.toAsciiLower()
+    let markers = [
+        "maximum context length",
+        "context length exceeded",
+        "context_length_exceeded",
+        "context window exceeded",
+        "context_window_exceeded",
+        "prompt is too long",
+        "input is too long",
+        "too many tokens",
+        "reduce the length of the messages"
+    ]
+    for (m in markers) {
+        if (t.contains(m)) { return true }
+    }
+    false
 }
 
 // 切点配对保护：cutIndex 不拆散 ToolCall ↔ ToolResult 对。

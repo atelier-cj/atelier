@@ -26,8 +26,7 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
     public let maxVerifyPasses: UInt32
     public let thinkingLevel: Option<String>
     public let compactionEnabled: Bool
-    public let compactionReserveTokens: UInt32
-    public let keepRecentTokens: UInt32
+    // 压缩策略（阈值/保留/摘要调用）；None = 用 CompactionConfig 的默认值
     public let compaction: Option<CompactionConfig>
     public let maxToolCalls: UInt32
     // 只读（Parallel）工具的墙钟预算（秒）；0 = 不限时
@@ -58,7 +57,7 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
         mcpCooldownTurns: Int64,
         maxTurns: UInt32, temperature: Float32, maxOutputTokens: UInt32,
         thinkingLevel: Option<String>,
-        compactionEnabled: Bool, compactionReserveTokens: UInt32, keepRecentTokens: UInt32,
+        compactionEnabled: Bool,
         compaction: Option<CompactionConfig>,
         maxToolCalls: UInt32, toolTimeout: UInt32, minToolInterval: UInt32,
         tags: ArrayList<String>,
@@ -79,7 +78,6 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
         this.maxTurns = maxTurns; this.temperature = temperature; this.maxOutputTokens = maxOutputTokens
         this.thinkingLevel = thinkingLevel
         this.compactionEnabled = compactionEnabled
-        this.compactionReserveTokens = compactionReserveTokens; this.keepRecentTokens = keepRecentTokens
         this.compaction = compaction
         this.maxToolCalls = maxToolCalls
         this.toolTimeout = toolTimeout
@@ -107,8 +105,7 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
         AgentConfig(this.name, this.description, this.systemPrompt, this.userPromptTemplate,
             this.model, this.provider, merged, this.skills, this.mcpCooldownTurns,
             this.maxTurns, this.temperature, this.maxOutputTokens, this.thinkingLevel,
-            this.compactionEnabled, this.compactionReserveTokens, this.keepRecentTokens,
-            this.compaction, this.maxToolCalls, this.toolTimeout, this.minToolInterval,
+            this.compactionEnabled, this.compaction, this.maxToolCalls, this.toolTimeout, this.minToolInterval,
             this.tags, this.createdBy, this.createdAt, this.updatedAt,
             supportsVision: this.supportsVision,
             toolPresentation: this.toolPresentation,
@@ -129,8 +126,7 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
         AgentConfig(this.name, this.description, this.systemPrompt, this.userPromptTemplate,
             model, this.provider, this.tools, this.skills, this.mcpCooldownTurns,
             this.maxTurns, this.temperature, this.maxOutputTokens, this.thinkingLevel,
-            this.compactionEnabled, this.compactionReserveTokens, this.keepRecentTokens,
-            this.compaction, this.maxToolCalls, this.toolTimeout, this.minToolInterval,
+            this.compactionEnabled, this.compaction, this.maxToolCalls, this.toolTimeout, this.minToolInterval,
             this.tags, this.createdBy, this.createdAt, this.updatedAt,
             supportsVision: this.supportsVision,
             toolPresentation: this.toolPresentation,
@@ -146,7 +142,7 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
             "", None, "", None, "", None,
             ArrayList(), ArrayList(), Int64(0),
             UInt32(20), Float32(0.7), UInt32(4096), None,
-            true, UInt32(16384), UInt32(20000), None, UInt32(50), UInt32(30), UInt32(0),
+            true, None, UInt32(50), UInt32(30), UInt32(0),
             ArrayList(), None, Int64(0), Int64(0))
     }
 
@@ -161,8 +157,6 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
         w.writeName("maxLengthContinuations").writeValue(Int64(this.maxLengthContinuations))
         w.writeName("maxVerifyPasses").writeValue(Int64(this.maxVerifyPasses))
         w.writeName("compactionEnabled").writeValue(this.compactionEnabled)
-        w.writeName("compactionReserveTokens").writeValue(Int64(this.compactionReserveTokens))
-        w.writeName("keepRecentTokens").writeValue(Int64(this.keepRecentTokens))
         w.writeName("compaction").writeValue(this.compaction)
         w.writeName("maxToolCalls").writeValue(Int64(this.maxToolCalls))
         w.writeName("toolTimeout").writeValue(Int64(this.toolTimeout))
@@ -197,7 +191,6 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
         var maxVerifyPasses = UInt32(0)
         var thinkingLevel: Option<String> = None
         var compactionEnabled = true
-        var compactionReserveTokens = UInt32(16384); var keepRecentTokens = UInt32(20000)
         var compaction: Option<CompactionConfig> = None
         var maxToolCalls = UInt32(50)
         var toolTimeout = UInt32(30)
@@ -229,8 +222,6 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
                 case "maxVerifyPasses" => maxVerifyPasses = UInt32(r.readValue<Int64>())
                 case "thinkingLevel" => thinkingLevel = r.readValue<Option<String>>()
                 case "compactionEnabled" => compactionEnabled = r.readValue<Bool>()
-                case "compactionReserveTokens" => compactionReserveTokens = UInt32(r.readValue<Int64>())
-                case "keepRecentTokens" => keepRecentTokens = UInt32(r.readValue<Int64>())
                 case "compaction" => compaction = r.readValue<Option<CompactionConfig>>()
                 case "maxToolCalls" => maxToolCalls = UInt32(r.readValue<Int64>())
                 case "toolTimeout" => toolTimeout = UInt32(r.readValue<Int64>())
@@ -252,7 +243,7 @@ public struct AgentConfig <: JsonSerializable & JsonDeserializable<AgentConfig> 
         AgentConfig(name, description, systemPrompt, userPromptTemplate,
             model, provider, tools, skills, mcpCooldownTurns,
             maxTurns, temperature, maxOutputTokens, thinkingLevel,
-            compactionEnabled, compactionReserveTokens, keepRecentTokens, compaction,
+            compactionEnabled, compaction,
             maxToolCalls, toolTimeout, minToolInterval,
             tags, createdBy, createdAt, updatedAt, supportsVision: supportsVision,
             toolPresentation: toolPresentation,

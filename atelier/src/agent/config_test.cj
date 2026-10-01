@@ -18,7 +18,7 @@ func config_createWithAllFields() {
         "gpt-4o", Some("openai"),
         tools, skills, Int64(0),
         UInt32(10), Float32(0.3), UInt32(8192), Some("low"),
-        true, UInt32(20000), UInt32(30000), None, UInt32(30), UInt32(30), UInt32(0),
+        true, None, UInt32(30), UInt32(30), UInt32(0),
         tags, Some("admin"), Int64(1000), Int64(2000))
 
     @Expect(cfg.name, "data-assistant")
@@ -30,8 +30,11 @@ func config_createWithAllFields() {
     @Expect(cfg.temperature, Float32(0.3)); @Expect(cfg.maxOutputTokens, UInt32(8192))
     @Expect(cfg.thinkingLevel, Some("low"))
     @Expect(cfg.compactionEnabled, true)
-    @Expect(cfg.compactionReserveTokens, UInt32(20000))
-    @Expect(cfg.keepRecentTokens, UInt32(30000))
+    // 预算口径已收进 CompactionConfig（阈值/余量/保留），平面上只留开关
+    match (cfg.compaction) {
+        case None => ()
+        case Some(_) => @Fail("compaction should default to None (策略用 CompactionConfig 默认值)")
+    }
     @Expect(cfg.maxToolCalls, UInt32(30))
     @Expect(cfg.toolTimeout, UInt32(30))
     @Expect(cfg.minToolInterval, UInt32(0))
@@ -46,7 +49,7 @@ func config_withOptionalsNone() {
         "claude-3-haiku", None,
         ArrayList(), ArrayList(), Int64(0),
         UInt32(5), Float32(1.0), UInt32(2048), None,
-        false, UInt32(8192), UInt32(10000), None, UInt32(50), UInt32(30), UInt32(0),
+        false, None, UInt32(50), UInt32(30), UInt32(0),
         ArrayList(), None, Int64(0), Int64(0))
 
     @Expect(cfg.name, "minimal"); @Expect(cfg.description, None)
@@ -56,8 +59,6 @@ func config_withOptionalsNone() {
     @Expect(cfg.temperature, Float32(1.0)); @Expect(cfg.maxOutputTokens, UInt32(2048))
     @Expect(cfg.thinkingLevel, None)
     @Expect(cfg.compactionEnabled, false)
-    @Expect(cfg.compactionReserveTokens, UInt32(8192))
-    @Expect(cfg.keepRecentTokens, UInt32(10000))
     @Expect(cfg.maxToolCalls, UInt32(50))
     @Expect(cfg.toolTimeout, UInt32(30))
     @Expect(cfg.minToolInterval, UInt32(0))
@@ -74,8 +75,6 @@ func config_defaultValues() {
     @Expect(cfg.temperature, Float32(0.7)); @Expect(cfg.maxOutputTokens, UInt32(4096))
     @Expect(cfg.thinkingLevel, None)
     @Expect(cfg.compactionEnabled, true)
-    @Expect(cfg.compactionReserveTokens, UInt32(16384))
-    @Expect(cfg.keepRecentTokens, UInt32(20000))
     @Expect(cfg.maxToolCalls, UInt32(50))
     @Expect(cfg.toolTimeout, UInt32(30))
     @Expect(cfg.minToolInterval, UInt32(0))
@@ -95,7 +94,7 @@ func config_jsonRoundTrip_allFields() {
         "gpt-4o-mini", Some("openai"),
         tools, skills, Int64(7),
         UInt32(15), Float32(0.5), UInt32(2048), Some("medium"),
-        true, UInt32(16384), UInt32(25000), None, UInt32(50), UInt32(30), UInt32(0),
+        true, None, UInt32(50), UInt32(30), UInt32(0),
         tags, Some("tester"), Int64(100), Int64(200))
 
     let v = JsonValue.fromObject(original)
@@ -115,8 +114,7 @@ func config_jsonRoundTrip_allFields() {
     @Expect(restored.maxOutputTokens, original.maxOutputTokens)
     @Expect(restored.thinkingLevel, original.thinkingLevel)
     @Expect(restored.compactionEnabled, original.compactionEnabled)
-    @Expect(restored.compactionReserveTokens, original.compactionReserveTokens)
-    @Expect(restored.keepRecentTokens, original.keepRecentTokens)
+    @Expect(restored.compactionEnabled, original.compactionEnabled)
     @Expect(restored.tags[0], original.tags[0])
     @Expect(restored.createdBy, original.createdBy)
     @Expect(restored.createdAt, original.createdAt); @Expect(restored.updatedAt, original.updatedAt)
@@ -133,8 +131,6 @@ func config_jsonRoundTrip_minimal() {
     @Expect(restored.temperature, Float32(0.7))
     @Expect(restored.maxOutputTokens, UInt32(4096))
     @Expect(restored.compactionEnabled, true)
-    @Expect(restored.compactionReserveTokens, UInt32(16384))
-    @Expect(restored.keepRecentTokens, UInt32(20000))
     @Expect(restored.tools.size, 0)
     @Expect(restored.description, None)
     @Expect(restored.provider, None); @Expect(restored.thinkingLevel, None)
@@ -147,7 +143,7 @@ func config_jsonRoundTrip_withOptionals() {
         "deepseek-chat", None,
         ArrayList(), ArrayList(), Int64(0),
         UInt32(5), Float32(1.0), UInt32(1024), None,
-        false, UInt32(4096), UInt32(8000), None, UInt32(50), UInt32(30), UInt32(0),
+        false, None, UInt32(50), UInt32(30), UInt32(0),
         ArrayList(), None, Int64(0), Int64(0))
 
     let v = JsonValue.fromObject(original)
@@ -181,7 +177,7 @@ func config_mcpCooldownRoundTrip() {
     let cfg = AgentConfig("a", None, "", None, "", None,
         ArrayList(), ArrayList(), Int64(5),
         UInt32(20), Float32(0.7), UInt32(4096), None,
-        true, UInt32(16384), UInt32(20000), None, UInt32(50), UInt32(30), UInt32(0),
+        true, None, UInt32(50), UInt32(30), UInt32(0),
         ArrayList(), None, Int64(0), Int64(0))
     let v = JsonValue.fromObject(cfg)
     let back = JsonValue.toObject<AgentConfig>(v)
@@ -215,19 +211,26 @@ func config_compactionRoundTrip() {
     let required = ArrayList<JsonValue>()
     required.add(JsonValue.String("goal"))
     opts["required"] = JsonValue.Array(required)
-    let cc = CompactionConfig(false, 8192, 5000, "自定义模板", Some(JsonValue.Map(opts)), Some("summary-model"))
+    let cc = CompactionConfig(false, 0.7, 8192, 0.2, Some(Int64(5000)), 2,
+        "自定义模板", Some(JsonValue.Map(opts)), Some("summary-model"))
     let cfg = AgentConfig("comp-test", None, "", None, "m", None,
         ArrayList(), ArrayList(), Int64(0),
         UInt32(20), Float32(0.7), UInt32(4096), None,
-        true, UInt32(16384), UInt32(20000), Some(cc), UInt32(50), UInt32(30), UInt32(0),
+        true, Some(cc), UInt32(50), UInt32(30), UInt32(0),
         ArrayList(), None, Int64(0), Int64(0))
     let json = toJsonString(cfg)
     let back = fromJsonString<AgentConfig>(json)
     match (back.compaction) {
         case Some(c) =>
             @Expect(c.enabled, false)
-            @Expect(c.reserveTokens, 8192)
-            @Expect(c.keepRecentTokens, 5000)
+            @Expect(c.thresholdRatio, 0.7)
+            @Expect(c.headroomTokens, 8192)
+            @Expect(c.retainRatio, 0.2)
+            match (c.retainTokens) {
+                case Some(v) => @Expect(v, 5000)
+                case None => @Fail("retainTokens missing")
+            }
+            @Expect(c.maxOverflowRetries, 2)
             @Expect(c.promptTemplate, "自定义模板")
             @Expect(c.summaryModel, Some("summary-model"))
             match (c.outputSchema) {
@@ -268,7 +271,7 @@ func config_supportsVision_explicitTrue() {
         "gpt-4o", None,
         ArrayList(), ArrayList(), Int64(0),
         UInt32(20), Float32(0.7), UInt32(4096), None,
-        true, UInt32(16384), UInt32(20000), None, UInt32(50), UInt32(30), UInt32(0),
+        true, None, UInt32(50), UInt32(30), UInt32(0),
         ArrayList(), None, Int64(0), Int64(0),
         supportsVision: true)
     @Expect(cfg.supportsVision, true)
@@ -281,7 +284,7 @@ func config_supportsVision_jsonRoundTrip() {
         "gpt-4o", None,
         ArrayList(), ArrayList(), Int64(0),
         UInt32(20), Float32(0.7), UInt32(4096), None,
-        true, UInt32(16384), UInt32(20000), None, UInt32(50), UInt32(30), UInt32(0),
+        true, None, UInt32(50), UInt32(30), UInt32(0),
         ArrayList(), None, Int64(0), Int64(0),
         supportsVision: true)
     let json = toJsonString(original)
@@ -311,8 +314,8 @@ func config_maxLengthContinuations_defaultAndRoundTrip() {
     let zero = AgentConfig(base.name, base.description, base.systemPrompt, base.userPromptTemplate,
         base.model, base.provider, base.tools, base.skills, base.mcpCooldownTurns,
         base.maxTurns, base.temperature, base.maxOutputTokens, base.thinkingLevel,
-        base.compactionEnabled, base.compactionReserveTokens, base.keepRecentTokens,
-        base.compaction, base.maxToolCalls, base.toolTimeout, base.minToolInterval,
+        base.compactionEnabled, base.compaction,
+        base.maxToolCalls, base.toolTimeout, base.minToolInterval,
         base.tags, base.createdBy, base.createdAt, base.updatedAt,
         maxLengthContinuations: 0)
     @Expect(zero.maxLengthContinuations, UInt32(0))
