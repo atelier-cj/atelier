@@ -1,18 +1,19 @@
 version = 0
 
 [requires]
-  "ystyle::crc" = {version = "1.0.0"}
   mcp = {version = "2.3.15"}
-  "ystyle::xisp" = {version = "0.4.1"}
-  gjson = {version = "1.2.1"}
   sonyflake = {version = "1.0.9"}
-  bstorm = {version = "1.4.7"}
-  cjpminfo = {version = "1.2.0"}
-  "opencj::ulid" = {version = "0.1.2"}
   jsonvalue = {version = "1.1.1"}
-  snappy = {version = "1.0.1"}
+  "ystyle::jsonrpc" = {version = "0.7.8"}
+  tomlcj = {version = "1.0.0"}
+  "ystyle::xisp" = {version = "0.4.1"}
+  "opencj::ulid" = {version = "0.1.2"}
+  "ystyle::crc" = {version = "1.0.0"}
+  mustache = {version = "1.2.1"}
+  bstorm = {version = "1.4.7"}
+  llm_api = {version = "1.4.1"}
+  gjson = {version = "1.2.1"}
   acp = {version = "0.2.6"}
   badgercj = {version = "1.6.16"}
-  "ystyle::jsonrpc" = {version = "0.7.8"}
-  mustache = {version = "1.2.1"}
-  llm_api = {version = "1.4.1"}
+  cjpminfo = {version = "1.2.0"}
+  snappy = {version = "1.0.1"}
