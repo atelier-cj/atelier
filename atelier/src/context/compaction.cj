@@ -2,6 +2,7 @@ package atelier.context
 
 import atelier.message.*
 import std.collection.*
+import std.sync.Mutex
 import mustache.{Template, MustacheComponent}
 import stdx.serialization.serialization.*
 import stdx.encoding.json.stream.*
@@ -368,6 +369,57 @@ public func compactWithSummary(messages: ArrayList<Message>, retainTokens: Int64
     }
     compacted
 }
+
+/**
+ * 压缩事务台账：同一会话同时只允许一次压缩在飞。
+ *
+ * 为什么必须有：压缩会**重写历史**（头部换成检查点）。进程内两个 runtime 驱动同一会话
+ * （典型是交互界面与 ACP 各起一个）各自基于同一份旧历史压缩时，后写的会把先写的覆盖 ——
+ * 摘要与保留区来自不同快照，历史就分叉了。台账把并发挡在门外：后来者**跳过**这次压缩
+ * 并留痕（不是排队等，压完再压一次的结果没有意义）。
+ *
+ * 进程级而不是 per-runtime：要挡的正是"两个 runtime 各持一份自己的状态"这种情形。
+ * 这是内存台账，不落库 —— 压缩结果与消息表是**同一次原子写入**，进程崩在中间不会留下
+ * "压了一半"的持久状态（留下的仍是压缩前的历史），所以只需挡进程内的并发。
+ */
+public class CompactionLedger {
+    private let lock = Mutex()
+    private let open = HashMap<String, String>()
+
+    public init() {}
+
+    /** 登记一次压缩；返回 false = 该会话已有压缩在飞（调用方应跳过，不要排队） */
+    public func begin(sessionId: String, compactionId: String): Bool {
+        synchronized(this.lock) {
+            if (this.open.contains(sessionId)) { return false }
+            this.open[sessionId] = compactionId
+            true
+        }
+    }
+
+    /** 释放（必须与 begin 配对，包括压缩失败/放弃的路径） */
+    public func end(sessionId: String): Unit {
+        synchronized(this.lock) {
+            this.open.remove(sessionId)
+        }
+    }
+
+    public func isOpen(sessionId: String): Bool {
+        synchronized(this.lock) {
+            this.open.contains(sessionId)
+        }
+    }
+
+    /** 在飞的压缩 id（诊断用） */
+    public func openId(sessionId: String): Option<String> {
+        synchronized(this.lock) {
+            this.open.get(sessionId)
+        }
+    }
+}
+
+/** 进程级台账：压缩的互斥范围就是"同一会话"，与 runtime 实例数无关 */
+public let globalCompactionLedger = CompactionLedger()
 
 /**
  * 检查点前言（照 dsh 的 `CHECKPOINT_PREAMBLE`）：让模型把这段摘要当**既定背景**，

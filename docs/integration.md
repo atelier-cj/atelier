@@ -452,6 +452,10 @@ spawn {
                 println(">>> 调用工具: ${s.toolName}")
             case e: ToolExecutionEndEvent =>
                 println(">>> 工具结果: ${e.result}")
+            // 压缩是一次"改写历史"的事务：这段括弧里可以显示进度（大上下文压缩要几十秒）
+            case c: CompactionStartEvent => println(">>> 压缩上下文: ${c.trigger}")
+            case c: CompactionEndEvent =>
+                println(">>> 压缩完成: ${c.messagesBefore} -> ${c.messagesAfter} 条")
             case _: AgentEndEvent => println(">>> 完成")
             case _ => ()
         }
@@ -461,6 +465,11 @@ spawn {
 // 在主线程等待最终结果
 let messages = stream.result()
 ```
+
+压缩事件（`CompactionStartEvent` / `CompactionEndEvent`）以同一个 `compactionId` 成对出现，
+中途放弃时也会闭合（`messagesAfter == messagesBefore` 表示"尝试过但没替换"），所以消费端
+不会看到悬挂的事务。同一会话同时只允许一次压缩：另一次进来的压缩会**跳过**并留一条警告
+（并发压缩各自基于同一份旧历史，后写的会覆盖先写的）。
 
 ### 自定义钩子
 

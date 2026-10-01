@@ -7,7 +7,7 @@ import atelier.provider.*
 import atelier.skill.*
 import atelier.session.*
 import atelier.trust.*
-import atelier.context.{resolveCompactSpec, CompactSpec, compactFrom, retainedCutIndex, lastUserIndex, isContextOverflowError, pruneToolResults, ToolResultPruneConfig, checkpointBody}
+import atelier.context.{resolveCompactSpec, CompactSpec, compactFrom, retainedCutIndex, lastUserIndex, isContextOverflowError, pruneToolResults, ToolResultPruneConfig, checkpointBody, globalCompactionLedger}
 import atelier.context.ContextBuilder
 import atelier.context.PromptSegmentContributor
 import atelier.context.ModelContextRegistry
@@ -166,6 +166,49 @@ public open class AgentRuntime {
     }
 
     /**
+     * 带事务括弧的压缩：同一会话同时只允许一次（跨 runtime 的台账），
+     * 全程 `compaction_start` / `compaction_end` 成对（消费端据此显示进度与审计）。
+     *
+     * 台账被占时**跳过**并留痕：并发压缩各自基于同一份旧历史，后写的会覆盖先写的，
+     * 摘要与保留区来自不同快照 —— 与其压出分叉的历史，不如这次不压。
+     */
+    private func compactBracketed(trigger: String, sessionId: String, messages: ArrayList<Message>,
+        tokensBefore: Int64, log: Logger,
+        body: (ArrayList<Message>, Int64) -> ArrayList<Message>): ArrayList<Message> {
+        let compactionId = "cmp_" + nextId()
+        if (!globalCompactionLedger.begin(sessionId, compactionId)) {
+            log.warn("compaction skipped: another compaction is in flight for this session (${sessionId})", Array<Attr>())
+            return messages
+        }
+        this.publishCompactionStart(compactionId, trigger, tokensBefore)
+        var result = messages
+        try {
+            result = body(messages, tokensBefore)
+        } finally {
+            this.publishCompactionEnd(compactionId, trigger, Int64(messages.size), result)
+            globalCompactionLedger.end(sessionId)
+        }
+        result
+    }
+
+    // 压缩事件与其它事件同源（走事件总线）；没有总线时退化为无事件，不影响压缩本身
+    private func publishCompactionStart(compactionId: String, trigger: String, tokensBefore: Int64): Unit {
+        match (this.eventBus) {
+            case Some(bus) => bus.publish(CompactionStartEvent(compactionId, trigger, tokensBefore))
+            case None => ()
+        }
+    }
+
+    private func publishCompactionEnd(compactionId: String, trigger: String,
+        messagesBefore: Int64, result: ArrayList<Message>): Unit {
+        match (this.eventBus) {
+            case Some(bus) => bus.publish(CompactionEndEvent(compactionId, trigger, messagesBefore,
+                Int64(result.size), estimateTokens(result)))
+            case None => ()
+        }
+    }
+
+    /**
      * 真正发给模型的那一份请求：按需把超大工具结果换成"头 + 标记 + 尾"。
      *
      * **只作用于这一份**（历史保持原样，回放/导出仍拿得到完整输出）；这一步必须在
@@ -275,7 +318,8 @@ public open class AgentRuntime {
      */
     private func recoverFromOverflow(errText: String, messages: ArrayList<Message>,
         retries: Int64, cc: CompactionConfig, chatReq: ChatRequest, actualModel: String,
-        systemText: String, tools: ArrayList<OpenAITool>, log: Logger): Option<ArrayList<Message>> {
+        systemText: String, tools: ArrayList<OpenAITool>, sessionId: String,
+        log: Logger): Option<ArrayList<Message>> {
         if (!isContextOverflowError(errText)) { return None }
         if (retries >= cc.maxOverflowRetries) {
             log.warn("context overflow: recovery exhausted after ${retries} attempt(s)", Array<Attr>())
@@ -288,6 +332,18 @@ public open class AgentRuntime {
             return None
         }
         let total = estimateTokens(messages)
+        // 溢出恢复同样是一次改写历史的事务：括弧照开照合（放弃时 after == before）
+        let outcome = this.compactBracketed("overflow", sessionId, messages, total, log,
+            { msgs, totalBefore => this.summarizeHeadForOverflow(msgs, keepFrom, cc, actualModel,
+                systemText, tools, totalBefore, log) })
+        if (outcome.size >= messages.size) { return None }
+        return Some(outcome)
+    }
+
+    // 溢出恢复的摘要 + 替换（括弧内的主体）：只保最后一条用户消息起的内容
+    private func summarizeHeadForOverflow(messages: ArrayList<Message>, keepFrom: Int64,
+        cc: CompactionConfig, actualModel: String, systemText: String,
+        tools: ArrayList<OpenAITool>, total: Int64, log: Logger): ArrayList<Message> {
         let summary = try {
             let region = ArrayList<Message>()
             var k: Int64 = 0
@@ -310,15 +366,15 @@ public open class AgentRuntime {
             plainTextOf(this.provider.chat(req).message)
         } catch (e: Exception) {
             log.warn("context overflow: summary failed (${e.message}); giving up recovery", Array<Attr>())
-            return None
+            return messages
         }
         let next = compactFrom(messages, keepFrom, summary, total)
         if (next.size >= messages.size) {
             log.warn("context overflow: compaction did not shrink history", Array<Attr>())
-            return None
+            return messages
         }
         log.info("context overflow recovered: ${messages.size} -> ${next.size} messages", Array<Attr>())
-        Some(next)
+        next
     }
 
     // 配置算不出压力预算：每个原因只提醒一次（否则每回合一条，把日志淹掉）
@@ -518,8 +574,11 @@ public open class AgentRuntime {
                                 }
                                 let total = this.pressureForNextRequest(measureMessages)
                                 if (total > cSpec.thresholdTokens) {
-                                    currentMessages = this.summarizeAndCompact(currentMessages,
-                                        cc, cSpec, total, actualModel, systemText, tools, log)
+                                    currentMessages = this.compactBracketed("pressure", sessionId,
+                                        currentMessages, total, log, { msgs, totalBefore =>
+                                        this.summarizeAndCompact(msgs, cc, cSpec, totalBefore,
+                                            actualModel, systemText, tools, log)
+                                    })
                                 }
                             // 配置算不出预算（窗口未知 / 留不出余量 / 保留不小于阈值）：
                             // 留痕一次并跳过**主动**压缩 —— 配置坏了不该让会话不可用
@@ -600,7 +659,7 @@ public open class AgentRuntime {
                             // 只打 message 在日志里就是一行「provider error: 」，等于没有信息
                             let errText = e.toString()
                             match (this.recoverFromOverflow(errText, currentMessages, overflowRetries,
-                                ccForOverflow, chatReq, actualModel, systemText, tools, log)) {
+                                ccForOverflow, chatReq, actualModel, systemText, tools, sessionId, log)) {
                                 case Some(nextMsgs) =>
                                     overflowRetries++
                                     currentMessages = nextMsgs

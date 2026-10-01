@@ -557,3 +557,24 @@ func checkpointFrame_findPreviousSummaryStripsFraming() {
         case None => @Fail("expected previous summary")
     }
 }
+
+// ---------- 压缩事务台账 ----------
+
+@Test
+func compactionLedger_mutualExclusionPerSession() {
+    let ledger = CompactionLedger()
+    @Expect(ledger.begin("s1", "c1"), true)
+    // 同一会话已有在飞 → 后来者拿不到（要跳过，不是排队）
+    @Expect(ledger.begin("s1", "c2"), false)
+    @Expect(ledger.isOpen("s1"), true)
+    match (ledger.openId("s1")) {
+        case Some(v) => @Expect(v, "c1")
+        case None => @Fail("expected open id")
+    }
+    // 别的会话不受影响
+    @Expect(ledger.begin("s2", "c3"), true)
+    // 释放后可再次登记
+    ledger.end("s1")
+    @Expect(ledger.isOpen("s1"), false)
+    @Expect(ledger.begin("s1", "c4"), true)
+}

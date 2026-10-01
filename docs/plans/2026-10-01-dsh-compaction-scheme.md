@@ -110,6 +110,21 @@ retain         = floor(messageBudget × retainRatio)              // retainRatio
 5. **P2 · 摘要调用复用热前缀**：把我们现在的"独立子调用"改成"带 system + tools 的前缀调用"，但要先实测缓存命中与计费口径再定（我们原注释的顾虑是真问题，不是笔误）。
 6. **P2 · 台账与 busy**：日志标记对（start/summary/end）与未匹配 start 的 busy 语义——取决于我们是否要引入并发压缩入口（`/compact`）。
 
+## 十一、实施状态（本分支）
+
+| 步骤 | 状态 | 提交 |
+| :--- | :--- | :--- |
+| P0-1 阈值 dsh 口径（三个不变量 + 配置错误不压） | 已落地 | `74b39ac` |
+| P0-2 溢出恢复（文本匹配 + 最大头部缩减 + 重试） | 已落地 | `74b39ac` |
+| P1-3 触发点前移到请求前 | 已落地 | `d1486ca` |
+| P1-4 工具结果修剪器（先修剪后摘要，只作用于请求） | 已落地 | `d1486ca` |
+| P1-5 默认摘要指令换 dsh 八节骨架 | 已落地 | `d1486ca` |
+| P2-5 摘要子调用复用热前缀 | 已落地（DeepSeek 硬盘缓存按"缓存前缀单元完整匹配"计费，内联对话等于整段未命中） | `de5963a` |
+| P2-6 台账与 busy：`compaction_start`/`compaction_end` 成对 + 跨 runtime 会话级互斥 | 已落地（内存台账；压缩结果与消息表同一次原子写入，不留持久悬挂态） | 本分支 |
+| P2 检查点前言 + `<compacted-summary>` 标签 | 已落地（需 `llm_api` 1.4.1：`CompactionMessage` 原样渲染） | `dd8e817` / `llm_api 97db060` |
+
+未做（有意留白）：`/compact` 手动入口（有了它才需要持久化的事务台账才值得做）、图片/结构化块的专门修剪策略。
+
 ## 附：本次调研的证据位置
 
 - 文档：`dsh-compaction`、`dsh-compaction-basic`、`dsh-token-meter`、`dsh-compaction-tool-result-pruner` 各自的 `README.zh.md`
