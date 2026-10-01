@@ -1,0 +1,101 @@
+# A2A 接入（Agent 侧 + Client 侧）
+
+Atelier 实现 [A2A (Agent2Agent) v1.0](https://a2a-protocol.org/) 的 **Agent 侧（服务端）** 与
+**Client 侧（远端子代理）**：协议层复用 `a2a` 包（[a2a-cj](../a2a-cj)），Atelier 侧负责把
+AgentRuntime / 会话持久化 / 信任闸门 / 提问通道接入其执行器与流式事件。
+
+- 服务端：`atelier a2a [agent] [port]` 起一个 A2A Agent（Agent Card 发现 + JSON-RPC 绑定 + SSE 流式），
+  实现 `a2a.A2aExecutor`（`src/a2a/bridge.cj`）；
+- 客户端：把远端 A2A agent 当作可持续子代理驱动（`src/agent/remote_a2a_subagent.cj`），
+  父侧既有 `subagent_*` 工具零改动可用。
+
+## 快速开始
+
+```bash
+# 1. 构建
+eval "$(cjvs env zsh)" && eval "$(cjvs stdx-env zsh)"
+cjpm build -j 16
+
+# 2. 起服务（默认端口 8931；工作目录 = 当前目录）
+cli.app a2a [agent] [port]
+
+# 3. 发现 + 调用（JSON-RPC 绑定，流式为 SSE）
+curl -s http://127.0.0.1:8931/.well-known/agent-card.json
+curl -sN -H 'Content-Type: application/json' -H 'A2A-Version: 1.0' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"SendStreamingMessage","params":{"message":{"messageId":"m1","role":"ROLE_USER","parts":[{"text":"你好"}]}}}' \
+  http://127.0.0.1:8931/
+```
+
+离线冒烟（不连真实 LLM）：`ATELIER_PROVIDER=echo` 用 `EchoProvider`，`ATELIER_ECHO_DELAY_MS` 可加延时。
+`A2A-Version` 头是必须的：缺失按 0.3 处理并回 `VERSION_NOT_SUPPORTED`（a2a-cj 的版本协商）。
+
+## 能力矩阵（A2A 操作）
+
+| A2A 操作 | 支持 | 说明 |
+|---|---|---|
+| `/.well-known/agent-card.json` | ✅ | 由 agent 配置 + 技能注册表生成；`supportedInterfaces` 声明 JSONRPC，`capabilities.streaming=true` |
+| `SendMessage` | ✅ | 一条消息 = atelier 一次 `SessionLoop` 回合 |
+| `SendStreamingMessage` | ✅ | SSE；任务快照 → `statusUpdate` / `artifactUpdate` → 终态关流 |
+| `GetTask` | ✅ | 任务与产物落在 a2a-cj 的 TaskStore（进程内） |
+| `ListTasks` | ✅ | 支持 `contextId` / `state` 过滤与分页（a2a-cj 实现） |
+| `CancelTask` | ✅ | 协作式：置取消标志，运行中回合收敛为 `TASK_STATE_CANCELED` |
+| `SubscribeToTask` | ✅ | 任务级订阅：中断态后继续挂流，终态关流 |
+| `PushNotificationConfig` 系列 | ❌ | 未声明（`pushNotifications=false`），a2a-cj 已有 HTTP 投递器可后续开启 |
+| `GetExtendedAgentCard` / 认证 | ❌ | 未声明（无鉴权场景） |
+| gRPC 绑定 | ❌ | 仅 JSON-RPC（`a2a` 包另有 HTTP+JSON，可按 `bindings` 开启） |
+
+## 概念映射（A2A ↔ Atelier）
+
+| A2A | Atelier |
+|---|---|
+| `contextId` | 会话映射 key（持久化于 `<sessionDir>/a2a-sessions.json`）→ atelier 会话 id |
+| `taskId` | 任务级寻址：索引到 `(contextId, turn)`（`tasks/get`、`resubscribe` 用） |
+| `message/send` 文本 | `UserMessage` → `SessionLoop.run`（唯一回合执行器） |
+| `statusUpdate` | `TurnStart` → WORKING；挂起 → INPUT_REQUIRED；回合终态 → COMPLETED / FAILED / CANCELED |
+| `artifactUpdate` | assistant 文本分片、工具调用的声明 / 进度 / 结果 |
+| `Task.history` | 交互消息序列（用户消息 + 状态更新携带的 agent 消息）；产物在 `Task.artifacts` |
+| 多轮（同 `taskId` 续发消息） | 中断态任务继续推进；终态任务拒绝新消息（协议要求） |
+
+## 流式与产物语义（`src/a2a/translator.cj`）
+
+规范 §3.1.2 规定 Task 生命周期流只能以 Task 起始、随后只允许 `statusUpdate` / `artifactUpdate`，
+因此 **assistant 文本以 artifact 分片下发**（不走 `Message` 载荷 —— 那是 message-only 流的形态）：
+
+- 首片 `append=false` 建立产物，后续片 `append=true`，最后一片 `lastChunk=true`。
+  `append=true` 而产物不存在时参考实现会**丢弃该片**，故首片必须是 `append=false`；
+- 每个文本增量先缓冲一片、下一个增量到达时才发出上一片：这样 `lastChunk=true` 落在**有内容**的
+  分片上（代价是流式展示滞后一个增量）；非流式 provider（只有 `MessageEnd`/`TurnEnd` 带文本）
+  在收尾时补发整片；
+- 工具调用 = 独立产物（`tool_t<turn>_<toolCallId>`，入参 data part + `metadata{toolCallId,status}`），
+  `ToolExecutionStart/Update/End` 往同一 artifactId 追加；声明了却没跑到的（被跳过 / 等待外部执行）
+  在回合收尾时补 `lastChunk=true`（`status=skipped`），不留半开产物；
+- **终态判定**：`TurnEnd` 是「每回合」事件（工具回合会多次出现），只有
+  `EndTurn` 且无待执行工具才算 COMPLETED；`Error → FAILED`、`Aborted → CANCELED`，
+  截断续跑 / 工具批次保持 WORKING，运行收尾（`AgentEndEvent`）兜底收口。
+
+## 反向提问（input-required）
+
+A2A 没有 ACP elicitation 那样的同步反向调用，因此走**任务级续聊**：
+
+1. 运行的某个检查点（信任闸门审批 / `ask_user` / 外部执行工具）请求输入时，桥的 `askFn`
+   返回 `UserAnswer(Pending)` → runtime 发 `SuspendEvent` → 翻译器下发 `INPUT_REQUIRED` +
+   状态消息（问题正文）；
+2. 客户端用**同一 `taskId`** 续发一条消息，桥把文本折算成结构化答复
+   （候选选项 id/label 精确匹配优先，审批再认常见肯定/否定说法），随后 `askFn` 命中答复、
+   回合继续推进 —— 任务始终没有被终态关闭，订阅流一直挂着。
+
+## 远端 A2A 子代理（Client 侧）
+
+`RemoteA2aSubAgentHandle <: SubAgentHandle`：`SubAgentManager.startRemoteA2a(baseUrl, parent, prompt)`
+按 Agent Card 发现远端、用 `sendStreamingMessage` 跑一轮，把 artifact / 状态消息累积成回信
+（首回合 `done`、其后 `reply`）。与 ACP 版（子进程 + stdio）相比：走 HTTP 不拉子进程；
+支持 input-required 续聊（远端挂起时问题作为来信投回父，父的下一条消息即答复）。
+终态后清 `taskId`、保留 `contextId`，下一条消息在同一段远端对话里开新任务。
+
+## 限制
+
+- 只支持文本消息（未声明图片/文件等多模态能力）；
+- 任务状态在进程内（a2a-cj 的 `InMemoryTaskStore`），进程重启后 `tasks/get` 不再可见；
+  会话映射与任务索引是持久化的，重启后同 `contextId` 的续聊仍可继续；
+- 同一 `contextId` 的任务串行执行：会话历史是单一序列，并发 run 会交错写入；
+- 服务端未做鉴权（无 `securitySchemes`）。
