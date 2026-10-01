@@ -190,7 +190,20 @@ Atelier 内置 `ModelContextRegistry` 查表：
 | claude-sonnet-4 / claude-3.5-sonnet / claude-3-opus / claude-3-sonnet / claude-3-haiku | 200,000 |
 | gemini-1.5-pro / gemini-1.5-flash / gemini-2.0-flash | 1,048,576 |
 | qwen-turbo / qwen-plus / qwen-max | 131,072 |
-| 未知模型 | 8,192（兜底） |
+| 未知模型 | 8,192（兜底，可配） |
+
+内置表只认常见模型名 —— 新模型、代理服务截断后的窗口、超长上下文变体都与它不符。
+**窗口是模型的属性，声明它比猜它便宜**，按优先级取：
+
+| 优先级 | 声明位置 |
+|---|---|
+| 1 | `[[agent]] contextWindow`（或代码里 `AgentConfig.contextWindow`） |
+| 2 | `[[model]] name = ... / contextWindow = ...`（或代码里 `HarnessSpec.withModelContext`） |
+| 3 | 内置表（上表） |
+| 4 | 兜底值（默认 8192；`HarnessSpec.withDefaultContextWindow` 可改） |
+
+走到 4 时运行时会在日志里打一条警告（每个模型一次），提示声明窗口 —— 兜底值偏小会让上下文
+**提前被压缩**，表现为"模型聊着聊着忘了前面"，而调用方看不到任何线索。窗口为 0 表示禁用压缩。
 
 ## 自定义 Provider
 

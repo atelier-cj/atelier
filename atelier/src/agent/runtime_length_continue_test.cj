@@ -90,7 +90,7 @@ func runScripted(config: AgentConfig, provider: Provider): ArrayList<Message> {
     let agentReg = AgentRegistry()
     let providerReg = ProviderRegistry()
     providerReg.register("default", provider)
-    let runtime = AgentRuntime(config, provider, toolReg, sessionStore, trustMgr,
+    let runtime = testRuntime(config, provider, toolReg, sessionStore, trustMgr,
         skillReg, agentReg, providerReg, ArrayList<Hook>(), McpManager())
     let msgs = ArrayList<Message>()
     msgs.add(UserMessage(ContentList.ofText("把大文件写完"), 0))
@@ -217,7 +217,7 @@ func runRecording(config: AgentConfig, provider: Provider): ArrayList<Message> {
     toolReg.register(NoopTool())
     let providerReg = ProviderRegistry()
     providerReg.register("default", provider)
-    let runtime = AgentRuntime(config, provider, toolReg, MemorySessionStore(), TrustManager(),
+    let runtime = testRuntime(config, provider, toolReg, MemorySessionStore(), TrustManager(),
         SkillRegistry(), AgentRegistry(), providerReg, ArrayList<Hook>(), McpManager())
     let msgs = ArrayList<Message>()
     msgs.add(UserMessage(ContentList.ofText("把大文件写完"), 0))

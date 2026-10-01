@@ -24,7 +24,7 @@ public func sessionLoop_onEventSeesLifecycle() {
     providerReg.register("default", StubProvider())
     let store = MemorySessionStore()
     let mcpMgr = McpManager()
-    let loop = SessionLoop(toolReg, trustMgr, skillReg, agentReg, providerReg, store, mcpMgr)
+    let loop = testSessionLoop(toolReg, trustMgr, skillReg, agentReg, providerReg, store, mcpMgr)
     let events = ArrayList<String>()
     let cfg = subConfig()
     let outcome = loop.run("sess_loop_1", "你好", cfg, StubProvider(), None, SessionEnvironment(),
@@ -66,7 +66,7 @@ public func sessionLoop_askFnInjectedToAskTool() {
     providerReg.register("default", provider)
     let store = MemorySessionStore()
     let mcpMgr = McpManager()
-    let loop = SessionLoop(toolReg, trustMgr, skillReg, agentReg, providerReg, store, mcpMgr)
+    let loop = testSessionLoop(toolReg, trustMgr, skillReg, agentReg, providerReg, store, mcpMgr)
     let cfg = subConfig()
     // 普通提问 = 单字段表单（answer）：答复按字段名回填
     let askFn: AskFn = { req: UserRequest =>
@@ -102,7 +102,7 @@ public func sessionLoop_forwardsPromptContributors() {
     let mcpMgr = McpManager()
     let cs = ArrayList<PromptSegmentContributor>()
     cs.add(SegContributor())
-    let loop = SessionLoop(toolReg, trustMgr, skillReg, agentReg, providerReg, store, mcpMgr,
+    let loop = testSessionLoop(toolReg, trustMgr, skillReg, agentReg, providerReg, store, mcpMgr,
         promptContributors: cs)
     let cfg = subConfig()
     let outcome = loop.run("sess_pc", "你好", cfg, provider, None, SessionEnvironment(),
@@ -160,7 +160,7 @@ func makeImageLoop(provider: Provider): (SessionLoop, MemorySessionStore) {
     providerReg.register("default", provider)
     let store = MemorySessionStore()
     let mcpMgr = McpManager()
-    let loop = SessionLoop(toolReg, trustMgr, skillReg, agentReg, providerReg, store, mcpMgr)
+    let loop = testSessionLoop(toolReg, trustMgr, skillReg, agentReg, providerReg, store, mcpMgr)
     (loop, store)
 }
 

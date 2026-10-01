@@ -82,7 +82,7 @@ func makeSubManager(provider: Provider, idleTimeoutSec!: Int64 = 0): (SubAgentMa
     let providerReg = ProviderRegistry()
     providerReg.register("default", provider)
     let store = MemorySessionStore()
-    let mgr = SubAgentManager(toolReg, trustMgr, skillReg, agentReg, providerReg, store, McpManager(),
+    let mgr = testSubAgentManager(toolReg, trustMgr, skillReg, agentReg, providerReg, store, McpManager(),
         idleTimeoutSec: idleTimeoutSec)
     (mgr, providerReg)
 }
@@ -656,7 +656,7 @@ public func parentTools_startAndWatchInTurn() {
     providerReg.register("parent", parentProvider)
     let store = MemorySessionStore()
     let mcpMgr = McpManager()
-    let mgr = SubAgentManager(toolReg, trustMgr, skillReg, agentReg, providerReg, store, mcpMgr)
+    let mgr = testSubAgentManager(toolReg, trustMgr, skillReg, agentReg, providerReg, store, mcpMgr)
     registerParentSubagentTools(toolReg, mgr)
 
     // 父 config：provider 显式 parent
@@ -664,7 +664,7 @@ public func parentTools_startAndWatchInTurn() {
         UInt32(20), Float32(0.7), UInt32(4096), None,
         false, UInt32(16384), UInt32(20000), None, UInt32(50), UInt32(30), UInt32(0),
         ArrayList(), None, Int64(0), Int64(0))
-    let runtime = AgentRuntime(parentCfg, parentProvider, toolReg, store, trustMgr,
+    let runtime = testRuntime(parentCfg, parentProvider, toolReg, store, trustMgr,
         skillReg, agentReg, providerReg, McpManager())
     let msgs = ArrayList<Message>()
     msgs.add(UserMessage(ContentList.ofText("分派任务"), 0))
@@ -696,7 +696,7 @@ public func subagent_headerMarksParentSession() {
     providerReg2.register("default", provider)
     let store = MemorySessionStore()
     let mcp = McpManager()
-    let mgr2 = SubAgentManager(toolReg, trustMgr, skillReg, agentReg, providerReg2, store, mcp)
+    let mgr2 = testSubAgentManager(toolReg, trustMgr, skillReg, agentReg, providerReg2, store, mcp)
     let h2 = mgr2.start(subConfig(), provider, "parent_r0b", "任务B")
     h2.recv(timeout: 10 * Duration.second)
     match (store.loadEntries(h2.subSessionId).header.parentSession) {
@@ -719,7 +719,7 @@ public func subagent_resumeSession_reusesHistory() {
     providerReg.register("default", provider)
     let store = MemorySessionStore()
     let mcp = McpManager()
-    let mgr1 = SubAgentManager(toolReg, trustMgr, skillReg, agentReg, providerReg, store, mcp)
+    let mgr1 = testSubAgentManager(toolReg, trustMgr, skillReg, agentReg, providerReg, store, mcp)
     let h1 = mgr1.start(subConfig(), provider, "parent_r1", "首任务")
     match (h1.recv(timeout: 10 * Duration.second)) {
         case Some(mail) => @Expect(mail.kind, AgentMailKindDone)
@@ -730,7 +730,7 @@ public func subagent_resumeSession_reusesHistory() {
     @Expect(waitState(h1, SubagentState.Closed), true)
 
     // 模拟进程重启：新 manager 同一 store，恢复该子会话
-    let mgr2 = SubAgentManager(toolReg, trustMgr, skillReg, agentReg, providerReg, store, mcp)
+    let mgr2 = testSubAgentManager(toolReg, trustMgr, skillReg, agentReg, providerReg, store, mcp)
     match (mgr2.resumeSession(subConfig(), provider, "parent_r1", childId, SessionEnvironment())) {
         case Some(h2) =>
             h2.send(AgentMail("parent_r1", childId, AgentMailKindUserText, "续问"))
@@ -806,7 +806,7 @@ public func subagent_remoteBridge_e2e() {
     providerReg.register("default", provider)
     let store = MemorySessionStore()
     let mcp = McpManager()
-    let mgr = SubAgentManager(toolReg, trustMgr, skillReg, agentReg, providerReg, store, mcp)
+    let mgr = testSubAgentManager(toolReg, trustMgr, skillReg, agentReg, providerReg, store, mcp)
 
     let sessionDir = Directory.createTemp(Path("/tmp")).toString() + "/remote-sub-test"
     Directory.create(sessionDir, recursive: true)

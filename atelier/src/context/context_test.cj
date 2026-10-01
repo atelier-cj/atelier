@@ -60,6 +60,41 @@ func modelRegistry_gemini() {
 }
 
 @Test
+func modelRegistry_hasDistinguishesKnownFromFallback() {
+    let reg = ModelContextRegistry()
+    @Expect(reg.has("gpt-4o"), true)
+    // 未命中的模型：get 给兜底值，但 has = false —— 调用方据此留痕，
+    // 不然会静默按偏小的窗口提前压缩
+    @Expect(reg.has("vendor-new-model"), false)
+    @Expect(reg.get("vendor-new-model"), reg.defaultContextWindow)
+}
+
+@Test
+func modelRegistry_mergedOverridesOnCopy() {
+    let base = ModelContextRegistry()
+    let derived = base.merged("vendor-new-model", 262144)
+
+    @Expect(derived.get("vendor-new-model"), 262144)
+    @Expect(derived.has("vendor-new-model"), true)
+    // 原表不动
+    @Expect(base.has("vendor-new-model"), false)
+    // 内置条目照旧带过来
+    @Expect(derived.get("gpt-4o"), 128000)
+}
+
+@Test
+func modelRegistry_defaultWindowIsConfigurable() {
+    let reg = ModelContextRegistry(defaultWindow: 32768)
+    @Expect(reg.get("unknown-model-xyz"), 32768)
+
+    let narrower = reg.withDefaultWindow(4096)
+    @Expect(narrower.get("unknown-model-xyz"), 4096)
+    // 换兜底不影响已知条目
+    @Expect(narrower.get("gpt-4o"), 128000)
+    @Expect(reg.defaultContextWindow, 32768)
+}
+
+@Test
 func compactionConfig_defaultTemplateRenders() {
     let cfg = CompactionConfig()
     let out = renderCompactionPrompt(cfg, "对话内容", None, 16384)

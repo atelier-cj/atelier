@@ -13,30 +13,13 @@ import stdx.log.*
 public class AgentTool <: Tool {
     private let agentName: String
     private let config: AgentConfig
-    private let provider: Provider
-    private let toolRegistry: ToolRegistry
-    private let sessionStore: SessionStore
-    private let trustManager: TrustManager
-    private let skillRegistry: SkillRegistry
-    private let agentRegistry: AgentRegistry
-    private let providerRegistry: ProviderRegistry
-    private let mcpManager: McpManager
+    // 子 agent 与父共用同一份装配束（组件一次装配，不再逐个穿参数）
+    private let spec: HarnessSpec
 
-    public init(agentName: String, config: AgentConfig, provider: Provider,
-        toolRegistry: ToolRegistry, sessionStore: SessionStore,
-        trustManager: TrustManager, skillRegistry: SkillRegistry,
-        agentRegistry: AgentRegistry, providerRegistry: ProviderRegistry,
-        mcpManager: McpManager) {
+    public init(agentName: String, config: AgentConfig, spec: HarnessSpec) {
         this.agentName = agentName
         this.config = config
-        this.provider = provider
-        this.toolRegistry = toolRegistry
-        this.sessionStore = sessionStore
-        this.trustManager = trustManager
-        this.skillRegistry = skillRegistry
-        this.agentRegistry = agentRegistry
-        this.providerRegistry = providerRegistry
-        this.mcpManager = mcpManager
+        this.spec = spec
     }
 
     public func name(): String {
@@ -75,11 +58,7 @@ public class AgentTool <: Tool {
                 return ToolResult("Missing required parameter: prompt", None, true, false)
         }
         log.info("agent:${this.agentName} start", Array<Attr>())
-        let runtime = AgentRuntime(this.config, this.provider,
-            this.toolRegistry, this.sessionStore,
-            this.trustManager, this.skillRegistry,
-            this.agentRegistry, this.providerRegistry,
-            this.mcpManager)
+        let runtime = AgentRuntime(this.spec, this.config)
         let msgs = ArrayList<Message>()
         msgs.add(UserMessage(ContentList.ofText(prompt), 0))
         let stream = runtime.chat(msgs)

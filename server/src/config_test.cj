@@ -7,6 +7,7 @@ import std.fs.*
 import tomlcj.*
 import atelier.provider.*
 import atelier.context.CompactionConfig
+import atelier.agent.HarnessSpec
 
 func makeTomlProvider(extra: DataModel): TomlProvider {
     let tp = TomlProvider()
@@ -577,4 +578,72 @@ func agentConfigFrom_verifyPasses() {
     let bad = TomlAgent()
     bad.maxVerifyPasses = -1
     @Expect(agentConfigFrom(bad).maxVerifyPasses, UInt32(0))
+}
+
+// ---------- 上下文窗口：[[model]] 与 agent 级声明 ----------
+
+@Test
+func agentConfigFrom_contextWindow() {
+    let ta = TomlAgent()
+    ta.model = "vendor-model"
+    ta.contextWindow = 262144
+    @Expect(agentConfigFrom(ta).contextWindow, Some(262144))
+
+    // 未声明（0）= 交给装配束的模型表；写成 0/负数不该被当成窗口
+    @Expect(agentConfigFrom(TomlAgent()).contextWindow, None)
+
+    let zero = TomlAgent()
+    zero.contextWindow = 0
+    @Expect(agentConfigFrom(zero).contextWindow, None)
+}
+
+@Test
+func tomlModel_roundTrip() {
+    // 用户是在配置文件里写 [[model]] 的：读路径必须真的认它
+    let file = writeTempToml("""
+[[model]]
+name = "vendor-model"
+contextWindow = 262144
+""")
+    let cfg = unmarshal<TomlConfig>(file)
+    @Expect(cfg.model.size, 1)
+    @Expect(cfg.model[0].name, "vendor-model")
+    @Expect(cfg.model[0].contextWindow, 262144)
+
+    // 写路径也要带上（不然改配置再存回就丢声明）
+    let text = String.fromUtf8(marshal(cfg))
+    @Expect(text.contains("[[model]]"), true)
+    @Expect(text.contains("262144"), true)
+}
+
+func writeTempToml(body: String): String {
+    let dir = "/tmp/atelier-cfg-test-model-window"
+    try { Directory.create(Path(dir), recursive: true) } catch (_) { () }
+    let file = dir + "/config.toml"
+    let f = File(file, OpenMode.Write)
+    f.write(body.toArray())
+    f.close()
+    file
+}
+
+@Test
+func withTomlModels_appliesDeclaredWindows() {
+    var models = ArrayList<TomlModel>()
+    let declared = TomlModel()
+    declared.name = "vendor-model"
+    declared.contextWindow = 262144
+    models.add(declared)
+    // 声明的窗口 <= 0 = 未声明，不该覆盖内置表
+    let bogus = TomlModel()
+    bogus.name = "gpt-4o"
+    bogus.contextWindow = 0
+    models.add(bogus)
+
+    let spec = withTomlModels(HarnessSpec(), models)
+    @Expect(spec.models.has("vendor-model"), true)
+    @Expect(spec.models.get("vendor-model"), 262144)
+    // 内置表没被 0 覆盖
+    @Expect(spec.models.get("gpt-4o"), 128000)
+    // 原装配束（未调用 withTomlModels 的）不受影响
+    @Expect(HarnessSpec().models.has("vendor-model"), false)
 }

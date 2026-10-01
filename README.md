@@ -40,21 +40,47 @@ cjpm build -j 16
 
 ## 集成方式
 
-**库模式** — 在 `cjpm.toml` 添加依赖，调用 `AgentRuntime.chat()`：
+**库模式** — 在 `cjpm.toml` 添加依赖，装一个**装配束**（HarnessSpec）就能跑：
 
 ```cangjie
-import atelier.*
-// askFn：(UserRequest) -> UserAnswer —— 审批/选择/表单的宿主侧入口
-// 不传 = 没有提问通道：需要用户拍板的地方按「取消」处理（等同拒绝）
-let runtime = AgentRuntime(config, provider, toolReg, ..., ask: Some(askFn))
-let stream = runtime.chat(messages)
-for (event in stream) { ... }
+import atelier.agent.*
+
+// 零配置：内置工具 + 内存会话 + 环境变量里的 provider
+let h = Harness.open()
+println(h.run("你好"))
+h.close()
 ```
 
-**HTTP 挂载** — 路由挂到既有 HTTP 服务：
+要换组件就派生装配束 —— 每个组件都是接口，`with*` 只影响这一份（不写穿共享组件）：
 
 ```cangjie
-let atelier = AtelierHttpHandler(...)
+let spec = HarnessSpec.default()
+    .withProvider("default", OpenAIProvider("default", baseUrl, apiKey))  // 换模型服务
+    .withStore(StormSessionStore("./sessions"))                           // 换会话存储
+    .withTool(SqlTool())                                                  // 加/换工具（同名覆盖）
+    .withHook(AuditHook())                                                // 横切钩子
+    .withModelContext("vendor-model", 262144)                             // 声明模型上下文窗口
+    // askFn：(UserRequest) -> UserAnswer —— 审批/选择/表单的宿主侧入口。
+    // 不挂 = 没有提问通道：需要用户拍板的地方按「取消」处理（等同拒绝）
+    .withAsk({ req => myApprovalUi(req) })
+
+let h = Harness.open(spec)
+```
+
+需要会话 id、事件流、取消、子 Agent 这些细粒度能力时，从**同一个装配束**下钻到运行时
+（没有第二套配置）：
+
+```cangjie
+let runtime = AgentRuntime(spec, cfg)          // cfg: AgentConfig
+let stream = runtime.chatWithSessionId(sid, msgs, env)
+for (event in stream) { ... }
+runtime.cancelSession(sid)
+```
+
+**HTTP 挂载** — 路由挂到既有 HTTP 服务，用的还是同一份装配束：
+
+```cangjie
+let atelier = AtelierHttpHandler(spec)
 atelier.registerRoutes(server.distributor)
 ```
 
@@ -107,11 +133,19 @@ name = "default"
 baseURL = "https://api.openai.com/v1"
 apiKey = "${OPENAI_API_KEY}"
 
+# 模型 → 上下文窗口（token）。内置表只认常见模型名，新模型/代理截断都会与它不符：
+# 没声明的模型会按兜底值（8192）压缩上下文并留一条警告
+[[model]]
+name = "deepseek-chat"
+contextWindow = 65536
+
 [[agent]]
 name = "assistant"
-model = "gpt-4o"
+model = "deepseek-chat"
 systemPrompt = "你是一个有用的助手"
 tools = ["bash", "read_file", "grep", "glob"]
+# 可选：本 agent 的窗口覆盖 [[model]]（预算控制、走代理被截断这类特例）
+# contextWindow = 32768
 
 [logging]
 level = "info"

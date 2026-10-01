@@ -34,30 +34,17 @@ class PendingAsk {
 }
 
 public class AtelierHttpHandler {
-    private let agentRegistry: AgentRegistry
-    private let toolRegistry: ToolRegistry
-    private let sessionStore: SessionStore
-    private let trustManager: TrustManager
-    private let skillRegistry: SkillRegistry
-    private var providerRegistry: ProviderRegistry
-    private var mcpManager: McpManager = McpManager()
+    // 装配束：组件一次装配，handler 只是把它接到 HTTP 上
+    private let spec: HarnessSpec
     // 待答提问：key = UserRequest.id（确定性），答复按 id 精确投递 —— 并发请求下不能"投给任意一个"
     let pendingAsks = HashMap<String, PendingAsk>()
 
-    public init(agentRegistry: AgentRegistry, toolRegistry: ToolRegistry,
-        sessionStore: SessionStore, trustManager: TrustManager,
-        skillRegistry: SkillRegistry) {
-        this.agentRegistry = agentRegistry
-        this.toolRegistry = toolRegistry
-        this.sessionStore = sessionStore
-        this.trustManager = trustManager
-        this.skillRegistry = skillRegistry
-        this.providerRegistry = ProviderRegistry()
+    public init(spec: HarnessSpec) {
+        this.spec = spec
     }
 
-    public func setProviderRegistry(reg: ProviderRegistry): Unit { this.providerRegistry = reg }
-
-    public func setMcpManager(m: McpManager): Unit { this.mcpManager = m }
+    /** 本次装配（宿主想换组件时先派生新的装配束，再建 handler） */
+    public func components(): HarnessSpec { this.spec }
 
     public func registerRoutes(distributor: HttpRequestDistributor): Unit {
         let h = this
@@ -74,17 +61,15 @@ public class AtelierHttpHandler {
         distributor.register("/trust", { ctx => h.handleTrust(ctx) })
         distributor.register("/health", { ctx => h.handleHealth(ctx) })
         distributor.register("/v1/chat/completions", { ctx => h.handleV1Chat(ctx) })
-        // AG-UI 对外端点（公开协议）。此处构造：providerRegistry / mcpManager 已由
-        // setXxx 注入完毕（serve() 之前），构造出来的实例持有的都是最终对象。
-        let agUi = AgUiHandler(this.agentRegistry, this.toolRegistry, this.sessionStore,
-            this.trustManager, this.skillRegistry, this.providerRegistry, this.mcpManager)
+        // AG-UI 对外端点（公开协议）：与其余路由共用同一份装配束
+        let agUi = AgUiHandler(this.spec)
         distributor.register("/ag-ui/agent", { ctx => agUi.handleAgent(ctx) })
     }
 
     private func handleAgentConfig(ctx: HttpContext): Unit {
         match (ctx.request.method) {
             case "GET" =>
-                let agents = this.agentRegistry.list()
+                let agents = this.spec.agents.list()
                 let names = ArrayList<String>()
                 for ((k, _) in agents) { names.add(k) }
                 jsonResponse(ctx, 200, toJsonString(AgentListResponse(names)))
@@ -94,7 +79,7 @@ public class AtelierHttpHandler {
                 }
                 let cfg = configFromDTO(dto)
                 try {
-                    this.agentRegistry.create(dto.name, cfg)
+                    this.spec.agents.create(dto.name, cfg)
                     jsonResponse(ctx, 201, toJsonString(StatusResponse("created")))
                 } catch (e: Exception) {
                     jsonResponse(ctx, 409, toJsonString(ErrorResponse(e.message)))
@@ -103,7 +88,7 @@ public class AtelierHttpHandler {
                 let dto = try { readJson<DeleteAgentDTO>(ctx) } catch (_) {
                     jsonResponse(ctx, 400, toJsonString(ErrorResponse("invalid JSON"))); return
                 }
-                let deleted = this.agentRegistry.delete(dto.name)
+                let deleted = this.spec.agents.delete(dto.name)
                 if (deleted) {
                     jsonResponse(ctx, 200, toJsonString(StatusResponse("deleted")))
                 } else {
@@ -114,7 +99,7 @@ public class AtelierHttpHandler {
     }
 
     private func handleAgentConfigs(ctx: HttpContext): Unit {
-        let agents = this.agentRegistry.list()
+        let agents = this.spec.agents.list()
         let items = ArrayList<AgentItem>()
         for ((k, v) in agents) {
             items.add(AgentItem(k, v.model, v.systemPrompt))
@@ -126,7 +111,7 @@ public class AtelierHttpHandler {
         let dto = try { readJson<ChatRequestDTO>(ctx) } catch (_) {
             jsonResponse(ctx, 400, toJsonString(ErrorResponse("invalid JSON"))); return
         }
-        let agentCfg = match (this.agentRegistry.get(dto.agent)) {
+        let agentCfg = match (this.spec.agents.get(dto.agent)) {
             case Some(c) => c
             case None => jsonResponse(ctx, 404, toJsonString(ErrorResponse("agent not found"))); return
         }
@@ -134,11 +119,8 @@ public class AtelierHttpHandler {
         for (m in dto.messages) {
             if (m.role == "user") { msgs.add(UserMessage(ContentList.ofText(m.content), 0)) }
         }
-        let provider = resolveProvider(agentCfg.model)
         // 一次性端点没有回传通道：不带 ask（提问即取消，工具会如实回报"没问到"）
-        let runtime = AgentRuntime(agentCfg, provider, this.toolRegistry, this.sessionStore,
-            this.trustManager, this.skillRegistry, this.agentRegistry, this.providerRegistry,
-            ArrayList<Hook>(), this.mcpManager)
+        let runtime = AgentRuntime(this.spec, agentCfg)
         // sessionId 透传：请求带 sessionId 时事件与请求一致（否则随机 ulid）
         let eventStream = match (dto.sessionId) {
             case Some(sid) => runtime.chatWithSessionId(sid, msgs, SessionEnvironment())
@@ -154,7 +136,7 @@ public class AtelierHttpHandler {
         let dto = try { fromJsonString<ChatRequestDTO>(body) } catch (_) {
             jsonResponse(ctx, 400, toJsonString(ErrorResponse("invalid JSON"))); return
         }
-        let agentCfg = match (this.agentRegistry.get(dto.agent)) {
+        let agentCfg = match (this.spec.agents.get(dto.agent)) {
             case Some(c) => c
             case None => jsonResponse(ctx, 404, toJsonString(ErrorResponse("agent not found"))); return
         }
@@ -162,7 +144,6 @@ public class AtelierHttpHandler {
         for (m in dto.messages) {
             if (m.role == "user") { msgs.add(UserMessage(ContentList.ofText(m.content), 0)) }
         }
-        let provider = resolveProvider(agentCfg.model)
 
         let b = ctx.responseBuilder
         b.status(UInt16(200))
@@ -189,9 +170,7 @@ public class AtelierHttpHandler {
             log.info("user request answered: ${req.id}", Array<Attr>())
             ans
         }
-        let runtime = AgentRuntime(agentCfg, provider, this.toolRegistry, this.sessionStore,
-            this.trustManager, this.skillRegistry, this.agentRegistry, this.providerRegistry,
-            ArrayList<Hook>(), this.mcpManager, ask: Some(askFn))
+        let runtime = AgentRuntime(this.spec.withAsk(askFn), agentCfg)
         // sessionId 透传：请求带 sessionId 时事件与请求一致（否则随机 ulid）
         let eventStream = match (dto.sessionId) {
             case Some(sid) => runtime.chatWithSessionId(sid, msgs, SessionEnvironment())
@@ -233,13 +212,13 @@ public class AtelierHttpHandler {
             let trust = if (dto.trust == "trusted") { TrustState.Trusted }
             else if (dto.trust == "untrusted") { TrustState.Untrusted }
             else { jsonResponse(ctx, 400, toJsonString(ErrorResponse("trust must be 'trusted' or 'untrusted'"))); return }
-            this.trustManager.setTrust(dto.path, trust)
+            this.spec.trust.setTrust(dto.path, trust)
             jsonResponse(ctx, 200, toJsonString(TrustResponse(dto.path, dto.trust, "ok")))
         } else if (dto.action == "reset") {
-            this.trustManager.setTrust(dto.path, TrustState.Undecided)
+            this.spec.trust.setTrust(dto.path, TrustState.Undecided)
             jsonResponse(ctx, 200, toJsonString(TrustResponse(dto.path, "undecided", "reset")))
         } else {
-            let state = this.trustManager.getEffectiveTrust(dto.path)
+            let state = this.spec.trust.getEffectiveTrust(dto.path)
             let name = match (state) {
                 case TrustState.Trusted => "trusted"
                 case TrustState.Untrusted => "untrusted"
@@ -250,7 +229,7 @@ public class AtelierHttpHandler {
     }
 
     private func handleSessionList(ctx: HttpContext): Unit {
-        let sessions = try { this.sessionStore.list() } catch (_) {
+        let sessions = try { this.spec.store.list() } catch (_) {
             jsonResponse(ctx, 500, toJsonString(ErrorResponse("failed to list sessions"))); return
         }
         let items = ArrayList<SessionItem>()
@@ -263,7 +242,7 @@ public class AtelierHttpHandler {
             jsonResponse(ctx, 400, toJsonString(ErrorResponse("invalid JSON"))); return
         }
         try {
-            let fork = this.sessionStore.fork(dto.sourceId, dto.leafId)
+            let fork = this.spec.store.fork(dto.sourceId, dto.leafId)
             jsonResponse(ctx, 200, toJsonString(ForkResponse("forked", fork.entries.size)))
         } catch (e: Exception) {
             jsonResponse(ctx, 500, toJsonString(ErrorResponse(e.message)))
@@ -282,7 +261,7 @@ public class AtelierHttpHandler {
                 if (m.role == "user") { msgs.add(UserMessage(ContentList.ofText(m.content), 0)) }
                 else if (m.role == "assistant") { msgs.add(AssistantMessage(ContentList.ofText(m.content), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0)) }
             }
-            this.sessionStore.save(dto.sessionId, header, msgs)
+            this.spec.store.save(dto.sessionId, header, msgs)
             jsonResponse(ctx, 200, toJsonString(StatusResponse("saved")))
         } catch (e: Exception) {
             jsonResponse(ctx, 500, toJsonString(ErrorResponse(e.message)))
@@ -295,7 +274,7 @@ public class AtelierHttpHandler {
         }
         if (dto.sessionId == "") { jsonResponse(ctx, 400, toJsonString(ErrorResponse("missing sessionId"))); return }
         try {
-            let msgs = this.sessionStore.load(dto.sessionId)
+            let msgs = this.spec.store.load(dto.sessionId)
             let parts = ArrayList<String>()
             for (m in msgs) {
                 match (m) {
@@ -321,7 +300,7 @@ public class AtelierHttpHandler {
         }
         if (dto.sessionId == "") { jsonResponse(ctx, 400, toJsonString(ErrorResponse("missing sessionId"))); return }
         try {
-            let msgs = this.sessionStore.load(dto.sessionId)
+            let msgs = this.spec.store.load(dto.sessionId)
             let text = if (dto.format == "html") { exportToHtml(msgs) } else { exportToJsonl(msgs) }
             let contentType = if (dto.format == "html") { "text/html" } else { "application/jsonl" }
             let b = ctx.responseBuilder
@@ -344,8 +323,8 @@ public class AtelierHttpHandler {
         }
 
         // Resolve agent: try model name as agent name, else use default
-        let agentName = if (this.agentRegistry.has(dto.model)) { dto.model } else { "default" }
-        let agentCfg = match (this.agentRegistry.get(agentName)) {
+        let agentName = if (this.spec.agents.has(dto.model)) { dto.model } else { "default" }
+        let agentCfg = match (this.spec.agents.get(agentName)) {
             case Some(c) => c
             case None =>
                 jsonResponse(ctx, 404, toJsonString(ErrorResponse("model not found: " + dto.model)))
@@ -365,10 +344,7 @@ public class AtelierHttpHandler {
             }
         }
 
-        let provider = resolveProvider(agentCfg.model)
-        let runtime = AgentRuntime(agentCfg, provider, this.toolRegistry,
-            this.sessionStore, this.trustManager, this.skillRegistry,
-            this.agentRegistry, this.providerRegistry, ArrayList<Hook>(), this.mcpManager)
+        let runtime = AgentRuntime(this.spec, agentCfg)
 
         if (dto.stream) {
             doV1ChatStream(ctx, runtime, msgs, dto.model, dto.sessionId)
@@ -469,15 +445,6 @@ public class AtelierHttpHandler {
         jsonResponse(ctx, 200, toJsonString(StatusResponse("ok")))
     }
 
-    private func resolveProvider(model: String): Provider {
-        match (this.providerRegistry.get("default")) {
-            case Some(p) => p
-            case None =>
-                let p = OpenAIProvider("default", "http://localhost:8089", "")
-                this.providerRegistry.register("default", p)
-                p
-        }
-    }
 }
 
 func jsonResponse(ctx: HttpContext, code: Int64, body: String): Unit {

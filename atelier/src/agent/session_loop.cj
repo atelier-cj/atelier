@@ -27,36 +27,11 @@ public class TurnOutcome {
 // 事件消费（可选逐事件回调；支持协作式取消与关闭）→ persistAppend 落库。
 // 子 Agent worker、ACP 会话桥、未来宿主循环共用同一回合语义（runtime 本身零改动）。
 public class SessionLoop {
-    private let toolReg: ToolRegistry
-    private let trustMgr: TrustManager
-    private let skillReg: SkillRegistry
-    private let agentReg: AgentRegistry
-    private let providerReg: ProviderRegistry
-    private let sessionStore: SessionStore
-    private let mcpMgr: McpManager
-    // 自定义系统提示段贡献者（下传给回合内 runtime）
-    private let promptContributors: ArrayList<PromptSegmentContributor>
-    // 请求级中间件链（下传给回合内 runtime，wrap 原 provider）
-    private let middlewares: ArrayList<ProviderMiddleware>
-    private let eventBus: ?EventBus
+    // 装配束：一次回合所需组件全在这里（会话存储、工具表、信任、技能、MCP……）
+    private let spec: HarnessSpec
 
-    public init(toolReg: ToolRegistry, trustMgr: TrustManager,
-        skillReg: SkillRegistry, agentReg: AgentRegistry,
-        providerReg: ProviderRegistry, sessionStore: SessionStore,
-        mcpMgr: McpManager,
-        promptContributors!: ArrayList<PromptSegmentContributor> = ArrayList(),
-        middlewares!: ArrayList<ProviderMiddleware> = ArrayList(),
-        eventBus!: ?EventBus = None) {
-        this.toolReg = toolReg
-        this.trustMgr = trustMgr
-        this.skillReg = skillReg
-        this.agentReg = agentReg
-        this.providerReg = providerReg
-        this.sessionStore = sessionStore
-        this.mcpMgr = mcpMgr
-        this.promptContributors = promptContributors
-        this.middlewares = middlewares
-        this.eventBus = eventBus
+    public init(spec: HarnessSpec) {
+        this.spec = spec
     }
 
     // 执行一次回合。requestStop：close 请求（打断且不回信语义由调用方判定）；
@@ -74,12 +49,8 @@ public class SessionLoop {
         askFn!: Option<AskFn> = None,
         maxLoad!: Int64 = 0,
         attachments!: ArrayList<ContentBlock> = ArrayList()): TurnOutcome {
-        let toolRegistry = match (toolRegOverride) {
-            case Some(r) => r
-            case None => this.toolReg
-        }
         var oldLoaded = ArrayList<Message>()
-        try { oldLoaded = this.sessionStore.load(sessionId) } catch (e: Exception) {
+        try { oldLoaded = this.spec.store.load(sessionId) } catch (e: Exception) {
             // 历史加载失败若不留痕，表现为「会话凭空变空」——下游只能看到模型失忆
             eprintln("[atelier] session load failed (sessionId=${sessionId}): ${e.toString()}")
         }
@@ -91,12 +62,19 @@ public class SessionLoop {
             for (b in attachments) { blocks.add(b) }
             msgs.add(UserMessage(ContentList(blocks), 0))
         }
-        let runtime = AgentRuntime(config, provider, toolRegistry, this.sessionStore,
-            this.trustMgr, this.skillReg, this.agentReg, this.providerReg,
-            ArrayList<Hook>(), env, this.mcpMgr, ask: askFn,
-            promptContributors: this.promptContributors,
-            middlewares: this.middlewares,
-            eventBus: this.eventBus)
+        // 本回合的装配束：显式传入的 provider / 工具表 / 提问通道在本回合内生效，
+        // 其余组件与装配期一致
+        var turnSpec = this.spec
+        turnSpec = turnSpec.withProvider(providerNameOf(config), provider)
+        match (toolRegOverride) {
+            case Some(r) => turnSpec = turnSpec.withToolRegistry(r)
+            case None => ()
+        }
+        match (askFn) {
+            case Some(f) => turnSpec = turnSpec.withAsk(f)
+            case None => ()
+        }
+        let runtime = AgentRuntime(turnSpec, config, sessionEnv: env)
         let stream = runtime.chatWithSessionId(sessionId, msgs, env)
         // 事件消费 + 控制轮询收敛成一个独立函数（便于用构造出来的流单测：见
         // session_loop_test 的 consumeTurnStream 用例）
@@ -116,7 +94,7 @@ public class SessionLoop {
             ArrayList<Message>(oldLoaded)
         }
         // 落库（错误由调用方按日志策略处理）
-        match (persistAppendWithParent(this.sessionStore, sessionId, oldLoaded, all, parentSession)) {
+        match (persistAppendWithParent(this.spec.store, sessionId, oldLoaded, all, parentSession)) {
             case Some(err) => getGlobalLogger([("name", "SessionLoop")]).error("persist: ${err}", Array<Attr>())
             case None => ()
         }

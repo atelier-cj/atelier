@@ -23,16 +23,11 @@ main(): Int64 {
     let args = getCommandLine()
     let cmd = if (args.size > 1) { args[1] } else { "" }
 
-    let toolReg = ToolRegistry()
-    registerBuiltins(toolReg)
-
     let trustMgr = TrustManager()
     let skillReg = SkillRegistry()
 
     let agentReg = AgentRegistry()
     let providerReg = ProviderRegistry.default()
-
-    let providerRegForCli = providerReg
 
     // Load ~/.atelier.toml config
     let configDir = match (getVariable("HOME")) {
@@ -63,21 +58,6 @@ main(): Int64 {
     initLogger(config.logging)
 
     let mcpMgr = McpManager()
-    let handler = AtelierHttpHandler(agentReg, toolReg, sessionStore, trustMgr, skillReg)
-    handler.setProviderRegistry(providerReg)
-    handler.setMcpManager(mcpMgr)
-    toolReg.register(LoadMcpToolsetTool(mcpMgr, toolReg))
-    try { skillReg.loadDirectory(configDir + "/.agents/skills") } catch (e: Exception) {
-        // 技能目录整体加载失败 = 全部技能静默消失，模型只会「不会用」而无任何线索
-        eprintln("[atelier] skills load failed (${configDir}/.agents/skills): ${e.toString()}")
-    }
-    toolReg.register(UseSkillsTool(skillReg))
-    for (a in config.agent) {
-        try { agentReg.create(a.name, agentConfigFrom(a)) } catch (e: Exception) {
-            // 配置里的 Agent 建不出来 = 该 Agent 静默不存在，稍后请求只会得到 not found
-            eprintln("[atelier] agent '${a.name}' create failed: ${e.toString()}")
-        }
-    }
     for (p in config.provider) {
         let cfg = toProviderConfig(p)
         try {
@@ -85,6 +65,27 @@ main(): Int64 {
             providerReg.register(p.name, prov)
         } catch (e: Exception) {
             eprintln("warning: provider '${p.name}' (type '${p.providerType}') skipped: ${e.message}")
+        }
+    }
+    // 装配束：会话存储 / 信任 / 技能 / Agent 注册表 / provider / MCP 一次装齐，
+    // 内置工具绑定到**这一份**组件（技能入口、按需 MCP 加载都指向它）
+    var spec = HarnessSpec(
+        providers: providerReg, store: sessionStore, trust: trustMgr,
+        skills: skillReg, agents: agentReg, mcp: mcpMgr)
+    spec = HarnessSpec.withBuiltinTools(spec)
+    spec = HarnessSpec.withEnvProvider(spec)
+    // [[model]] 声明的上下文窗口（未声明的新模型会落回内置表 + 兜底并留痕）
+    spec = withTomlModels(spec, config.model)
+    try { skillReg.loadDirectory(configDir + "/.agents/skills") } catch (e: Exception) {
+        // 技能目录整体加载失败 = 全部技能静默消失，模型只会「不会用」而无任何线索
+        eprintln("[atelier] skills load failed (${configDir}/.agents/skills): ${e.toString()}")
+    }
+    let toolReg = spec.tools
+    let handler = AtelierHttpHandler(spec)
+    for (a in config.agent) {
+        try { agentReg.create(a.name, agentConfigFrom(a)) } catch (e: Exception) {
+            // 配置里的 Agent 建不出来 = 该 Agent 静默不存在，稍后请求只会得到 not found
+            eprintln("[atelier] agent '${a.name}' create failed: ${e.toString()}")
         }
     }
     for (ms in config.mcpServer) {
@@ -113,21 +114,17 @@ main(): Int64 {
             // 第三参数 sessionDirOverride：远程子进程数据隔离（独立会话/映射目录）
             let acpAgentName = if (args.size > 2) { args[2] } else { "" }
             let acpSessionDirOverride = if (args.size > 3) { args[3] } else { "" }
-            runAcp(acpAgentName, toolReg, trustMgr, skillReg,
-                agentReg, providerRegForCli, sessionStore, mcpMgr, sessionDir,
-                acpSessionDirOverride)
+            runAcp(acpAgentName, spec, sessionDir, acpSessionDirOverride)
 
         // 交互入口只有一个 TUI；"repl" 是历史命令名（早期另有行式 REPL，已移除）
         case "repl" | "tui" =>
             let agentName = if (args.size > 2) { args[2] } else { "default" }
             let resumeId = if (args.size > 3) { args[3] } else { "" }
-            runTui(agentName, resumeId, toolReg, trustMgr, skillReg, agentReg,
-                providerRegForCli, sessionStore, mcpMgr, sessionDir)
+            runTui(agentName, resumeId, spec, sessionDir)
 
         case "" =>
             // 直接 cli.app：进入聊天 TUI（传统 agent 交互）
-            runTui("default", "", toolReg, trustMgr, skillReg, agentReg,
-                providerRegForCli, sessionStore, mcpMgr, sessionDir)
+            runTui("default", "", spec, sessionDir)
 
         case "run" =>
             if (args.size < 3) {
@@ -169,8 +166,7 @@ main(): Int64 {
                     agentReg.create("default", c)
                     c
             }
-            let prov = resolveProviderFor(cfg, providerRegForCli)
-            let runtime = AgentRuntime(cfg, prov, toolReg, sessionStore, trustMgr, skillReg, agentReg, providerRegForCli, mcpMgr)
+            let runtime = AgentRuntime(spec, cfg)
             let msgs = ArrayList<Message>()
             msgs.add(UserMessage(ContentList.ofText(prompt), 0))
             let stream = runtime.chat(msgs)
@@ -201,7 +197,7 @@ main(): Int64 {
             println("  cli.app run [agent] <prompt>  Run single prompt")
             println("")
             println("TUI slash commands: /help, /agent, /session, /model, /models, /tools, /subagent, /trust, /untrust, /clear, /exit")
-            println("Config: ~/.atelier.toml  — agent, provider, server, mcpServer, logging")
+            println("Config: ~/.atelier.toml  — agent, provider, model, server, mcpServer, logging")
             println("Skills: ~/.agents/skills/<name>/SKILL.md")
             println("Logs:   ~/.atelier/atelier.log (set [logging] level = \"debug\")")
             println("Sessions: ~/.atelier/sessions/ (persistent, auto-save after each turn)")
@@ -212,18 +208,13 @@ main(): Int64 {
 }
 
 // 聊天 TUI 装配（无子命令、tui / repl 子命令都走这里）
-private func runTui(agentName: String, resumeId: String, toolReg: ToolRegistry,
-    trustMgr: TrustManager, skillReg: SkillRegistry, agentReg: AgentRegistry,
-    providerReg: ProviderRegistry, sessionStore: SessionStore, mcpMgr: McpManager,
-    sessionDir: String): Unit {
-    let slashReg = SlashCommandRegistry(trustMgr)
-    let cfg = match (agentReg.get(agentName)) {
+private func runTui(agentName: String, resumeId: String, spec: HarnessSpec, sessionDir: String): Unit {
+    let slashReg = SlashCommandRegistry(spec.trust)
+    let cfg = match (spec.agents.get(agentName)) {
         case Some(c) => c
         case None => AgentConfig.default()
     }
-    let prov = resolveProviderFor(cfg, providerReg)
-    let tui = ChatTui(agentName, slashReg, cfg, prov, toolReg, sessionStore, trustMgr, skillReg,
-        agentReg, providerReg, resumeId, mcpMgr, sessionDir)
+    let tui = ChatTui(agentName, slashReg, cfg, spec, resumeId, sessionDir)
     tui.run()
 }
 
@@ -258,16 +249,6 @@ func initLogger(cfg: TomlLogging): Unit {
     setGlobalLogger(logger)
 }
 
-func registerBuiltins(reg: ToolRegistry): Unit {
-    reg.register(ReadFileTool())
-    reg.register(WriteFileTool())
-    reg.register(EditFileTool())
-    reg.register(BashTool())
-    reg.register(GrepTool())
-    reg.register(GlobTool())
-    reg.register(TodoTool())
-    reg.register(AskUserTool())
-}
 
 // 共享装配助手（resolveProviderFor / serve / parseInt）已移至 cli/src/shared.cj
 

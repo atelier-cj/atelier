@@ -96,9 +96,9 @@ func makeActivityTui(tool: Tool, provider: Provider, toolName: String): ChatTui 
     let reg = ToolRegistry()
     reg.register(tool)
     let trustMgr = TrustManager()
-    ChatTui("default", SlashCommandRegistry(trustMgr), activityTestConfig(toolName), provider,
-        reg, MemorySessionStore(), trustMgr, SkillRegistry(), AgentRegistry(), ProviderRegistry(),
-        "sess_activity", McpManager(), "/tmp/atelier-tui-test")
+    ChatTui("default", SlashCommandRegistry(trustMgr), activityTestConfig(toolName),
+        cliTestSpec(reg, MemorySessionStore(), trustMgr, SkillRegistry(), AgentRegistry(), ProviderRegistry(), McpManager(), provider),
+        "sess_activity", "/tmp/atelier-tui-test")
 }
 
 /** 轮询直到消息区出现某片段（活动块由后台回合线程写入）。 */

@@ -29,31 +29,17 @@ import atelier.trust.*
 import std.collection.*
 
 main() {
-    // 准备工具
-    let toolReg = ToolRegistry()
-    toolReg.register(ReadFileTool())
-    toolReg.register(BashTool())
+    // 装配束：内置工具 + 本次要用的 provider / 会话存储
+    let spec = HarnessSpec.default()
+        .withProvider("default",
+            OpenAIProvider("default",
+                "https://api.openai.com/v1",
+                getApiKey()))
+        .withStore(MemorySessionStore())
 
-    // 创建 Provider
-    let providerReg = ProviderRegistry()
-    providerReg.register("default",
-        OpenAIProvider("default",
-            "https://api.openai.com/v1",
-            getApiKey()))
-
-    let sessionStore = MemorySessionStore()
-    let trustMgr = TrustManager()
-    let skillReg = SkillRegistry()
-    let agentReg = AgentRegistry()
-
-    // 定义 Agent
+    // 定义 Agent 并创建运行时（装配束 + 配置）
     let config = AgentConfig.default()
-    let provider = providerReg.get("default").getOrThrow()
-
-    // 创建运行时
-    let runtime = AgentRuntime(config, provider,
-        toolReg, sessionStore, trustMgr, skillReg,
-        agentReg, providerReg)
+    let runtime = AgentRuntime(spec, config)
 
     // 发送消息
     let msgs = ArrayList<Message>()
@@ -358,13 +344,12 @@ toolReg.register(KnowledgeSearchTool())
 let providerReg = ProviderRegistry()
 providerReg.register("default", OpenAIProvider("default", "https://api.deepseek.com", apiKey))
 
-let sessionStore = StormSessionStore("/data/wiki/sessions")
-let trustMgr = TrustManager()
-let skillReg = SkillRegistry()
-let agentReg = AgentRegistry()
+// 装配束可全局共享（组件是引用，运行时不改它们）
+let spec = HarnessSpec.default()
+    .withProvider("default", OpenAIProvider("default", "https://api.deepseek.com", apiKey))
+    .withStore(StormSessionStore("/data/wiki/sessions"))
 
-// AgentRuntime 可全局共享
-let runtime = AgentRuntime(config, provider, toolReg, sessionStore, trustMgr, skillReg, agentReg, providerReg)
+let runtime = AgentRuntime(spec, config)
 ```
 
 **4. 处理用户请求**
@@ -430,8 +415,8 @@ func handleDelete(ctx: HttpContext): Unit {
 `AgentRuntime` 是**无状态**的——它不持有会话数据，每次 `chat()` 从入参 `messages` 读取历史：
 
 ```cangjie
-// 全局一个 runtime 实例
-let runtime = AgentRuntime(config, provider, toolReg, sessionStore, ...)
+// 全局一个 runtime 实例（装配束 + 该 agent 的配置）
+let runtime = AgentRuntime(spec, config)
 
 // 用户 A 的会话
 let msgsA = sessionStore.load("session_a")
@@ -491,20 +476,55 @@ class AuditHook <: Hook {
     }
 }
 
-let hooks = ArrayList<Hook>([AuditHook()])
-let runtime = AgentRuntime(config, provider, toolReg,
-    sessionStore, trustMgr, skillReg, agentReg, providerReg,
-    hooks, mcpManager, ask: Some(askFn))   // askFn：宿主提问通道（不传 = 提问即取消）
+// 钩子挂在装配束上（可多个：withHook 追加）
+let spec = HarnessSpec.default().withHook(AuditHook())
+let runtime = AgentRuntime(spec, config)
 ```
 
 所有钩子都有空默认实现，只需覆写需要的。完整的决策类型、状态共享、融合顺序与最佳实践见 **[Hook 文档](hooks.md)**。
 
-### 注入依赖
+### 注入依赖：装配束（HarnessSpec）
 
-AgentRuntime 的构造参数即依赖注入点：
+组件一次装配，运行时只收两个参数：装配束 + agent 配置。
 
-| 参数 | 类型 | 说明 |
+```cangjie
+let spec = HarnessSpec.default()
+    .withProvider("default", myProvider)      // 换模型服务
+    .withStore(myStore)                       // 换会话存储
+    .withTool(myTool)                         // 加/换工具（同名覆盖）
+    .withToolsView(clientTools)               // 只影响本次 run 的工具叠加视图
+    .withSkills(mySkillRegistry)
+    .withAgents(myAgentRegistry)
+    .withMcp(myMcpManager)
+    .withHook(AuditHook())
+    .withAsk(askFn)                           // (UserRequest) -> UserAnswer
+    .withModelContext("vendor-model", 262144) // 模型上下文窗口
+    .withMiddlewares(middlewares)
+    .withEventBus(bus)
+
+let runtime = AgentRuntime(spec, cfg)
+```
+
+| 组件 | 类型 | 换法 |
 |------|------|------|
+| 工具表 | `ToolRegistry` | `withTool` / `withToolsView`（run 作用域派生视图）/ `withToolRegistry` |
+| Provider | `Provider` | `withProvider(name, p)`（叠加表，不动宿主共享的注册表） |
+| 会话存储 | `SessionStore` | `withStore` |
+| 信任闸门 | `TrustManager` | `withTrust` |
+| Skill 注册表 | `SkillRegistry` | `withSkills` |
+| Agent 注册表 | `AgentRegistry` | `withAgents` |
+| MCP 连接 | `McpManager` | `withMcp` |
+| 钩子 | `ArrayList<Hook>` | `withHook` / `withHooks` |
+| 提问通道 | `Option<AskFn>` | `withAsk`（审批/选择/表单） |
+| 模型窗口表 | `ModelContextRegistry` | `withModelContext` / `withModels` / `withDefaultContextWindow` |
+| 请求级中间件 | `ArrayList<ProviderMiddleware>` | `withMiddlewares` |
+| 系统提示段 | `ArrayList<PromptSegmentContributor>` | `withContributors` |
+| 事件总线 | `EventBus` | `withEventBus` |
+
+`AgentConfig` 里的 `provider` 决定用哪个 provider（缺省 `"default"`）；装配束里找不到会**明确报错**，
+不会静默退化成某个默认端点。`AgentConfig.contextWindow` 优先于模型表。
+
+------|------|------|
 | `config` | `AgentConfig` | Agent 身份、模型、参数 |
 | `provider` | `Provider` | LLM 服务适配器 |
 | `toolRegistry` | `ToolRegistry` | 工具注册表 |

@@ -80,7 +80,7 @@ func runGate(askAnswer: Option<UserAnswer>, sessionId!: String = "s1",
         })
         case None => None
     }
-    let runtime = AgentRuntime(AgentConfig.default(), provider, reg, MemorySessionStore(), trust,
+    let runtime = testRuntime(AgentConfig.default(), provider, reg, MemorySessionStore(), trust,
         SkillRegistry(), AgentRegistry(), preg, ArrayList<Hook>(), McpManager(),
         ask: askImpl)
     let input = ArrayList<Message>()

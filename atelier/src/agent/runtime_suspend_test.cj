@@ -77,7 +77,7 @@ func chatWith(provider: Provider, tools: ArrayList<Tool>, store: SessionStore,
     for (t in tools) { toolReg.register(t) }
     let providerReg = ProviderRegistry()
     providerReg.register("default", provider)
-    let runtime = AgentRuntime(AgentConfig.default(), provider, toolReg, store, TrustManager(),
+    let runtime = testRuntime(AgentConfig.default(), provider, toolReg, store, TrustManager(),
         SkillRegistry(), AgentRegistry(), providerReg, ArrayList<Hook>(), McpManager())
     // 运行时不落库：宿主（SessionLoop/ACP/AG-UI handler）在 run 结束后统一追加，
     // 挂起也一样 —— 历史必须停在 assistant(tool_calls)，恢复才有锚点

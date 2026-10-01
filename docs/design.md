@@ -431,11 +431,17 @@ let config = AgentConfig {
     model: "gpt-4o"
 }
 
-// 3. 创建 Runtime 并运行
-let runtime = AgentRuntime.new(config)
+// 3. 装一个装配束（组件一次配齐；default() = 内置工具 + 内存会话 + 环境变量 provider）
+let spec = HarnessSpec.default()
+    .withTool(KnowledgeSearchTool())
+    .withTool(TicketCreateTool())
+    .withProvider("default", myProvider)
+
+// 4. 创建 Runtime 并运行（装配束 + 配置）
+let runtime = AgentRuntime(spec, config)
 let stream = runtime.chat(messages)
 
-// 4. 消费事件流
+// 5. 消费事件流
 for event in stream {
     match event {
         is MessageChunk -> print(event.delta)
@@ -737,7 +743,8 @@ struct AgentConfig {
     
     // 模型
     model: String                       // 如 "gpt-4o"
-    provider: Option<String>            // 可选，默认根据 model 推断
+    provider: Option<String>            // 可选，缺省 "default"（在装配束里解析）
+    contextWindow: Option<Int64>        // 可选，本 agent 的上下文窗口（优先于 [[model]] / 内置表）
     
     // 工具与技能
     tools: List<String>                 // 工具名称列表
@@ -887,7 +894,20 @@ Provider 直接对接 LLM REST API，初始实现 `OpenAIProvider`（兼容 Open
 
 ### 8.2.1 模型上下文窗口推断
 
-上下文压缩等模块需要知道模型的上下文窗口大小，采用**硬编码查找表 + 现场实测校准**双重策略：
+上下文压缩等模块需要知道模型的上下文窗口大小。**窗口是模型的属性，不是库的属性**：新模型、
+代理服务截断后的窗口、超长上下文变体都与内置表不符。所以取值按优先级来，而不是只靠硬编码表：
+
+| 优先级 | 来源 | 说明 |
+|---|---|---|
+| 1 | `AgentConfig.contextWindow` | agent 自报（TOML `[[agent]] contextWindow` / 代码） |
+| 2 | `HarnessSpec.withModelContext` / TOML `[[model]]` | 模型级声明（库/配置两条路，都进同一张表） |
+| 3 | 内置查找表 | 常见模型名 |
+| 4 | 兜底值（默认 8192，可配） | **未命中即打一条警告**，提示声明窗口 |
+
+取兜底值时必须留痕：静默按偏小的值提前压缩，表现为"模型无缘无故失忆"，而下游看不到任何线索。
+
+```cangjie
+class ModelContextRegistry {
 
 ```cangjie
 class ModelContextRegistry {
@@ -1064,7 +1084,7 @@ public interface Hook {
 | 最大输出 Token | 4096 | `maxOutputTokens` |
 | 压缩缓冲 Token | 16384 | `compactionReserveTokens` |
 | 保留最近 Token | 20000 | `keepRecentTokens` |
-| 上下文窗口（未知时禁用压缩） | 0（禁用） | Provider 提供时启用 |
+| 上下文窗口（未知模型） | 兜底 8192 并警告 | `[[model]]` / `AgentConfig.contextWindow` / `withDefaultContextWindow`（0 = 禁用压缩） |
 | 并发工具执行 | 根据 `ExecutionMode` | 串行/并行 |
 | 最大工具结果字符 | 2000（摘要场景） | 硬编码 |
 
@@ -1243,8 +1263,10 @@ Atelier 是一个**面向业务集成的 Agent Harness**，其核心价值在于
 
 ## 十三、库集成扩展点（自定义/替换矩阵，2026-09-05 盘点）
 
-> 组合模型 = 接口/注册表 + 构造注入（无 DI 框架，组合根即宿主代码）。以下为库方式集成时
-> 可替换/可注入的全部扩展面与约束；随实现演进更新本表。
+> 组合模型 = **装配束（`HarnessSpec`）+ 接口注入**（无 DI 框架、无容器：宿主在组合根显式装配，
+> 运行期不做发现/注入）。装配束是值语义 —— `with*` 派生不影响共享组件，故"按 run / 按 agent
+> 派生一份"是安全的（客户端工具叠加、单次 run 的提问通道都走这条）。
+> 以下为库方式集成时可替换/可注入的全部扩展面与约束；随实现演进更新本表。
 
 ### 接口替换（实现 → 注册/注入）
 

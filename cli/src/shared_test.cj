@@ -5,7 +5,13 @@ package cli
 import std.fs.*
 import std.unittest.*
 import std.unittest.testmacro.*
+import std.collection.*
 import atelier.trust.*
+import atelier.agent.*
+import atelier.provider.*
+import atelier.tool.*
+import atelier.session.*
+import atelier.skill.*
 
 @Test
 func currentExePath_resolvesNonEmpty() {
@@ -84,4 +90,14 @@ func applyTrustFromEnv_emptyLeavesUndecided() {
     let mgr = TrustManager()
     @Expect(applyTrustFromEnv(mgr, "").size, 0)
     @Expect(isTrustedState(mgr.getEffectiveTrust("/tmp")), false)
+}
+
+// ---------- 测试装配助手：CLI 侧组件收成一个装配束 ----------
+
+func cliTestSpec(toolReg: ToolRegistry, store: SessionStore, trustMgr: TrustManager,
+    skillReg: SkillRegistry, agentReg: AgentRegistry, providerReg: ProviderRegistry,
+    mcpMgr: McpManager, provider: Provider): HarnessSpec {
+    HarnessSpec(tools: toolReg, store: store, trust: trustMgr, skills: skillReg,
+        agents: agentReg, providers: providerReg, mcp: mcpMgr)
+        .withProvider("default", provider)
 }

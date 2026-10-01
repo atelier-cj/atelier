@@ -130,6 +130,115 @@ func registry_registerDuplicate_overwrites() {
     }
 }
 
+// ── 派生视图（run 作用域叠加） ───────────────────────────────
+
+@Test
+func registry_derived_overlayShadowsParent() {
+    let base = ToolRegistry()
+    base.register(makeMockTool("read_file", "base read", ToolExecutionMode.Parallel))
+
+    let view = base.derived(ArrayList<Tool>([
+        makeMockTool("read_file", "client read", ToolExecutionMode.Sequential),
+        makeMockTool("client_tool", "client only", ToolExecutionMode.Parallel)
+    ]))
+
+    // 同名以视图为准
+    match (view.get("read_file")) {
+        case Some(t) => @Expect(t.description(), "client read")
+        case None => @Fail("expected read_file in derived view")
+    }
+    // 父表不受影响
+    match (base.get("read_file")) {
+        case Some(t) => @Expect(t.description(), "base read")
+        case None => @Fail("expected read_file in base registry")
+    }
+    // 视图独有的工具不回流父表
+    @Expect(view.has("client_tool"), true)
+    @Expect(base.has("client_tool"), false)
+}
+
+@Test
+func registry_derived_seesLateParentRegistrations() {
+    // 视图派生之后注册进父表的工具，视图一样看得到：
+    // 运行中按需加载的 MCP 工具（本轮注册、本轮就该可用）依赖这条语义
+    let base = ToolRegistry()
+    let view = base.derived(ArrayList<Tool>())
+    @Expect(view.has("mcp_late"), false)
+
+    base.register(makeMockTool("mcp_late", "loaded mid-run", ToolExecutionMode.Parallel))
+
+    @Expect(view.has("mcp_late"), true)
+    @Expect(view.list().size, 1)
+}
+
+@Test
+func registry_derived_removeOnlyMasksInView() {
+    let base = ToolRegistry()
+    base.register(makeMockTool("bash", "base bash", ToolExecutionMode.Sequential))
+
+    let view = base.derived(ArrayList<Tool>())
+    let sibling = base.derived(ArrayList<Tool>())
+    view.remove("bash")
+
+    @Expect(view.has("bash"), false)
+    // 父表与兄弟视图都不受影响
+    @Expect(base.has("bash"), true)
+    @Expect(sibling.has("bash"), true)
+    @Expect(sibling.list().size, 1)
+}
+
+@Test
+func registry_derived_reRegisterUnmasksInView() {
+    let base = ToolRegistry()
+    base.register(makeMockTool("bash", "base bash", ToolExecutionMode.Sequential))
+
+    let view = base.derived(ArrayList<Tool>())
+    view.remove("bash")
+    @Expect(view.has("bash"), false)
+
+    view.register(makeMockTool("bash", "view bash", ToolExecutionMode.Sequential))
+    match (view.get("bash")) {
+        case Some(t) => @Expect(t.description(), "view bash")
+        case None => @Fail("re-registered tool should be visible again")
+    }
+}
+
+@Test
+func registry_derived_listDedupesWithOverlayWinning() {
+    let base = ToolRegistry()
+    base.register(makeMockTool("tool_a", "base a", ToolExecutionMode.Parallel))
+    base.register(makeMockTool("tool_b", "base b", ToolExecutionMode.Parallel))
+
+    let view = base.derived(ArrayList<Tool>([
+        makeMockTool("tool_b", "view b", ToolExecutionMode.Sequential),
+        makeMockTool("tool_c", "view c", ToolExecutionMode.Parallel)
+    ]))
+
+    let tools = view.list()
+    @Expect(tools.size, 3)
+    for (t in tools) {
+        if (t.name() == "tool_b") {
+            @Expect(t.description(), "view b")
+        }
+    }
+}
+
+@Test
+func registry_derived_nestedViews() {
+    let base = ToolRegistry()
+    base.register(makeMockTool("tool_a", "base a", ToolExecutionMode.Parallel))
+
+    let mid = base.derived(ArrayList<Tool>([makeMockTool("tool_b", "mid b", ToolExecutionMode.Parallel)]))
+    let leaf = mid.derived(ArrayList<Tool>([makeMockTool("tool_c", "leaf c", ToolExecutionMode.Parallel)]))
+
+    @Expect(leaf.list().size, 3)
+    @Expect(leaf.has("tool_c"), true)
+    // 中间层移除对叶子生效
+    mid.remove("tool_a")
+    @Expect(leaf.has("tool_a"), false)
+    @Expect(base.has("tool_a"), true)
+}
+
 // ── Test 3: Full lifecycle ───────────────────────────────────
 
 @Test

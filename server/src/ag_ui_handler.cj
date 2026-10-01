@@ -100,27 +100,13 @@ class AgUiInstructionsContributor <: PromptSegmentContributor {
 // ── 处理器 ──────────────────────────────────────────────────────────────────
 
 public class AgUiHandler {
-    private let agentRegistry: AgentRegistry
-    private let toolRegistry: ToolRegistry
-    private let sessionStore: SessionStore
-    private let trustManager: TrustManager
-    private let skillRegistry: SkillRegistry
-    private let providerRegistry: ProviderRegistry
-    private let mcpManager: McpManager
+    // 装配束：与 HTTP handler / CLI 共用同一份组件
+    private let spec: HarnessSpec
     // threadId → 未决中断（内存态：单进程服务；跨重启无法关联时按协议回 RunError）
     private let openInterrupts = ConcurrentHashMap<String, ArrayList<AgUiInterrupt>>()
 
-    public init(agentRegistry: AgentRegistry, toolRegistry: ToolRegistry,
-        sessionStore: SessionStore, trustManager: TrustManager,
-        skillRegistry: SkillRegistry, providerRegistry: ProviderRegistry,
-        mcpManager: McpManager) {
-        this.agentRegistry = agentRegistry
-        this.toolRegistry = toolRegistry
-        this.sessionStore = sessionStore
-        this.trustManager = trustManager
-        this.skillRegistry = skillRegistry
-        this.providerRegistry = providerRegistry
-        this.mcpManager = mcpManager
+    public init(spec: HarnessSpec) {
+        this.spec = spec
     }
 
     public func registerRoutes(distributor: HttpRequestDistributor): Unit {
@@ -157,7 +143,7 @@ public class AgUiHandler {
         if (agentName == "") {
             jsonResponse(ctx, 404, toJsonString(ErrorResponse("no agent available"))); return
         }
-        let baseCfg = match (this.agentRegistry.get(agentName)) {
+        let baseCfg = match (this.spec.agents.get(agentName)) {
             case Some(c) => c
             case None =>
                 jsonResponse(ctx, 404, toJsonString(ErrorResponse("agent not found: ${agentName}"))); return
@@ -173,7 +159,7 @@ public class AgUiHandler {
         // 会话不存在时 load 会抛（新 thread 的首次请求就是这条路），按"无历史"处理：
         // 运行时会创建该会话，threadId 因此成为跨 run 的会话 id
         var oldLoaded = ArrayList<Message>()
-        try { oldLoaded = this.sessionStore.load(threadId) } catch (_) { oldLoaded = ArrayList<Message>() }
+        try { oldLoaded = this.spec.store.load(threadId) } catch (_) { oldLoaded = ArrayList<Message>() }
         let hasHistory = oldLoaded.size > 0
 
         // 中断-恢复：有未决中断时必须带 resume，且必须覆盖全部（协议规则 3/4）
@@ -227,12 +213,13 @@ public class AgUiHandler {
 
         let sink = AgUiSseSink(HttpResponseWriter(ctx))
 
-        let provider = this.resolveProvider()
-        let runtime = AgentRuntime(cfg, provider, this.clientToolRegistry(input.tools),
-            this.sessionStore, this.trustManager, this.skillRegistry, this.agentRegistry,
-            this.providerRegistry, ArrayList<Hook>(), SessionEnvironment(), this.mcpManager,
-            ask: Some({ req: UserRequest => UserAnswer.pending(req.id) }),
-            promptContributors: this.contributorsFor(input))
+        // 本次 run 的装配束：客户端工具走**派生视图**叠加到根表（根表不动，
+        // 同一进程里其它 run 不受影响）；提问一律挂起，等下一次 run 的 resume
+        let runSpec = this.spec
+            .withToolsView(this.clientToolOverlay(input.tools))
+            .withAsk({ req: UserRequest => UserAnswer.pending(req.id) })
+            .withContributors(this.contributorsFor(input))
+        let runtime = AgentRuntime(runSpec, cfg)
 
         let translator = AgUiTranslator(threadId, runId, clientTools: clientToolNames)
         let snapshot = AgUiStateSnapshot(agentName, cfg.model, threadId,
@@ -256,7 +243,7 @@ public class AgUiHandler {
         // 落库：运行时不落库，由宿主统一追加（挂起那轮同样要落 —— 历史停在
         // assistant(tool_calls) 才是恢复的锚点）。取回全量消息失败时退回追加已知输入。
         let all = try { eventStream.result() } catch (_) { msgs }
-        match (persistAppend(this.sessionStore, threadId, oldLoaded, all)) {
+        match (persistAppend(this.spec.store, threadId, oldLoaded, all)) {
             case Some(err) =>
                 let log = getGlobalLogger([("name", "AgUi")])
                 log.warn("session persist failed: ${err}", Array<Attr>())
@@ -265,19 +252,17 @@ public class AgUiHandler {
     }
 
     // 客户端工具进 run 作用域注册表：base 工具 ∪ 本次客户端工具（run 结束即弃，不污染全局）
-    private func clientToolRegistry(tools: ArrayList<AgUiToolDTO>): ToolRegistry {
-        let reg = ToolRegistry()
-        for (t in this.toolRegistry.list()) { reg.register(t) }
+    // 客户端工具叠加层：同名以客户端为准（派生视图里 overlay 优先，不必先删根表项）
+    private func clientToolOverlay(tools: ArrayList<AgUiToolDTO>): ArrayList<Tool> {
+        let overlay = ArrayList<Tool>()
         for (t in tools) {
             let schema = match (t.parameters) {
                 case Some(p) => p
                 case None => JsonValue.Map(HashMap<String, JsonValue>())
             }
-            // 同名工具以客户端为准：前端声明的工具语义由前端实现
-            if (reg.has(t.name)) { reg.remove(t.name) }
-            reg.register(ClientToolShim(t.name, t.description, schema))
+            overlay.add(ClientToolShim(t.name, t.description, schema))
         }
-        reg
+        overlay
     }
 
     private func contributorsFor(input: RunAgentInput): ArrayList<PromptSegmentContributor> {
@@ -288,7 +273,7 @@ public class AgUiHandler {
     }
 
     private func defaultAgentName(): String {
-        let all = this.agentRegistry.list()
+        let all = this.spec.agents.list()
         for (item in all) {
             let (name, _) = item
             if (name == "default") { return name }
@@ -300,15 +285,6 @@ public class AgUiHandler {
         ""
     }
 
-    private func resolveProvider(): Provider {
-        match (this.providerRegistry.get("default")) {
-            case Some(p) => p
-            case None =>
-                let p = OpenAIProvider("default", "http://localhost:8089", "")
-                this.providerRegistry.register("default", p)
-                p
-        }
-    }
 }
 
 // 消费循环：翻译 + 写出，直到 AgentEnd / provider 失败 / 客户端断开

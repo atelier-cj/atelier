@@ -58,14 +58,8 @@ public class AcpBridge {
     private let agentName: String
     private let baseConfig: AgentConfig
     private let provider: Provider
-    private let toolReg: ToolRegistry
-    private let trustMgr: TrustManager
-    private let skillReg: SkillRegistry
-    private let agentReg: AgentRegistry
-    private let providerReg: ProviderRegistry
-    private let sessionStore: SessionStore
-    private let mcpMgr: McpManager
-    private let modelReg: ModelContextRegistry
+    // 装配束：本会话宿主与其它宿主共用同一份组件
+    private let spec: HarnessSpec
     private let manager: AcpSessionManager
     private let hosts = HashMap<String, HostState>()
     private let hostsLock = Mutex()
@@ -83,24 +77,14 @@ public class AcpBridge {
     }
 
     public init(agentName: String, baseConfig: AgentConfig, provider: Provider,
-        toolReg: ToolRegistry, trustMgr: TrustManager, skillReg: SkillRegistry,
-        agentReg: AgentRegistry, providerReg: ProviderRegistry,
-        sessionStore: SessionStore, mcpMgr: McpManager,
-        modelReg: ModelContextRegistry, mappingFile: String,
+        spec: HarnessSpec, mappingFile: String,
         acpName: String, acpVersion: String) {
         this.agentName = agentName
         this.baseConfig = baseConfig
         this.provider = provider
-        this.toolReg = toolReg
-        this.trustMgr = trustMgr
-        this.skillReg = skillReg
-        this.agentReg = agentReg
-        this.providerReg = providerReg
-        this.sessionStore = sessionStore
-        this.mcpMgr = mcpMgr
-        this.modelReg = modelReg
+        this.spec = spec
         this.manager = AcpSessionManager(mappingFile)
-        this.loop = SessionLoop(toolReg, trustMgr, skillReg, agentReg, providerReg, sessionStore, mcpMgr)
+        this.loop = SessionLoop(spec)
         this.agent = AcpAgent(StdioTransport(), acpName, acpVersion)
         this.agent.capabilities.loadSession = true
         this.agent.capabilities.sessionCapabilities.list = Some(EmptyCapability())
@@ -144,7 +128,7 @@ public class AcpBridge {
         match (this.agent.sessionAdditionalDirectories(sid)) {
             case Some(dirs) =>
                 for (d in dirs) {
-                    this.trustMgr.setSessionTrust(s.atelierId, d, TrustState.Trusted)
+                    this.spec.trust.setSessionTrust(s.atelierId, d, TrustState.Trusted)
                 }
             case None => ()
         }
@@ -155,13 +139,13 @@ public class AcpBridge {
             case Some(servers) =>
                 spawn {
                     for (ms in servers) {
-                        if (this.mcpMgr.hasServer(ms.name)) {
+                        if (this.spec.mcp.hasServer(ms.name)) {
                             logErr("[atelier-acp] client mcp '${ms.name}' 已存在（本地配置优先），跳过")
                             continue
                         }
                         match (acpMcpServerToConfig(ms)) {
                             case Some(cfg) =>
-                                this.mcpMgr.addServer(this.toolReg, cfg)
+                                this.spec.mcp.addServer(this.spec.tools, cfg)
                                 logErr("[atelier-acp] client mcp '${ms.name}' 注册完成（${cfg.transport}）")
                             case None =>
                                 logErr("[atelier-acp] client mcp '${ms.name}' 形态不支持或配置无效，跳过（stdio env 暂不支持）")
@@ -245,7 +229,7 @@ public class AcpBridge {
     private func onDeleteSession(acpId: String): Bool {
         match (this.manager.lookup(acpId)) {
             case Some(rec) =>
-                try { this.sessionStore.delete(rec.atelierId) } catch (_) { () }
+                try { this.spec.store.delete(rec.atelierId) } catch (_) { () }
                 this.manager.deleteMapping(acpId)
                 synchronized(this.hostsLock) { this.hosts.remove(acpId) }
                 true
@@ -305,8 +289,8 @@ public class AcpBridge {
     // 模型候选：AgentRegistry 出现过的 model ∪ ModelContextRegistry 已知模型（去重由 AcpConfigOptions 完成）
     private func modelCandidates(): ArrayList<String> {
         let out = ArrayList<String>()
-        for ((_, cfg) in this.agentReg.list()) { out.add(cfg.model) }
-        for (m in this.modelReg.list()) { out.add(m) }
+        for ((_, cfg) in this.spec.agents.list()) { out.add(cfg.model) }
+        for (m in this.spec.models.list()) { out.add(m) }
         out
     }
 
@@ -369,7 +353,7 @@ public class AcpBridge {
     private func replayHistory(acpId: String, atelierId: String): Unit {
         var msgs = ArrayList<Message>()
         // session/load 的历史重放：加载失败会导致「会话打开后一片空白」——必须留痕
-        try { msgs = this.sessionStore.load(atelierId) } catch (e: Exception) {
+        try { msgs = this.spec.store.load(atelierId) } catch (e: Exception) {
             eprintln("[atelier-acp] session history load failed (session=${atelierId}): ${e.toString()}")
         }
         var msgNo: Int64 = 0
@@ -407,7 +391,7 @@ public class AcpBridge {
         match (msg) {
             case am: AssistantMessage =>
                 if (am.usage.inputTokens > 0) {
-                    let size = UInt64(this.modelReg.get(model))
+                    let size = UInt64(this.spec.models.get(model))
                     this.agent.sessionUpdate(acpId,
                         SessionUpdate.usageUpdate(UInt64(am.usage.inputTokens), size))
                 }

@@ -63,6 +63,9 @@ public class TomlConfig <: Serializable<TomlConfig> {
     public var server: TomlServer = TomlServer()
     public var logging: TomlLogging = TomlLogging()
     public var mcpServer: ArrayList<TomlMcpServer> = ArrayList()
+    // [[model]]：模型 → 上下文窗口（token）。内置表只认常见模型名，新模型/代理截断
+    // 都会与它不符 —— 声明在这里，运行时不再按偏小的兜底值提前压缩上下文
+    public var model: ArrayList<TomlModel> = ArrayList()
     public init() {}
 
     public func serialize(): DataModel {
@@ -72,6 +75,7 @@ public class TomlConfig <: Serializable<TomlConfig> {
             .add(field<TomlServer>("server", this.server))
             .add(field<TomlLogging>("logging", this.logging))
             .add(field<ArrayList<TomlMcpServer>>("mcpServer", this.mcpServer))
+            .add(field<ArrayList<TomlModel>>("model", this.model))
     }
 
     public static func deserialize(dm: DataModel): TomlConfig {
@@ -106,8 +110,50 @@ public class TomlConfig <: Serializable<TomlConfig> {
                 }
             case _ => ()
         }
+        match (dms.get("model")) {
+            case seq: DataModelSeq =>
+                for (elem in seq.getItems()) {
+                    r.model.add(TomlModel.deserialize(elem))
+                }
+            case _ => ()
+        }
         r
     }
+}
+
+/** `[[model]]`：name + contextWindow（token）；contextWindow <= 0 视为未声明 */
+public class TomlModel <: Serializable<TomlModel> {
+    public var name: String = ""
+    public var contextWindow: Int64 = 0
+    public init() {}
+
+    public func serialize(): DataModel {
+        DataModelStruct()
+            .add(field<String>("name", name))
+            .add(field<Int64>("contextWindow", contextWindow))
+    }
+
+    public static func deserialize(dm: DataModel): TomlModel {
+        let dms = match (dm) { case s: DataModelStruct => s; case _ => return TomlModel() }
+        let r = TomlModel()
+        r.name = match (dms.get("name")) { case s: DataModelString => s.getValue(); case _ => "" }
+        r.contextWindow = match (dms.get("contextWindow")) { case i: DataModelInt => i.getValue(); case _ => Int64(0) }
+        r
+    }
+}
+
+/**
+ * 把 `[[model]]` 声明的窗口装进装配束：声明过就覆盖内置表（副本语义，不动共享表）。
+ * 未声明的模型沿用内置表与兜底值。
+ */
+public func withTomlModels(spec: HarnessSpec, models: ArrayList<TomlModel>): HarnessSpec {
+    var out = spec
+    for (m in models) {
+        if (m.name != "" && m.contextWindow > 0) {
+            out = out.withModelContext(m.name, m.contextWindow)
+        }
+    }
+    out
 }
 
 public class TomlServer <: Serializable<TomlServer> {
@@ -238,6 +284,8 @@ public class TomlAgent <: Serializable<TomlAgent> {
     public var tools: ArrayList<String> = ArrayList()
     public var skills: ArrayList<String> = ArrayList()
     public var mcpCooldownTurns: Int64 = 0
+    // 本 agent 所用模型的上下文窗口（token）；0 = 未声明（用 [[model]] / 内置表 / 兜底）
+    public var contextWindow: Int64 = 0
     // 单次 run 的最大回合数（每次「模型请求 + 工具批次」记一回合）
     // 采样温度（0 = 确定性输出；评测场景建议调低以降低拒答/漂移方差）
     public var temperature: Float64 = 0.7
@@ -271,6 +319,7 @@ public class TomlAgent <: Serializable<TomlAgent> {
         sb.add(field<ArrayList<String>>("tools", tools))
         sb.add(field<ArrayList<String>>("skills", skills))
         sb.add(field<Int64>("mcpCooldownTurns", mcpCooldownTurns))
+        sb.add(field<Int64>("contextWindow", contextWindow))
         sb.add(field<String>("toolPresentation", toolPresentation))
         sb.add(field<Int64>("ptcTimeoutSeconds", ptcTimeoutSeconds))
         sb.add(field<Int64>("ptcMaxSubCalls", ptcMaxSubCalls))
@@ -306,6 +355,7 @@ public class TomlAgent <: Serializable<TomlAgent> {
             case _ => ()
         }
         r.mcpCooldownTurns = match (dms.get("mcpCooldownTurns")) { case i: DataModelInt => i.getValue(); case _ => Int64(0) }
+        r.contextWindow = match (dms.get("contextWindow")) { case i: DataModelInt => i.getValue(); case _ => Int64(0) }
         // 缺字段时保持与字段声明一致的默认值：旧配置照常加载，行为不变
         r.toolPresentation = match (dms.get("toolPresentation")) { case s: DataModelString => s.getValue(); case _ => "native" }
         r.ptcTimeoutSeconds = match (dms.get("ptcTimeoutSeconds")) { case i: DataModelInt => i.getValue(); case _ => Int64(30) }
@@ -525,7 +575,8 @@ public func agentConfigFrom(a: TomlAgent): AgentConfig {
         ptcMaxSubCalls: ptcBudget(a.ptcMaxSubCalls, UInt32(64)),
         sideEffectToolTimeout: toolBudgetSeconds(a.sideEffectToolTimeout, UInt32(300)),
         maxLengthContinuations: continuationBudget(a.maxLengthContinuations, UInt32(3)),
-        maxVerifyPasses: continuationBudget(a.maxVerifyPasses, UInt32(0)))
+        maxVerifyPasses: continuationBudget(a.maxVerifyPasses, UInt32(0)),
+        contextWindow: if (a.contextWindow > 0) { Some(a.contextWindow) } else { None })
 }
 
 /**

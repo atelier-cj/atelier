@@ -103,6 +103,8 @@ atelier/                     # 仓库根 = cjpm 工作区（[workspace]，产品
 
 ## 核心设计决策
 
+- **装配束（HarnessSpec）**：组件一次装配，`AgentRuntime(spec, cfg)` 是**唯一**构造；`with*` 派生
+  是值语义（不动共享组件），run 作用域的工具叠加走 `ToolRegistry.derived` 视图而不是复制表
 - **自研优先**：除 MCP 协议（`ystyle::mcp`）和会话存储（`bstorm`）外，全部自研
 - **运行时动态**：Agent 通过 JSON/YAML 在运行时定义，不依赖编译期宏
 - **消息密封接口**：4 种角色（User/Assistant/ToolResult/Compaction），通过 `role()` 判别
