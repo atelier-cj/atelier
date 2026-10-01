@@ -99,3 +99,25 @@ A2A 没有 ACP elicitation 那样的同步反向调用，因此走**任务级续
   会话映射与任务索引是持久化的，重启后同 `contextId` 的续聊仍可继续；
 - 同一 `contextId` 的任务串行执行：会话历史是单一序列，并发 run 会交错写入；
 - 服务端未做鉴权（无 `securitySchemes`）。
+
+
+## 协议一致性验证
+
+本实现的服务端方向用官方一致性套件
+[a2a-tck](https://github.com/a2aproject/a2a-tck) 做过互操作验证（`--transport jsonrpc --level must`）：
+
+```
+67 passed / 5 failed / 163 skipped
+```
+
+通过的 67 条覆盖 Agent Card 发现、任务生命周期、多轮与上下文归属、流式（SSE）、
+取消、GetTask / ListTasks、错误映射与版本协商 —— 即**协议行为层面的 MUST 全部通过**。
+
+5 条失败集中在 `DM-ART-001` / `DM-MSG-001`：TCK 通过 `messageId` 魔法前缀
+（`tck-artifact-text` / `tck-artifact-file` / `tck-artifact-data` / `tck-message-response` …）
+要求 SUT 产出**特定内容的** Part，这属于 TCK 对被测对象的场景约定，不是协议要求。
+atelier 是真实 agent（回复由 provider 决定），不响应该约定；
+协议一致性用例请以 `a2a-cj` 的示例 SUT（`a2a.examples.tck_sut`，同一套用例 175 passed / 0 failed）为准。
+
+另外，客户端 ↔ 服务端的完整链路（discover → sendStreamingMessage → 子代理回信）在
+`atelier/src/a2a/a2a_e2e_test.cj` 中有进程内端到端用例覆盖。
