@@ -119,9 +119,11 @@ public func withTomlProviderModels(spec: HarnessSpec, providers: ArrayList<TomlP
     var out = spec
     for (p in providers) {
         for (m in p.model) {
-            if (p.name != "" && m.name != "" && m.contextWindow > 0) {
-                out = out.withModelContext(p.name, m.name, m.contextWindow)
+            // 两个字段各自 <= 0 视为未声明：只写窗口也能只补窗口，完成预算留给 provider 自报
+            if (p.name == "" || m.name == "" || (m.contextWindow <= 0 && m.maxTokens <= 0)) {
+                continue
             }
+            out = out.withModelFacts(p.name, m.name, ModelInfo(m.contextWindow, m.maxTokens))
         }
     }
     out
@@ -345,14 +347,17 @@ public class TomlAgent <: Serializable<TomlAgent> {
  */
 public class TomlProviderModel <: Serializable<TomlProviderModel> {
     public var name: String = ""
-    // 上下文窗口（token）；<= 0 视为未声明
+    // 上下文窗口（token，**含输入与输出**）；<= 0 视为未声明
     public var contextWindow: Int64 = 0
+    // 默认完成预算（token）；<= 0 视为未声明（压缩要按 窗口 - 完成预算 - 余量 算消息预算）
+    public var maxTokens: Int64 = 0
     public init() {}
 
     public func serialize(): DataModel {
         DataModelStruct()
             .add(field<String>("name", name))
             .add(field<Int64>("contextWindow", contextWindow))
+            .add(field<Int64>("maxTokens", maxTokens))
     }
 
     public static func deserialize(dm: DataModel): TomlProviderModel {
@@ -360,6 +365,7 @@ public class TomlProviderModel <: Serializable<TomlProviderModel> {
         let r = TomlProviderModel()
         r.name = match (dms.get("name")) { case s: DataModelString => s.getValue(); case _ => "" }
         r.contextWindow = match (dms.get("contextWindow")) { case i: DataModelInt => i.getValue(); case _ => Int64(0) }
+        r.maxTokens = match (dms.get("maxTokens")) { case i: DataModelInt => i.getValue(); case _ => Int64(0) }
         r
     }
 }

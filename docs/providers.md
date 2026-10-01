@@ -195,11 +195,14 @@ Atelier 内置 `ModelContextRegistry` 查表：
 内置表只认常见模型名 —— 新模型、代理服务截断后的窗口、超长上下文变体都与它不符。
 **窗口是模型的属性，声明它比猜它便宜**，按优先级取：
 
-| 优先级 | 声明位置 |
-|---|---|
-| 1 | `[[provider.model]] contextWindow`（代码：`HarnessSpec.withModelContext(provider, model, n)`）—— 端点层 |
-| 2 | 模型名层：内置表（上表）+ 按名字的全局声明（`withModelContextByName`） |
-| 3 | 兜底值（默认 8192；`HarnessSpec.withDefaultContextWindow` 可改） |
+| 优先级 | 来源 | 说明 |
+|---|---|---|
+| 1 | `[[provider.model]]`（代码 `HarnessSpec.withModelContext` / `withModelFacts`） | 宿主显式声明，端点层 |
+| 2 | 按模型名的全局声明（`withModelContextByName`） | 不分端点 |
+| 3 | **provider 自报**（`Provider.modelInfo`，默认实现查 llm_api 的 `ModelCatalog`） | 端点自己知道；私有部署/代理截断由它报 |
+| 4 | 兜底值（默认窗口 8192 / 完成预算 4096；`HarnessSpec.withDefaults` 可改） | 全链路没人知道时**打一条警告** |
+
+逐层是**填空**（不是整条覆盖）：只声明了窗口，完成预算仍能从下层拿到。
 
 **为什么按 `(provider, model)` 而不是只按模型名**：窗口是端点的事实。同一个 `deepseek-chat`，
 官方端点是 64k，经由一个截断过的代理可能就是 32k —— 只按模型名声明，等于让两个端点共用一个数，
@@ -207,6 +210,11 @@ Atelier 内置 `ModelContextRegistry` 查表：
 
 走到兜底值时运行时会在日志里打一条警告（每个 `provider` × 模型一次），提示声明窗口 —— 兜底值偏小会让上下文
 **提前被压缩**，表现为"模型聊着聊着忘了前面"，而调用方看不到任何线索。窗口为 0 表示禁用压缩。
+
+**`maxTokens` 为什么也要在这里声明**：`contextWindow` 是 **input + output 的总和**（各家 API 的口径），
+完成预算要单独记一笔才能算清"消息能占多少"。压缩策略按 `contextWindow - maxTokens - 余量` 留预算，
+否则会在窗口边界上直接撞 400（`maximum context length exceeded`）。agent 侧想覆盖它是另一回事
+（那是策略：`AgentConfig.maxOutputTokens`，`0` = 交给模型事实）。
 
 ## 自定义 Provider
 

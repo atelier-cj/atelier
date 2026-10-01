@@ -601,10 +601,11 @@ func withTomlProviderModels_appliesEndpointWindows() {
     m.name = "vendor-model"
     m.contextWindow = 32768
     p.model.add(m)
-    // 未声明（0）= 不该覆盖模型名层
+    // 两个字段都没声明 = 整条跳过
     let bogus = TomlProviderModel()
     bogus.name = "gpt-4o"
     bogus.contextWindow = 0
+    bogus.maxTokens = 0
     p.model.add(bogus)
     providers.add(p)
 
@@ -612,7 +613,13 @@ func withTomlProviderModels_appliesEndpointWindows() {
     @Expect(spec.models.windowFor("proxy", "vendor-model"), Some(32768))
     // 端点层与模型名层互不干扰：别的端点上没有这条声明
     @Expect(spec.models.windowFor("other", "vendor-model"), None)
-    @Expect(spec.models.get("gpt-4o"), 128000)
+    // 未声明（maxTokens = 0）的那笔不写成"完成预算 0"
+    match (spec.models.infoFor("proxy", "vendor-model")) {
+        case Some(info) =>
+            @Expect(info.contextWindow, 32768)
+            @Expect(info.maxTokens, 0)
+        case None => @Fail("endpoint declaration missing")
+    }
     // 原装配束不受影响
     @Expect(HarnessSpec().models.windowFor("proxy", "vendor-model"), None)
 }

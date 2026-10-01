@@ -898,9 +898,13 @@ Provider 直接对接 LLM REST API，初始实现 `OpenAIProvider`（兼容 Open
 
 | 优先级 | 来源 | 说明 |
 |---|---|---|
-| 1 | TOML `[[provider.model]] contextWindow` / `HarnessSpec.withModelContext` | **端点层**：`(provider, model)` 这一对路由的事实（同名模型走不同端点可以不同） |
-| 2 | 内置查找表 + 按模型名的全局声明 | 模型名层 |
-| 3 | 兜底值（默认 8192，可配） | **未命中即打一条警告**，提示声明窗口 |
+| 1 | TOML `[[provider.model]]` / `HarnessSpec.withModelContext`·`withModelFacts` | **宿主显式声明**，端点层：`(provider, model)` 这一对路由的事实 |
+| 2 | 按模型名的全局声明 | 不分端点 |
+| 3 | **provider 自报**（`Provider.modelInfo`，默认查 llm_api 的 `ModelCatalog`） | 端点自己知道（私有部署/代理截断）；模型事实归属 provider 层 |
+| 4 | 兜底值（默认窗口 8192 / 完成预算 4096，可配） | **未命中即打一条警告** |
+
+逐层是"填空"：只声明窗口时，完成预算仍可来自下层。`maxTokens` 与窗口一起记，因为
+`contextWindow` 是 input+output 的总和 —— 压缩要按 `窗口 - 完成预算 - 余量` 算消息预算。
 
 agent **不持有**窗口（它的 `provider` / `model` 只是选型）：把端点的事实写进 agent，等于同一个
 端点被两个 agent 声明成两个数、必有一个是错的。想让某个 agent 更早压缩用 `compactionReserveTokens`

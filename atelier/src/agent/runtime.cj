@@ -140,34 +140,43 @@ public open class AgentRuntime {
         this.spec
     }
 
-    /** 本 agent 实际使用的上下文窗口（token）：agent 自报 > 模型表 > 兜底 */
+    /** 本 agent 实际使用的上下文窗口（token）：声明 > provider 自报 > 兜底 */
     public func contextWindowInUse(): Int64 {
-        this.resolveContextWindow(this.pickModel(this.config.model))
+        this.modelInfoInUse().info.contextWindow
     }
 
-    // 上下文窗口：端点层（provider + model）→ 模型名层（含内置表）→ 兜底。
-    // 未命中任何声明时提醒一次 —— 静默按偏小的兜底值提前压缩，是「模型无缘无故失忆」
-    // 类问题的常见根因，而下游看不到任何线索。
-    private func resolveContextWindow(model: String): Int64 {
-        let providerName = providerNameOf(this.config)
-        match (this.modelRegistry.windowFor(providerName, model)) {
-            case Some(w) => return w
-            case None => ()
+    /**
+     * 本 agent 实际使用的完成预算（token）：agent 显式给了就用它（0 = 交给模型事实），
+     * 否则用模型事实（声明 > provider 自报 > 兜底）。
+     */
+    public func maxOutputTokensInUse(): Int64 {
+        if (this.config.maxOutputTokens > 0) {
+            return Int64(this.config.maxOutputTokens)
         }
-        if (!this.modelRegistry.has(model)) {
+        this.modelInfoInUse().info.maxTokens
+    }
+
+    // 模型事实（窗口 + 完成预算）：声明 > provider 自报 > 兜底，全链路没人知道时提醒一次
+    // （静默按兜底值走 = "模型聊着聊着忘了前面"/"输出被莫名截断"，而下游看不到线索）
+    private func modelInfoInUse(): ResolvedModelInfo {
+        let model = this.pickModel(this.config.model)
+        let providerName = providerNameOf(this.config)
+        let resolved = this.spec.resolveModelInfo(providerName, model)
+        if (!resolved.declared) {
+            let key = providerName + "/" + model
             var first = false
             synchronized(this.warnLock) {
-                if (!this.warnedModels.contains(model)) {
-                    this.warnedModels.add(model)
+                if (!this.warnedModels.contains(key)) {
+                    this.warnedModels.add(key)
                     first = true
                 }
             }
             if (first) {
                 let log = getGlobalLogger([("name", "AgentRuntime")])
-                log.warn("no context window declared for provider '${providerName}' model '${model}': assuming ${this.modelRegistry.get(model)} tokens; declare it with [[provider.model]] contextWindow", Array<Attr>())
+                log.warn("no model facts for provider '${providerName}' model '${model}': assuming ${resolved.info.contextWindow} context / ${resolved.info.maxTokens} max tokens; declare them with [[provider.model]]", Array<Attr>())
             }
         }
-        this.modelRegistry.get(model)
+        resolved
     }
 
     // 取消进行中的会话回合（幂等：未知/已结束会话为 no-op）。
@@ -292,7 +301,7 @@ public open class AgentRuntime {
                         baseSystemText + "\n\n" + PtcSdkRenderer.render(visible)
                     }
                     var chatReq = ctxBuilder.buildChatRequest(actualModel, systemText, currentMessages,
-                        Float64(this.config.temperature), Int64(this.config.maxOutputTokens),
+                        Float64(this.config.temperature), this.maxOutputTokensInUse(),
                         this.config.thinkingLevel, tools)
                     match (runBeforeTurnHooks(hookState, turnCount, chatReq)) {
                         case Some(r) =>
@@ -658,7 +667,7 @@ public open class AgentRuntime {
                             if (this.config.compactionEnabled || match (this.config.compaction) {
                                 case Some(c) => c.enabled
                                 case None => false }) {
-                                let contextWindow = this.resolveContextWindow(actualModel)
+                                let contextWindow = this.modelInfoInUse().info.contextWindow
                                 let cc = match (this.config.compaction) {
                                     case Some(c) => c
                                     case None => CompactionConfig()

@@ -208,17 +208,22 @@ public class HarnessSpec {
      * 和走截断过的代理可以不同，所以按对声明，agent 只负责选这一对。
      */
     public func withModelContext(provider: String, model: String, contextWindow: Int64): HarnessSpec {
-        HarnessSpec(this, models: this.models.mergedFor(provider, model, contextWindow))
+        HarnessSpec(this, models: this.models.mergedFor(provider, model, ModelInfo(contextWindow, 0)))
+    }
+
+    /** 声明端点上的模型事实（窗口 + 完成预算一起）；窗口是 input+output 的总和，两笔要分开记 */
+    public func withModelFacts(provider: String, model: String, info: ModelInfo): HarnessSpec {
+        HarnessSpec(this, models: this.models.mergedFor(provider, model, info))
     }
 
     /** 按模型名全局声明窗口（不分端点；端点层未声明时用它） */
     public func withModelContextByName(model: String, contextWindow: Int64): HarnessSpec {
-        HarnessSpec(this, models: this.models.merged(model, contextWindow))
+        HarnessSpec(this, models: this.models.merged(model, ModelInfo(contextWindow, 0)))
     }
 
-    /** 未知模型兜底窗口 */
-    public func withDefaultContextWindow(contextWindow: Int64): HarnessSpec {
-        HarnessSpec(this, models: this.models.withDefaultWindow(contextWindow))
+    /** 全链路都没声明时的兜底值（窗口 / 完成预算） */
+    public func withDefaults(contextWindow: Int64, maxTokens!: Int64 = 4096): HarnessSpec {
+        HarnessSpec(this, models: this.models.withDefaults(contextWindow, maxTokens))
     }
 
     public func withHook(h: Hook): HarnessSpec {
@@ -291,12 +296,51 @@ public class HarnessSpec {
      */
     public func resolveProvider(cfg: AgentConfig): Provider {
         let name = providerNameOf(cfg)
-        match (this.providerOverlay.get(name)) {
+        match (this.providerNamed(name)) {
             case Some(p) => p
-            case None => match (this.providers.get(name)) {
-                case Some(p) => p
-                case None => throw Exception("no provider named '${name}': register one with HarnessSpec.withProvider(...)")
+            case None => throw Exception("no provider named '${name}': register one with HarnessSpec.withProvider(...)")
+        }
+    }
+
+    /**
+     * 解析某端点某模型的**事实**（窗口 + 完成预算），逐层填、按字段取先声明的：
+     *
+     * 1. 宿主显式声明：[models] 的端点层（`[[provider.model]]`）→ 模型名层
+     * 2. provider 自报：[Provider.modelInfo]（默认实现查 llm_api 的内置目录）
+     * 3. 兜底：装配束的默认窗口 / 默认完成预算（此时 `declared = false`，调用方应留痕）
+     *
+     * 逐层"填空"而不是整条覆盖：只声明了窗口的配置，完成预算仍能从 provider 那层拿到。
+     */
+    public func resolveModelInfo(providerName: String, model: String): ResolvedModelInfo {
+        var window = 0
+        var maxTokens = 0
+        var declared = false
+        let sources = ArrayList<Option<ModelInfo>>()
+        sources.add(this.models.infoFor(providerName, model))
+        sources.add(this.models.info(model))
+        match (this.providerNamed(providerName)) {
+            case Some(p) => sources.add(p.modelInfo(model))
+            case None => ()
+        }
+        for (src in sources) {
+            match (src) {
+                case Some(info) =>
+                    declared = true
+                    if (window <= 0 && info.contextWindow > 0) { window = info.contextWindow }
+                    if (maxTokens <= 0 && info.maxTokens > 0) { maxTokens = info.maxTokens }
+                case None => ()
             }
+        }
+        if (window <= 0) { window = this.models.defaultContextWindow }
+        if (maxTokens <= 0) { maxTokens = this.models.defaultMaxTokens }
+        ResolvedModelInfo(ModelInfo(window, maxTokens), declared)
+    }
+
+    // 按名找 provider（叠加表优先）；找不到返回 None（调用方决定报错还是跳过）
+    private func providerNamed(name: String): Option<Provider> {
+        match (this.providerOverlay.get(name)) {
+            case Some(p) => Some(p)
+            case None => this.providers.get(name)
         }
     }
 
@@ -393,8 +437,23 @@ public class Harness {
     }
 }
 
+/**
+ * 解析后的模型事实：数值 + 「是不是没人知道、只能兜底」（`declared = false`）。
+ *
+ * 后者用作留痕判据：静默按兜底值走，表现为"模型聊着聊着忘了前面"/"输出被莫名截断"，
+ * 而调用方看不到任何线索。
+ */
+public struct ResolvedModelInfo {
+    public let info: ModelInfo
+    public let declared: Bool
+    public init(info: ModelInfo, declared: Bool) {
+        this.info = info
+        this.declared = declared
+    }
+}
+
 // agent 配置声明的 provider 名（缺省 default）
-func providerNameOf(cfg: AgentConfig): String {
+public func providerNameOf(cfg: AgentConfig): String {
     match (cfg.provider) {
         case Some(v) => v
         case None => "default"

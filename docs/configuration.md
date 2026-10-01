@@ -29,7 +29,8 @@ skipTlsVerify = false          # 跳过 TLS 证书校验（可选，默认 false
   # 同名模型走官方端点和走截断过的代理，窗口可以不同，所以声明在这里而不是 agent 上
   [[provider.model]]
   name = "deepseek-chat"
-  contextWindow = 65536        # token；不声明则回退内置表（未命中也有一条警告）
+  contextWindow = 65536        # token，**含输入与输出**；不声明则回退 provider 自报/内置目录
+  maxTokens = 8192             # 默认完成预算（token）；压缩要按 窗口 - 完成预算 - 余量 留预算
 
 [[provider]]
 name = "ollama"
@@ -172,7 +173,7 @@ let config = AgentConfig(
 | `skills` | `ArrayList<String>` | `[]` | Skill 名称列表 |
 | `maxTurns` | `UInt32` | `20` | 最大推理轮次 |
 | `temperature` | `Float32` | `0.7` | 生成温度 |
-| `maxOutputTokens` | `UInt32` | `4096` | 最大输出 Token |
+| `maxOutputTokens` | `UInt32` | `4096` | 最大输出 Token（agent 的策略）；`0` = 交给模型事实（`[[provider.model]] maxTokens` / provider 自报） |
 | `maxLengthContinuations` | `UInt32` | `3` | 输出撞 token 上限后同回合自动续跑的次数上限；`0` = 不续跑（截断即回合结束） |
 | `maxVerifyPasses` | `UInt32` | `0` | 收尾前自验次数上限：宣布完成时先要求实操核对再收尾；`0` = 关闭 |
 | `thinkingLevel` | `Option<String>` | `None` | 思考模式（deepseek-reasoner 可用） |

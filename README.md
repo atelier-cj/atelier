@@ -142,7 +142,8 @@ apiKey = "${DEEPSEEK_API_KEY}"
   # （同名模型走官方端点和走截断过的代理，窗口可以不同）
   [[provider.model]]
   name = "deepseek-chat"
-  contextWindow = 65536
+  contextWindow = 65536        # 窗口含输入与输出
+  maxTokens = 8192             # 默认完成预算（压缩要按它留余量）
 
 [[agent]]
 name = "assistant"

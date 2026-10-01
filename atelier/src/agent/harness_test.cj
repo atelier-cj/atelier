@@ -7,6 +7,7 @@ import atelier.tool.*
 import atelier.session.*
 import atelier.provider.*
 import atelier.util.{toJsonString, fromJsonString}
+import atelier.provider.ModelInfo
 
 // ========== 装配束：派生语义 / provider 解析 / 上下文窗口 / 便利层 ==========
 
@@ -153,14 +154,43 @@ func contextWindow_unknownModelFallsBackToDefault() {
     let runtime = AgentRuntime(HarnessSpec.forTests(EchoProvider()), cfgOf("totally-unknown-model", None))
     @Expect(runtime.contextWindowInUse(), Int64(8192))
 
-    let narrow = HarnessSpec.forTests(EchoProvider()).withDefaultContextWindow(32768)
+    let narrow = HarnessSpec.forTests(EchoProvider()).withDefaults(32768)
     @Expect(AgentRuntime(narrow, cfgOf("totally-unknown-model", None)).contextWindowInUse(), 32768)
 }
 
 @Test
-func contextWindow_builtinTableStillApplies() {
+func contextWindow_providerSelfReportApplies() {
+    // 宿主没声明时，落到 provider 自报这一层（EchoProvider 用接口默认实现查内置目录）
     let runtime = AgentRuntime(HarnessSpec.forTests(EchoProvider()), cfgOf("deepseek-chat", None))
     @Expect(runtime.contextWindowInUse(), 65536)
+}
+
+@Test
+func modelFacts_configOutranksProviderSelfReport() {
+    // 声明 > provider 自报：代理截断这类"端点与目录不符"由配置纠正
+    let spec = HarnessSpec.forTests(EchoProvider()).withModelContext("default", "deepseek-chat", 32768)
+    @Expect(AgentRuntime(spec, cfgOf("deepseek-chat", None)).contextWindowInUse(), 32768)
+}
+
+@Test
+func modelFacts_maxTokensResolvesPerLayer() {
+    // agent 显式给了完成预算就用它
+    let withAgentBudget = cfgOf("deepseek-chat", None)
+    @Expect(AgentRuntime(HarnessSpec.forTests(EchoProvider()), withAgentBudget).maxOutputTokensInUse(), Int64(4096))
+    // 0 = 交给模型事实（provider 自报里 deepseek-chat 是 8192）
+    let spec = HarnessSpec.forTests(EchoProvider())
+    @Expect(AgentRuntime(spec, cfgOfNoBudget("deepseek-chat")).maxOutputTokensInUse(), Int64(8192))
+    // 声明优先于自报
+    let declared = spec.withModelFacts("default", "deepseek-chat", ModelInfo(65536, 2048))
+    @Expect(AgentRuntime(declared, cfgOfNoBudget("deepseek-chat")).maxOutputTokensInUse(), Int64(2048))
+}
+
+// 完成预算交给模型事实的配置（0 = 不显式指定）
+func cfgOfNoBudget(model: String): AgentConfig {
+    AgentConfig("t", None, "", None, model, None, ArrayList<String>(), ArrayList<String>(), Int64(0),
+        UInt32(20), Float32(0.7), UInt32(0), None,
+        false, UInt32(16384), UInt32(20000), None, UInt32(50), UInt32(30), UInt32(0),
+        ArrayList<String>(), None, Int64(0), Int64(0))
 }
 
 // ---------- 便利层 ----------

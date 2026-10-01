@@ -290,7 +290,9 @@ public class AcpBridge {
     private func modelCandidates(): ArrayList<String> {
         let out = ArrayList<String>()
         for ((_, cfg) in this.spec.agents.list()) { out.add(cfg.model) }
+        // 配置声明过的 + 库内置目录里的（provider 自报的那一层由目录兜底）
         for (m in this.spec.models.list()) { out.add(m) }
+        for (m in defaultModelCatalog.names()) { out.add(m) }
         out
     }
 
@@ -391,7 +393,9 @@ public class AcpBridge {
         match (msg) {
             case am: AssistantMessage =>
                 if (am.usage.inputTokens > 0) {
-                    let size = UInt64(this.spec.models.get(model))
+                    // 窗口按「声明 > provider 自报 > 兜底」解析，别用配置表的裸查
+                    let size = UInt64(this.spec.resolveModelInfo(
+                        providerNameOf(this.baseConfig), model).info.contextWindow)
                     this.agent.sessionUpdate(acpId,
                         SessionUpdate.usageUpdate(UInt64(am.usage.inputTokens), size))
                 }
