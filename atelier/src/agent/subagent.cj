@@ -279,6 +279,21 @@ public class SubAgentManager {
         Some(h)
     }
 
+    // 远端 A2A 启动：不拉子进程，用 HTTP 直连远端 agent（Agent Card 发现 + 流式消息）。
+    // 与 startRemote(ACP) 的差异：不需要 executable / sessionDir；远端任务支持
+    // input-required 续聊（远端挂起时问题作为来信投回父，父的下一条消息即答复）。
+    // 返回句柄；发现/连接失败以 done 错误回信（异步可见于 recv）。
+    public func startRemoteA2a(baseUrl: String, parentSessionId: String,
+        initialPrompt: String): ?SubAgentHandle {
+        let childId = "a2a_" + nextId()
+        let h = RemoteA2aSubAgentHandle(childId, parentSessionId, baseUrl,
+            { m => this.parentBoxFor(parentSessionId).add(m) })
+        synchronized(this.lock) { this.handles[childId] = h }
+        h.send(AgentMail(parentSessionId, childId, AgentMailKindUserText, initialPrompt))
+        h.serveRemote()
+        Some(h)
+    }
+
     // 父会话级联：关闭该父的全部子 Agent（句柄从注册表移除）
     public func closeForParent(parentSessionId: String): Unit {
         let toClose = ArrayList<SubAgentHandle>()
