@@ -159,7 +159,7 @@ func writeTomlTemp(content: String): String {
 @Test
 func tomlAgent_compactionParse() {
     // TOML 文本：[[agent]] + [agent.compaction] 嵌套表（文档示例格式，单行 \n 转义模板）
-    let content = "[[agent]]\nname = \"test\"\nmodel = \"gpt-4o\"\n\n[agent.compaction]\nenabled = false\nreserveTokens = 4096\nkeepRecentTokens = 8000\npromptTemplate = \"压缩以下对话：\\n{{conversation}}\"\nsummaryModel = \"deepseek-chat\"\n\n[agent.compaction.outputSchema]\nrequired = [\"goal\"]\ntypes = { goal = \"string\" }\n"
+    let content = "[[agent]]\nname = \"test\"\nmodel = \"gpt-4o\"\n\n[agent.compaction]\nenabled = false\nthresholdRatio = 0.75\nheadroomTokens = 4096\nretainRatio = 0.2\nmaxOverflowRetries = 2\npromptTemplate = \"压缩以下对话：\\n{{conversation}}\"\nsummaryModel = \"deepseek-chat\"\n\n[agent.compaction.outputSchema]\nrequired = [\"goal\"]\ntypes = { goal = \"string\" }\n"
     let path = writeTomlTemp(content)
     let cfg = unmarshal<TomlConfig>(path)
     remove(Path(path))
@@ -171,13 +171,21 @@ func tomlAgent_compactionParse() {
                 case Some(b) => @Expect(b, false)
                 case None => @Fail("enabled missing")
             }
-            match (tc.reserveTokens) {
-                case Some(v) => @Expect(v, 4096)
-                case None => @Fail("reserveTokens missing")
+            match (tc.thresholdRatio) {
+                case Some(v) => @Expect(v, 0.75)
+                case None => @Fail("thresholdRatio missing")
             }
-            match (tc.keepRecentTokens) {
-                case Some(v) => @Expect(v, 8000)
-                case None => @Fail("keepRecentTokens missing")
+            match (tc.headroomTokens) {
+                case Some(v) => @Expect(v, 4096)
+                case None => @Fail("headroomTokens missing")
+            }
+            match (tc.retainRatio) {
+                case Some(v) => @Expect(v, 0.2)
+                case None => @Fail("retainRatio missing")
+            }
+            match (tc.maxOverflowRetries) {
+                case Some(v) => @Expect(v, 2)
+                case None => @Fail("maxOverflowRetries missing")
             }
             match (tc.promptTemplate) {
                 case Some(s) =>
@@ -241,7 +249,9 @@ func tomlAgent_compactionSerializeRoundTrip() {
     ta.name = "rt"
     let tc = TomlCompaction()
     tc.enabled = Some(true)
-    tc.reserveTokens = Some(Int64(2048))
+    tc.thresholdRatio = Some(0.7)
+    tc.headroomTokens = Some(Int64(2048))
+    tc.retainTokens = Some(Int64(1024))
     ta.compaction = Some(tc)
     let dm = ta.serialize()
     let back = TomlAgent.deserialize(dm)
@@ -251,9 +261,17 @@ func tomlAgent_compactionSerializeRoundTrip() {
                 case Some(b) => @Expect(b, true)
                 case None => @Fail("enabled lost")
             }
-            match (c.reserveTokens) {
+            match (c.thresholdRatio) {
+                case Some(v) => @Expect(v, 0.7)
+                case None => @Fail("thresholdRatio lost")
+            }
+            match (c.headroomTokens) {
                 case Some(v) => @Expect(v, 2048)
-                case None => @Fail("reserveTokens lost")
+                case None => @Fail("headroomTokens lost")
+            }
+            match (c.retainTokens) {
+                case Some(v) => @Expect(v, 1024)
+                case None => @Fail("retainTokens lost")
             }
         case None => @Fail("compaction lost in round-trip")
     }
@@ -267,8 +285,10 @@ func agentConfigFrom_compactionMapping() {
     ta.model = "gpt-4o"
     let tc = TomlCompaction()
     tc.enabled = Some(false)
-    tc.reserveTokens = Some(Int64(4096))
-    tc.keepRecentTokens = Some(Int64(8000))
+    tc.thresholdRatio = Some(0.7)
+    tc.headroomTokens = Some(Int64(4096))
+    tc.retainTokens = Some(Int64(8000))
+    tc.maxOverflowRetries = Some(Int64(0))
     tc.promptTemplate = Some("自定义压缩模板")
     tc.summaryModel = Some("deepseek-chat")
     let schema = DataModelStruct()
@@ -281,8 +301,13 @@ func agentConfigFrom_compactionMapping() {
     match (cfg.compaction) {
         case Some(c) =>
             @Expect(c.enabled, false)
-            @Expect(c.reserveTokens, 4096)
-            @Expect(c.keepRecentTokens, 8000)
+            @Expect(c.thresholdRatio, 0.7)
+            @Expect(c.headroomTokens, 4096)
+            match (c.retainTokens) {
+                case Some(v) => @Expect(v, 8000)
+                case None => @Fail("retainTokens missing")
+            }
+            @Expect(c.maxOverflowRetries, 0)
             @Expect(c.promptTemplate, "自定义压缩模板")
             match (c.summaryModel) {
                 case Some(s) => @Expect(s, "deepseek-chat")
@@ -318,8 +343,11 @@ func agentConfigFrom_compactionPartialDefaults() {
     match (cfg.compaction) {
         case Some(c) =>
             @Expect(c.enabled, true)
-            @Expect(c.reserveTokens, def.reserveTokens)
-            @Expect(c.keepRecentTokens, def.keepRecentTokens)
+            @Expect(c.thresholdRatio, def.thresholdRatio)
+            @Expect(c.headroomTokens, def.headroomTokens)
+            @Expect(c.retainRatio, def.retainRatio)
+            @Expect(c.retainTokens, def.retainTokens)
+            @Expect(c.maxOverflowRetries, def.maxOverflowRetries)
             @Expect(c.promptTemplate, def.promptTemplate)
             match (c.outputSchema) {
                 case None => ()

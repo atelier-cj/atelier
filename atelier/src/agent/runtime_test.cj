@@ -13,6 +13,7 @@ import atelier.session.*
 import atelier.trust.*
 import atelier.skill.*
 import atelier.event.EventStream
+import atelier.context.{DEFAULT_PROMPT_TEMPLATE, CompactionConfig, checkpointBody, globalCompactionLedger}
 
 import atelier.context.CompactionConfig
 
@@ -54,7 +55,7 @@ func mcpRuntimeConfig(): AgentConfig {
     let skills = ArrayList<String>()
     AgentConfig("t", None, "", None, "m", None, tools, skills, 3,
         UInt32(20), Float32(0.7), UInt32(4096), None,
-        false, UInt32(16384), UInt32(20000), None, UInt32(50), UInt32(30), UInt32(0),
+        false, None, UInt32(50), UInt32(30), UInt32(0),
         ArrayList(), None, Int64(0), Int64(0))
 }
 
@@ -188,6 +189,332 @@ class StubUsageSummaryProvider <: Provider {
     }
 }
 
+// 流式调用前 N 次报"超上下文窗口"，之后正常；chat 返回固定摘要
+class StubOverflowProvider <: Provider {
+    public var chatCalls: Int64 = 0
+    public var streamCalls: Int64 = 0
+    private let overflowTimes: Int64
+    private let summaryText: String
+    public init(overflowTimes: Int64, summaryText: String) {
+        this.overflowTimes = overflowTimes
+        this.summaryText = summaryText
+    }
+
+    public func name(): String { "stub-overflow" }
+
+    public func chat(req: ChatRequest): ChatResponse {
+        this.chatCalls++
+        ChatResponse(AssistantMessage(ContentList.ofText(this.summaryText), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0))
+    }
+
+    public func chatStreaming(req: ChatRequest): EventStream<ChatDelta, AssistantMessage> {
+        this.streamCalls++
+        if (this.streamCalls <= this.overflowTimes) {
+            throw Exception("Error 400: This model's maximum context length is 8192 tokens")
+        }
+        let stream = EventStream<ChatDelta, AssistantMessage>()
+        let msg = AssistantMessage(ContentList.ofText("ok"), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0)
+        stream.emit(ChatDelta("", "", Some(msg.stopReason)))
+        stream.setResult(msg)
+        stream
+    }
+}
+
+func overflowPolicy(maxOverflowRetries: Int64): Option<CompactionConfig> {
+    Some(CompactionConfig(true, 0.8, 1024, 0.16, Some(Int64(4)), maxOverflowRetries,
+        DEFAULT_PROMPT_TEMPLATE, None, None))
+}
+
+// 记录两个通道的请求：主请求（chatStreaming）与摘要子调用（chat）
+class StubRecordingProvider <: Provider {
+    public var mainReq: Option<ChatRequest> = None
+    public var summaryReq: Option<ChatRequest> = None
+    public func name(): String { "stub-recording" }
+    public func chat(req: ChatRequest): ChatResponse {
+        this.summaryReq = Some(req)
+        ChatResponse(AssistantMessage(ContentList.ofText("SUM"), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0))
+    }
+    public func chatStreaming(req: ChatRequest): EventStream<ChatDelta, AssistantMessage> {
+        this.mainReq = Some(req)
+        let stream = EventStream<ChatDelta, AssistantMessage>()
+        let msg = AssistantMessage(ContentList.ofText("ok"), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0)
+        stream.emit(ChatDelta("", "", Some(msg.stopReason)))
+        stream.setResult(msg)
+        stream
+    }
+}
+
+/**
+ * 摘要子调用复用主对话前缀：provider 的前缀缓存按"缓存前缀单元完整匹配"计费
+ * （DeepSeek 的硬盘缓存即如此），所以子调用必须带同样的 system 与工具、并把被压区域
+ * 原样当作开头消息回放，指令只追加在最后。
+ */
+@Test
+func runtime_summaryCallReusesConversationPrefix() {
+    let provider = StubRecordingProvider()
+    let runtime = makeCompactionRuntime(
+        compactionRuntimeConfig(true, smallWindowCompaction(retainTokens: 4)), provider)
+
+    // 第一轮：正常请求（它的前缀就是 provider 会落盘的缓存单元）
+    let first = ArrayList<Message>()
+    first.add(UserMessage(ContentList.ofText("第一轮的问题"), 0))
+    runtime.chat(first).result()
+
+    // 第二轮：同一前缀 + 上一轮用量锚 + 一大段新内容 → 请求前触发压缩
+    let sb = StringBuilder()
+    var i = 0
+    while (i < 4000) {
+        sb.append("y")
+        i++
+    }
+    let second = ArrayList<Message>()
+    second.add(UserMessage(ContentList.ofText("第一轮的问题"), 0))
+    second.add(AssistantMessage(ContentList.ofText("ok"), "", "", StopReason.EndTurn, TokenUsage(500000, 0), 0))
+    second.add(UserMessage(ContentList.ofText(sb.toString()), 0))
+    runtime.chat(second).result()
+
+    match (provider.mainReq) {
+        case Some(reqMain) =>
+            match (provider.summaryReq) {
+                case Some(reqSum) =>
+
+                // 同样的 system 与工具：前缀一致才谈得上命中
+                @Expect(reqSum.systemPrompt, reqMain.systemPrompt)
+                @Expect(reqSum.tools.size, reqMain.tools.size)
+                // 被压区域逐条原样回放（内容与压缩前的历史一致），指令只在最后
+                @Expect(reqSum.messages.size >= 2, true)
+                var j = 0
+                while (j < reqSum.messages.size - 1) {
+                    @Expect(textOfMsg(reqSum.messages[j]), textOfMsg(second[j]))
+                    j++
+                }
+                let last = reqSum.messages[reqSum.messages.size - 1]
+                match (last) {
+                    case um: UserMessage =>
+                        // 最后一条是指令本身，不含被压的正文（正文在消息里，不在提示词里）
+                        @Expect(textOfMsg(um).contains("这一份检查点") || textOfMsg(um).contains("压缩引擎"), true)
+                    case _ => @Fail("expected instruction as final user message")
+                }
+                case None => @Fail("summary sub-call not issued")
+            }
+        case None => @Fail("main request not issued")
+    }
+}
+
+// 溢出恢复：报超窗 → 压掉最大一段头部 → 用新历史重试同一请求，run 正常收尾
+@Test
+func runtime_overflowRecoveryCompactsAndRetries() {
+    let provider = StubOverflowProvider(1, "SUM")
+    let runtime = makeCompactionRuntime(
+        compactionRuntimeConfig(true, overflowPolicy(1)), provider)
+    let msgs = ArrayList<Message>()
+    msgs.add(UserMessage(ContentList.ofText("第一轮的问题"), 0))
+    msgs.add(AssistantMessage(ContentList.ofText("第一轮的回答"), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0))
+    msgs.add(UserMessage(ContentList.ofText("第二轮的问题"), 0))
+    let result = runtime.chat(msgs).result()
+
+    @Expect(provider.streamCalls, Int64(2))     // 失败一次 + 恢复后重试一次
+    @Expect(provider.chatCalls, Int64(1))       // 一次摘要子调用
+    match (result[0]) {
+        case cm: CompactionMessage => @Expect(checkpointBody(cm.summary), "SUM")
+        case _ => @Fail("expected CompactionMessage as first message")
+    }
+    // 恢复成功：不该留 [provider error]
+    for (m in result) {
+        match (m) {
+            case am: AssistantMessage =>
+                match (am.stopReason) {
+                    case StopReason.Error => @Fail("recovered run should not carry a provider error")
+                    case _ => ()
+                }
+            case _ => ()
+        }
+    }
+}
+
+// 重试预算用完 → 按普通失败收敛（不留半截状态，错误消息进列表）
+@Test
+func runtime_overflowRecoveryGivesUpAfterBudget() {
+    let provider = StubOverflowProvider(99, "SUM")
+    let runtime = makeCompactionRuntime(
+        compactionRuntimeConfig(true, overflowPolicy(1)), provider)
+    let msgs = ArrayList<Message>()
+    msgs.add(UserMessage(ContentList.ofText("第一轮的问题"), 0))
+    msgs.add(AssistantMessage(ContentList.ofText("第一轮的回答"), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0))
+    msgs.add(UserMessage(ContentList.ofText("第二轮的问题"), 0))
+    let result = runtime.chat(msgs).result()
+
+    @Expect(provider.streamCalls, Int64(2))     // 初次 + 一次恢复重试，之后放弃
+    @Expect(provider.chatCalls, Int64(1))
+    var sawError = false
+    for (m in result) {
+        match (m) {
+            case am: AssistantMessage =>
+                match (am.stopReason) {
+                    case StopReason.Error => sawError = true
+                    case _ => ()
+                }
+            case _ => ()
+        }
+    }
+    @Expect(sawError, true)
+}
+
+// maxOverflowRetries = 0 → 关闭恢复：不花摘要调用，直接失败
+@Test
+func runtime_overflowRecoveryDisabled() {
+    let provider = StubOverflowProvider(99, "SUM")
+    let runtime = makeCompactionRuntime(
+        compactionRuntimeConfig(true, overflowPolicy(0)), provider)
+    let msgs = ArrayList<Message>()
+    msgs.add(UserMessage(ContentList.ofText("第一轮的问题"), 0))
+    msgs.add(UserMessage(ContentList.ofText("第二轮的问题"), 0))
+    let result = runtime.chat(msgs).result()
+
+    @Expect(provider.streamCalls, Int64(1))
+    @Expect(provider.chatCalls, Int64(0))
+}
+
+// 超大工具结果：修剪后压力回到阈值内 → 省掉摘要调用；落库的历史保持原样
+@Test
+func runtime_pruneAvoidsSummaryAndKeepsStoredHistory() {
+    let provider = StubSummaryProvider("SUM")
+    let runtime = makeCompactionRuntime(
+        compactionRuntimeConfig(true, smallWindowCompaction(retainTokens: 4)), provider)
+    let sb = StringBuilder()
+    var i = 0
+    while (i < 40000) {
+        sb.append("x")
+        i++
+    }
+    let huge = sb.toString()
+    let msgs = ArrayList<Message>()
+    msgs.add(UserMessage(ContentList.ofText("跑个命令"), 0))
+    msgs.add(ToolResultMessage("c1", "bash", ContentList.ofText(huge), false, 0))
+    msgs.add(UserMessage(ContentList.ofText("继续"), 0))
+    let result = runtime.chat(msgs).result()
+
+    // 修剪够了就不摘（摘要子调用次数 0）
+    @Expect(provider.chatCalls, Int64(0))
+    // 落库/返回的历史里仍是完整输出 —— 修剪只作用于发给模型的那一份
+    var keptOriginal = false
+    for (m in result) {
+        match (m) {
+            case tr: ToolResultMessage =>
+                if (Int64(textOfMsg(tr).toRuneArray().size) >= Int64(40000)) { keptOriginal = true }
+            case _ => ()
+        }
+    }
+    @Expect(keptOriginal, true)
+}
+
+// 收集压缩括弧事件
+class CompactionEventCollector {
+    public let starts = ArrayList<CompactionStartEvent>()
+    public let ends = ArrayList<CompactionEndEvent>()
+    public init(bus: EventBus) {
+        bus.subscribe({ ev =>
+            match (ev) {
+                case e: CompactionStartEvent => this.starts.add(e)
+                case e: CompactionEndEvent => this.ends.add(e)
+                case _ => ()
+            }
+        })
+    }
+}
+
+// 压力触发：compaction_start / compaction_end 成对，同一 id，替换后消息变少
+@Test
+func runtime_compactionEmitsBracketedEvents() {
+    let bus = EventBus()
+    let collector = CompactionEventCollector(bus)
+    let provider = StubSummaryProvider("SUM")
+    let runtime = makeCompactionRuntime(
+        compactionRuntimeConfig(true, smallWindowCompaction(retainTokens: 4)), provider,
+        eventBus: Some(bus))
+    let msgs = ArrayList<Message>()
+    msgs.add(UserMessage(ContentList.ofText("第一轮"), 0))
+    msgs.add(bigUserMessage())
+    runtime.chatWithSessionId("sess_bracket", msgs, SessionEnvironment()).result()
+
+    @Expect(collector.starts.size, Int64(1))
+    @Expect(collector.ends.size, Int64(1))
+    @Expect(collector.starts[0].compactionId, collector.ends[0].compactionId)
+    @Expect(collector.starts[0].trigger, "pressure")
+    // 括弧闭合时能看出覆盖了多少
+    @Expect(collector.ends[0].messagesAfter < collector.ends[0].messagesBefore, true)
+}
+
+// 台账被占（同会话已有压缩在飞）→ 跳过这次压缩：不花摘要调用、不发括弧、历史原样
+@Test
+func runtime_compactionSkippedWhenAnotherIsInFlight() {
+    let bus = EventBus()
+    let collector = CompactionEventCollector(bus)
+    let provider = StubSummaryProvider("SUM")
+    let runtime = makeCompactionRuntime(
+        compactionRuntimeConfig(true, smallWindowCompaction(retainTokens: 4)), provider,
+        eventBus: Some(bus))
+    // 模拟另一个 runtime 正在压同一会话
+    @Expect(globalCompactionLedger.begin("sess_busy", "cmp_other"), true)
+    let msgs = ArrayList<Message>()
+    msgs.add(UserMessage(ContentList.ofText("第一轮"), 0))
+    msgs.add(bigUserMessage())
+    let result = runtime.chatWithSessionId("sess_busy", msgs, SessionEnvironment()).result()
+    globalCompactionLedger.end("sess_busy")
+
+    @Expect(provider.chatCalls, Int64(0))     // 没有摘
+    @Expect(collector.starts.size, Int64(0))  // 也没开括弧（事务没开始）
+    var hasCompaction = false
+    for (m in result) {
+        match (m) {
+            case _: CompactionMessage => hasCompaction = true
+            case _ => ()
+        }
+    }
+    @Expect(hasCompaction, false)             // 历史原样
+}
+
+// 溢出恢复也走括弧，并且**放弃时照样闭合**（after == before，不留悬挂事务）
+@Test
+func runtime_overflowRecoveryBracketsEvenWhenGivingUp() {
+    let bus = EventBus()
+    let collector = CompactionEventCollector(bus)
+    // 只有一条用户消息 → 溢出恢复压无可压，直接放弃
+    let provider = StubOverflowProvider(99, "SUM")
+    let runtime = makeCompactionRuntime(
+        compactionRuntimeConfig(true, overflowPolicy(1)), provider, eventBus: Some(bus))
+    let msgs = ArrayList<Message>()
+    msgs.add(UserMessage(ContentList.ofText("唯一的一条"), 0))
+    runtime.chatWithSessionId("sess_ov", msgs, SessionEnvironment()).result()
+
+    // 压无可压时事务根本没开始（没有可改写的目标），不该有悬挂的 start
+    @Expect(collector.starts.size, Int64(0))
+    @Expect(collector.ends.size, Int64(0))
+}
+
+// 溢出恢复真的压了：trigger=overflow 的括弧成对闭合
+@Test
+func runtime_overflowRecoveryEmitsBracketedEvents() {
+    let bus = EventBus()
+    let collector = CompactionEventCollector(bus)
+    let provider = StubOverflowProvider(1, "SUM")
+    let runtime = makeCompactionRuntime(
+        compactionRuntimeConfig(true, overflowPolicy(1)), provider, eventBus: Some(bus))
+    let msgs = ArrayList<Message>()
+    msgs.add(UserMessage(ContentList.ofText("第一轮的问题"), 0))
+    msgs.add(AssistantMessage(ContentList.ofText("回答"), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0))
+    msgs.add(UserMessage(ContentList.ofText("第二轮的问题"), 0))
+    runtime.chatWithSessionId("sess_ov2", msgs, SessionEnvironment()).result()
+
+    @Expect(collector.starts.size, Int64(1))
+    @Expect(collector.ends.size, Int64(1))
+    @Expect(collector.starts[0].trigger, "overflow")
+    @Expect(collector.starts[0].compactionId, collector.ends[0].compactionId)
+    @Expect(collector.ends[0].messagesAfter < collector.ends[0].messagesBefore, true)
+    // 台账已释放：同一会话还能再压
+    @Expect(globalCompactionLedger.isOpen("sess_ov2"), false)
+}
+
 // chat 抛异常：验证子调用失败降级为占位符
 class StubFailingProvider <: Provider {
     public func name(): String { "stub-failing" }
@@ -205,17 +532,25 @@ class StubFailingProvider <: Provider {
     }
 }
 
-func compactionRuntimeConfig(compactionEnabled: Bool, reserveTokens: UInt32,
-    keepRecentTokens: UInt32, compaction: Option<CompactionConfig>): AgentConfig {
+func compactionRuntimeConfig(compactionEnabled: Bool,
+    compaction: Option<CompactionConfig>): AgentConfig {
     AgentConfig("t", None, "", None, "m", None,
         ArrayList(), ArrayList(), Int64(0),
         UInt32(20), Float32(0.7), UInt32(4096), None,
-        compactionEnabled, reserveTokens, keepRecentTokens, compaction,
+        compactionEnabled, compaction,
         UInt32(50), UInt32(30), UInt32(0),
         ArrayList(), None, Int64(0), Int64(0))
 }
 
-func makeCompactionRuntime(config: AgentConfig, provider: Provider): AgentRuntime {
+// 小窗口部署的压缩策略：W=8192（未知模型兜底）/ O=4096 → messageBudget 4096，
+// 余量按容量收紧（默认 65536 会把压力预算压没，此时压缩按设计跳过并留痕）
+func smallWindowCompaction(retainTokens!: Int64 = 2000): Option<CompactionConfig> {
+    Some(CompactionConfig(true, 0.8, 1024, 0.16, Some(retainTokens), 1,
+        DEFAULT_PROMPT_TEMPLATE, None, None))
+}
+
+func makeCompactionRuntime(config: AgentConfig, provider: Provider,
+    eventBus!: ?EventBus = None): AgentRuntime {
     let toolReg = ToolRegistry()
     let trustMgr = TrustManager()
     let skillReg = SkillRegistry()
@@ -224,7 +559,8 @@ func makeCompactionRuntime(config: AgentConfig, provider: Provider): AgentRuntim
     providerReg.register("default", provider)
     let store = MemorySessionStore()
     testRuntime(config, provider, toolReg, store, trustMgr,
-        skillReg, agentReg, providerReg, McpManager())
+        skillReg, agentReg, providerReg, ArrayList<Hook>(), SessionEnvironment(),
+        McpManager(), eventBus: eventBus)
 }
 
 // 约 18000 字符 ≈ 4505 tokens（+5 固定开销），确保 total > 4096 阈值
@@ -250,24 +586,33 @@ func runtime_compactionSummaryViaLLM() {
     let required = ArrayList<JsonValue>()
     required.add(JsonValue.String("goal"))
     opts["required"] = JsonValue.Array(required)
-    let cc = CompactionConfig(true, Int64(4096), Int64(2000), "Summarize: {{conversation}} {{max_tokens}}",
-        Some(JsonValue.Map(opts)), None)
+    // W=8192（未知模型兜底）、O=4096 → messageBudget=4096；headroom 1024 → 阈值 min(6553, 3072)=3072
+    let cc = CompactionConfig(true, 0.8, 1024, 0.16, Some(Int64(2000)), 1,
+        "Summarize: {{conversation}} {{max_tokens}}", Some(JsonValue.Map(opts)), None)
     let summaryText = "{\"goal\":\"test\",\"key_findings\":[]}"
     let provider = StubSummaryProvider(summaryText)
     let runtime = makeCompactionRuntime(
-        compactionRuntimeConfig(false, UInt32(16384), UInt32(20000), Some(cc)), provider)
+        compactionRuntimeConfig(false, Some(cc)), provider)
     let msgs = ArrayList<Message>()
     msgs.add(bigUserMessage())
     let result = runtime.chat(msgs).result()
     @Expect(provider.chatCalls, Int64(1))
     let cm = requireCompaction(result)
-    @Expect(cm.summary, summaryText)
-    @Expect(cm.tokensBefore, Int64(4510))
-    // 子调用请求体：仅一条用户消息（无 system/tools），不污染主对话
+    @Expect(checkpointBody(cm.summary), summaryText)
+    // 触发点在请求前：首轮还没有 provider 用量可锚，记的是当时的本地估算
+    @Expect(cm.tokensBefore, Int64(4505))
+    // 子调用请求体：被压区域原样回放 + 末尾追加指令（复用主对话前缀，命中 provider 缓存）
     match (provider.lastReq) {
         case Some(req) =>
-            @Expect(req.messages.size, 1)
-            @Expect(req.tools.size, 0)
+            @Expect(req.messages.size >= 2, true)
+            // 倒数第二条是被压区域的消息本体，最后一条是指令
+            let last = req.messages[req.messages.size - 1]
+            match (last) {
+                case um: UserMessage => @Expect(textOfMsg(um).contains("Summarize:"), true)
+                case _ => @Fail("expected instruction as the final user message")
+            }
+            // 区域里的第一条就是被压的那段历史本体（18000 字符的输入）
+            @Expect(Int64(textOfMsg(req.messages[0]).toRuneArray().size), Int64(18000))
         case None => @Fail("summary sub-call not issued")
     }
 }
@@ -279,11 +624,12 @@ func runtime_compactionSchemaValidationFallback() {
     let required = ArrayList<JsonValue>()
     required.add(JsonValue.String("goal"))
     opts["required"] = JsonValue.Array(required)
-    let cc = CompactionConfig(true, Int64(4096), Int64(2000), "Summarize: {{conversation}} {{max_tokens}}",
-        Some(JsonValue.Map(opts)), None)
+    // W=8192（未知模型兜底）、O=4096 → messageBudget=4096；headroom 1024 → 阈值 min(6553, 3072)=3072
+    let cc = CompactionConfig(true, 0.8, 1024, 0.16, Some(Int64(2000)), 1,
+        "Summarize: {{conversation}} {{max_tokens}}", Some(JsonValue.Map(opts)), None)
     let provider = StubSummaryProvider("not-a-json")
     let runtime = makeCompactionRuntime(
-        compactionRuntimeConfig(false, UInt32(16384), UInt32(20000), Some(cc)), provider)
+        compactionRuntimeConfig(false, Some(cc)), provider)
     let msgs = ArrayList<Message>()
     msgs.add(bigUserMessage())
     let result = runtime.chat(msgs).result()
@@ -297,7 +643,7 @@ func runtime_compactionSchemaValidationFallback() {
 func runtime_compactionSubCallFailureFallback() {
     let provider = StubFailingProvider()
     let runtime = makeCompactionRuntime(
-        compactionRuntimeConfig(true, UInt32(4096), UInt32(2000), None), provider)
+        compactionRuntimeConfig(true, smallWindowCompaction()), provider)
     let msgs = ArrayList<Message>()
     msgs.add(bigUserMessage())
     let result = runtime.chat(msgs).result()
@@ -305,26 +651,31 @@ func runtime_compactionSubCallFailureFallback() {
     @Expect(cm.summary.contains("previous tokens summarized"), true)
 }
 
-// 用量优先：provider 报告 inputTokens=500000 → 直接用用量判定（本地估算仅兜底），tokensBefore=500000
+// 用量优先：以最近一次 provider 报的用量为锚 + 其后新增消息的估算 → 判定下一次请求的压力
 @Test
 func runtime_compactionUsagePriority() {
     let provider = StubUsageSummaryProvider("{\"goal\":\"test\"}")
+    // 保留预算收到 4：两三条小消息全在保留区之外，切点才会落在它们之前
     let runtime = makeCompactionRuntime(
-        compactionRuntimeConfig(true, UInt32(4096), UInt32(4), None), provider)
+        compactionRuntimeConfig(true, smallWindowCompaction(retainTokens: 4)), provider)
     let msgs = ArrayList<Message>()
     msgs.add(UserMessage(ContentList.ofText("hi"), 0))
+    // 上一轮 provider 报过 500000 输入 token：这一轮请求前就该按它判定（本地估算只是兜底）
+    msgs.add(AssistantMessage(ContentList.ofText("ok"), "", "", StopReason.EndTurn, TokenUsage(500000, 0), 0))
+    msgs.add(UserMessage(ContentList.ofText("继续"), 0))
     let result = runtime.chat(msgs).result()
     @Expect(provider.chatCalls, Int64(1))
     let cm = requireCompaction(result)
-    @Expect(cm.summary, "{\"goal\":\"test\"}")
-    @Expect(cm.tokensBefore, Int64(500000))
+    @Expect(checkpointBody(cm.summary), "{\"goal\":\"test\"}")
+    // 锚 + 其后新增消息的估算（不是把整段历史重新估一遍）
+    @Expect(cm.tokensBefore > Int64(500000), true)
 }
 
 // 不触发：消息远小于阈值 → 消息原样返回（无 CompactionMessage），行为与旧版等价
 @Test
 func runtime_compactionNoTrigger() {
     let runtime = makeCompactionRuntime(
-        compactionRuntimeConfig(true, UInt32(4096), UInt32(2000), None), StubProvider())
+        compactionRuntimeConfig(true, None), StubProvider())
     let msgs = ArrayList<Message>()
     msgs.add(UserMessage(ContentList.ofText("hi"), 0))
     let result = runtime.chat(msgs).result()
@@ -348,7 +699,7 @@ func firstStartSessionId(stream: EventStream<AgentEvent, ArrayList<Message>>): S
 @Test
 func runtime_chatWithSessionId_usesProvidedId() {
     let runtime = makeCompactionRuntime(
-        compactionRuntimeConfig(false, UInt32(16384), UInt32(20000), None), StubProvider())
+        compactionRuntimeConfig(false, None), StubProvider())
     let msgs = ArrayList<Message>()
     msgs.add(UserMessage(ContentList.ofText("hi"), 0))
     let stream = runtime.chatWithSessionId("sess_custom_1", msgs, SessionEnvironment())
@@ -361,7 +712,7 @@ func runtime_chatWithSessionId_usesProvidedId() {
 @Test
 func runtime_streamClosedAfterTurn() {
     let runtime = makeCompactionRuntime(
-        compactionRuntimeConfig(false, UInt32(16384), UInt32(20000), None), StubProvider())
+        compactionRuntimeConfig(false, None), StubProvider())
     let msgs = ArrayList<Message>()
     msgs.add(UserMessage(ContentList.ofText("hi"), 0))
     let stream = runtime.chatWithSessionId("sess_sentinel_1", msgs, SessionEnvironment())
@@ -381,7 +732,7 @@ func runtime_streamClosedAfterTurn() {
 @Test
 func runtime_chat_defaultSessionIdUlid() {
     let runtime = makeCompactionRuntime(
-        compactionRuntimeConfig(false, UInt32(16384), UInt32(20000), None), StubProvider())
+        compactionRuntimeConfig(false, None), StubProvider())
     let msgs = ArrayList<Message>()
     msgs.add(UserMessage(ContentList.ofText("hi"), 0))
     let stream = runtime.chat(msgs)
@@ -476,7 +827,7 @@ func makeCancelRuntime(provider: Provider, slowMs: Int64): AgentRuntime {
     let providerReg = ProviderRegistry()
     providerReg.register("default", provider)
     let store = MemorySessionStore()
-    testRuntime(compactionRuntimeConfig(false, UInt32(16384), UInt32(20000), None), provider,
+    testRuntime(compactionRuntimeConfig(false, None), provider,
         toolReg, store, trustMgr, skillReg, agentReg, providerReg, McpManager())
 }
 
@@ -671,7 +1022,7 @@ func makeApprovalRuntime(provider: Provider, decision: String, rec: ApprovalReco
         rec.lastToolCallId = req.toolCallId
         approvalAnswerOf(req, decision)
     }
-    testRuntime(compactionRuntimeConfig(false, UInt32(16384), UInt32(20000), None), provider,
+    testRuntime(compactionRuntimeConfig(false, None), provider,
         toolReg, store, trustMgr, skillReg, agentReg, providerReg,
         ArrayList<Hook>(), McpManager(), ask: Some(askFn))
 }
@@ -732,7 +1083,7 @@ func runtime_withoutAskChannel_deniesAndDoesNotHang() {
     toolReg.register(SequentialSlowTool())
     let providerReg = ProviderRegistry()
     providerReg.register("default", provider)
-    let runtime = testRuntime(compactionRuntimeConfig(false, UInt32(16384), UInt32(20000), None), provider,
+    let runtime = testRuntime(compactionRuntimeConfig(false, None), provider,
         toolReg, MemorySessionStore(), TrustManager(), SkillRegistry(), AgentRegistry(), providerReg,
         McpManager())
     let result = approvalRunResult(runtime)

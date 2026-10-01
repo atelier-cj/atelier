@@ -77,26 +77,65 @@ command = "npx @playwright/mcp"
 - 系统提示中的 `[可用 MCP 服务]` 目录段展示全部服务（名称/版本/工具清单），激活服务标注 `[已加载]`
 - 服务名不能包含下划线（工具名 `mcp_<server>_<tool>` 前缀解析依赖）
 
-### 压缩增强（可选）
+### 上下文压缩（可选）
 
-不配置 `[agent.compaction]` 时使用平铺字段（`compactionEnabled`/`compactionReserveTokens`/`keepRecentTokens`），配置后嵌套优先：
+`compactionEnabled` 是开关；预算口径全在 `[agent.compaction]` 里（dsh 同款）：
+
+```text
+W = 本路由的上下文窗口（[[provider.model]] / provider 自报）
+O = 本次请求的输出上限（maxOutputTokens；0 = 用模型事实）
+messageBudget  = W − O              留给消息的部分
+pressureBudget = messageBudget − B  B = headroomTokens
+threshold      = floor(min(W × thresholdRatio, pressureBudget))   越过它才压
+retain         = retainTokens ?? floor(messageBudget × retainRatio)  压完逐字保留多少
+```
 
 ```toml
 [[agent]]
 name = "assistant"
-# ... 其他字段 ...
-compactionEnabled = true          # 平铺配置（可选，兼容旧配置）
+compactionEnabled = true           # 开关（可选，默认 true）
 
-# [agent.compaction]              # 嵌套配置（可选，优先于平铺字段）
+# [agent.compaction]               # 预算与摘要调用（可选，缺省值见下）
 # enabled = true
-# reserveTokens = 16384
-# keepRecentTokens = 20000
+# thresholdRatio = 0.8             # 阈值占窗口比例
+# headroomTokens = 65536           # 完成预算之外的额外余量（估算误差/图片/工具声明的缓冲）
+# retainRatio = 0.16               # 逐字保留的近期历史占"消息预算"的比例
+# retainTokens = 20000             # 绝对保留预算（与 retainRatio 互斥，给了就以它为准）
+# maxOverflowRetries = 1           # provider 报超窗后的最大恢复重试次数（0 = 关闭恢复）
+# summaryMaxTokens = 0             # 摘要子调用输出上限；0 = 跟随 headroomTokens
+
+# [agent.compaction.prune]         # 工具结果修剪（可选；不配 = 开启，阈值 8192 码点）
+# enabled = true
+# thresholdChars = 8192            # 合并文本超过这么多**码点**才修剪
+# headChars = 4096                 # 保留的开头码点数
+# tailChars = 1024                 # 保留的末尾码点数
 # summaryModel = "deepseek-chat"   # 摘要模型，缺省复用主模型
 # promptTemplate = "压缩以下对话：\n{{conversation}}"
 # outputSchema = { required = ["goal"], types = { goal = "string" } }
 ```
 
-- 压缩摘要通过**独立子调用**生成（无 system/tools，不影响主对话缓存命中）
+- **三个不变量**：`W − O > 0`、`− B > 0`、`retain < threshold`。任一不成立就**不压**：
+  日志留一条警告（每个原因一次），而**溢出恢复仍然可用** —— 配置坏了不该让会话不可用。
+  小窗口部署要么调大窗口，要么把 `headroomTokens` 收小（默认 64k 是为大窗口模型留的余量）。
+- **触发点在请求派发前**：每回合发请求前量一次压力（provider 报的用量为锚 + 其后新增消息的估算），
+  越过阈值才处理 —— 回合结束后再压的话，本轮该发的请求早就发出去了。
+- **先修剪、后摘要**：先按 `[agent.compaction.prune]` 把超长工具结果换成"头 + 标记 + 尾"
+  （**不发模型调用**，只作用于发给模型的那一份，落库历史保持完整），修剪后回到阈值内就
+  **省掉摘要调用**；仍在阈值之上才做摘要 + 替换。
+- **溢出恢复**：provider 明确报"超上下文窗口"（`maximum context length` / `prompt is too long` 等）
+  时，绕过阈值压掉最大的一段头部（只保最后一条用户消息起的内容，不拆散工具调用对），
+  再用新历史重试同一请求，次数受 `maxOverflowRetries` 限制。
+- 默认摘要指令是 dsh 同款的 Markdown 检查点骨架（八个固定小节 + "空节写 (none)"/"不照抄上一份"
+  等硬规则）；指令里说的"上面这段对话"就是被回放的那批消息，提示词本身**不内联对话**
+  （内联会毁掉前缀复用）。`promptTemplate` 可整段替换；自定义模板仍可用
+  `{{conversation}}`（被压区域的扁平文本）/ `{{previous_summary}}` / `{{max_tokens}}`
+- 压缩后的替换消息带**检查点框架**：一段前言（"这是自动生成的检查点…当作既定背景，不要复述、
+  也不要提及"）+ `<compacted-summary>…</compacted-summary>` 标签。落库的就是这份文本 ——
+  模型看到的即所存的，续跑/回放不会变样；界面与"上一份检查点"复用会剥掉框架取裸摘要。
+- 摘要子调用**复用主对话前缀**：同样的 system 提示词 + 工具声明 + 被压区域消息原样回放，
+  压缩指令只追加在最后一条 user 消息里。provider 的前缀缓存按"缓存前缀单元完整匹配"计费
+  （[DeepSeek 的硬盘缓存](https://api-docs.deepseek.com/zh-cn/guides/kv_cache/) 即如此），
+  这样那段长输入按缓存价结算；若把对话内联进提示词，前缀从第一个 token 就不同，整段按未命中计价。
 - `promptTemplate` 支持 mustache 变量：`{{conversation}}` / `{{previous_summary}}` / `{{max_tokens}}` / `{{#previous_summary}}` 条件块
 - `outputSchema` 极简校验（required 必填 + types 类型断言），校验失败自动降级为占位摘要
 
@@ -147,8 +186,7 @@ let config = AgentConfig(
     maxOutputTokens: UInt32(4096),
     thinkingLevel: None,
     compactionEnabled: true,
-    compactionReserveTokens: UInt32(16384),
-    keepRecentTokens: UInt32(20000),
+    compaction: None,                       // 预算口径见「上下文压缩」节
     maxToolCalls: UInt32(50),
     toolTimeout: UInt32(30),
     minToolInterval: UInt32(0),
@@ -178,8 +216,7 @@ let config = AgentConfig(
 | `maxVerifyPasses` | `UInt32` | `0` | 收尾前自验次数上限：宣布完成时先要求实操核对再收尾；`0` = 关闭 |
 | `thinkingLevel` | `Option<String>` | `None` | 思考模式（deepseek-reasoner 可用） |
 | `compactionEnabled` | `Bool` | `true` | 启用上下文压缩 |
-| `compactionReserveTokens` | `UInt32` | `16384` | 压缩保留缓冲 |
-| `keepRecentTokens` | `UInt32` | `20000` | 保留最近 Token 数 |
+| `compaction` | `Option<CompactionConfig>` | `None` | 压缩预算与摘要调用（阈值/余量/保留/溢出恢复），见「上下文压缩」节 |
 | `maxToolCalls` | `UInt32` | `50` | 单次运行最大工具调用数 |
 | `toolTimeout` | `UInt32` | `30` | **只读**（`Parallel`）工具的单次墙钟预算（秒）；`0` = 不限时 |
 | `sideEffectToolTimeout` | `UInt32` | `300` | **有副作用**（`Sequential`）工具的预算（秒）；`0` = 不限时 |

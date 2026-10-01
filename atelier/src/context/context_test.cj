@@ -16,18 +16,72 @@ func estimateText() {
 }
 
 @Test
-func compactLarge() {
-    let msgs = ArrayList<Message>()
-    for (i in 0..20) { msgs.add(msg("message number ${i}")) }
-    let result = compactMessages(msgs, 100, 20, 20)
-    @Expect(result.size > 0, true)
+func compactSpec_thresholdIsMinOfRatioAndPressureBudget() {
+    let cc = CompactionConfig()   // ratio 0.8 / headroom 65536
+    // W=200000, O=8192 → messageBudget=191808, pressureBudget=126272
+    // 0.8×W=160000 > pressureBudget → 取 pressureBudget
+    let r = resolveCompactSpec(cc, 200000, 8192)
+    match (r.spec) {
+        case Some(spec) =>
+            @Expect(spec.messageBudget, 191808)
+            @Expect(spec.thresholdTokens, 126272)
+            // retain = messageBudget × 0.16
+            @Expect(spec.retainTokens, Int64(Float64(191808) * 0.16))
+            // 摘要输出上限默认跟随 headroom
+            @Expect(spec.summaryMaxTokens, 65536)
+        case None => @Fail("spec should resolve: " + r.reason)
+    }
+
+    // 中小窗口：默认 64k 余量吃掉大部分压力预算 → 取 pressureBudget（这正是"小窗口要自己调余量"）
+    let narrow = resolveCompactSpec(cc, 100000, 8192)
+    match (narrow.spec) {
+        case Some(spec) => @Expect(spec.thresholdTokens, 26272)
+        case None => @Fail("spec should resolve: " + narrow.reason)
+    }
+
+    // 收紧余量后：0.8×W 才是更小的那一侧
+    let tightened = CompactionConfig(true, 0.8, 1024, 0.16, None, 1, DEFAULT_PROMPT_TEMPLATE, None, None)
+    match (resolveCompactSpec(tightened, 100000, 8192).spec) {
+        case Some(spec) => @Expect(spec.thresholdTokens, 80000)
+        case None => @Fail("spec should resolve")
+    }
 }
 
 @Test
-func smallFits() {
-    let msgs = ArrayList<Message>([msg("hi")])
-    let result = compactMessages(msgs, 100, 20, 20)
-    @Expect(result.size, 1)
+func compactSpec_invariantsBecomeReasons() {
+    let cc = CompactionConfig()
+    // 窗口未知：不压缩（也不该猜）
+    match (resolveCompactSpec(cc, 0, 8192).spec) {
+        case None => ()
+        case Some(_) => @Fail("unknown window must not compact")
+    }
+    // 输出预留吃掉整个窗口
+    match (resolveCompactSpec(cc, 8192, 8192).spec) {
+        case None => ()
+        case Some(_) => @Fail("zero message budget must not compact")
+    }
+    // 余量吃掉整个消息预算
+    let tight = CompactionConfig(true, 0.8, 8192, 0.16, None, 1, DEFAULT_PROMPT_TEMPLATE, None, None)
+    match (resolveCompactSpec(tight, 16384, 8192).spec) {
+        case None => ()
+        case Some(_) => @Fail("zero pressure budget must not compact")
+    }
+    // 保留不小于阈值
+    let bad = CompactionConfig(true, 0.8, 65536, 0.16, Some(999999), 1, DEFAULT_PROMPT_TEMPLATE, None, None)
+    let r = resolveCompactSpec(bad, 200000, 8192)
+    match (r.spec) {
+        case None => @Expect(r.reason.contains("retain"), true)
+        case Some(_) => @Fail("retain >= threshold must not compact")
+    }
+}
+
+@Test
+func compactSpec_absoluteRetainWins() {
+    let cc = CompactionConfig(true, 0.8, 1024, 0.16, Some(4096), 1, DEFAULT_PROMPT_TEMPLATE, None, None)
+    match (resolveCompactSpec(cc, 100000, 8192).spec) {
+        case Some(spec) => @Expect(spec.retainTokens, 4096)
+        case None => @Fail("spec should resolve")
+    }
 }
 
 @Test
@@ -113,22 +167,37 @@ func modelRegistry_defaultWindowIsConfigurable() {
 func compactionConfig_defaultTemplateRenders() {
     let cfg = CompactionConfig()
     let out = renderCompactionPrompt(cfg, "对话内容", None, 16384)
-    @Expect(out.contains("对话内容"), true)
-    @Expect(out.contains("16384"), true)
-    @Expect(out.contains("previous_summary"), false)
+    // 默认模板**不内联对话**：被压区域以消息形式回放，指令单独追加
+    // （内联会让前缀与主请求不同，DeepSeek 的硬盘缓存按"缓存前缀单元完整匹配"计费）
+    @Expect(out.contains("<conversation>"), false)
+    @Expect(out.contains("对话内容"), false)
+    // dsh 的检查点骨架：每节都在，一节不能少
+    for (section in ["## Primary Request and Intent", "## Key Technical Concepts", "## Files and Code",
+        "## Errors and Fixes", "## Pending Jobs", "## Current Work", "## Next Step", "## Critical Context"]) {
+        @Expect(out.contains(section), true)
+    }
+    // 空节写 "(none)"、不照抄上一份检查点这两条硬规则要在
+    @Expect(out.contains("(none)"), true)
+    @Expect(out.contains("上一份检查点"), true)
+    // 默认模板也不内联历史摘要：区域里若有上一份检查点，它本身就在回放的消息里
+    @Expect(out.contains("<previous_summary>"), false)
 }
 
 @Test
 func compactionConfig_previousSummaryConditional() {
-    let cfg = CompactionConfig()
+    // 默认模板已不用它（历史摘要随区域回放），但自定义模板仍可引用
+    let cfg = CompactionConfig(true, 0.8, 16384, 0.16, None, 1,
+        "{{#previous_summary}}<previous_summary>\n{{previous_summary}}\n</previous_summary>{{/previous_summary}}\n对话：{{conversation}}",
+        None, None)
     let out = renderCompactionPrompt(cfg, "对话内容", Some("历史摘要"), 16384)
-    @Expect(out.contains("历史摘要"), true)
+    @Expect(out.contains("<previous_summary>\n历史摘要\n</previous_summary>"), true)
+    @Expect(out.contains("对话：对话内容"), true)
 }
 
 @Test
 func compactionConfig_customTemplate() {
     let cfg = CompactionConfig(
-        true, 16384, 20000,
+        true, 0.8, 16384, 0.16, None, 1,
         "压缩以下对话：\n{{conversation}}\n{{#previous_summary}}旧摘要：{{previous_summary}}{{/previous_summary}}",
         None, None)
     let out = renderCompactionPrompt(cfg, "对话", Some("旧"), 16384)
@@ -158,7 +227,7 @@ func compactionConfig_summaryReplacesAllWhenKeepZero() {
     let out = compactWithSummary(msgs, 0, "摘要", 10)
     @Expect(out.size, 1)
     match (out[0]) {
-        case cm: CompactionMessage => @Expect(cm.summary, "摘要")
+        case cm: CompactionMessage => @Expect(checkpointBody(cm.summary), "摘要")
         case _ => @Fail("expected CompactionMessage")
     }
 }
@@ -195,27 +264,12 @@ func compactWithSummary_singleBigMessageTriggersCut() {
     let out = compactWithSummary(msgs, 10, "摘要", 36)
     @Expect(out.size, 2)
     match (out[0]) {
-        case cm: CompactionMessage => @Expect(cm.summary, "摘要")
+        case cm: CompactionMessage => @Expect(checkpointBody(cm.summary), "摘要")
         case _ => @Fail("expected CompactionMessage")
     }
     match (out[1]) {
         case um: UserMessage => @Expect(um.content.blocks().size, 1)
         case _ => @Fail("expected tail user message")
-    }
-}
-
-// 回归：compactMessages 同样修复（单条大消息达标时替换为摘要）
-@Test
-func compactMessages_singleBigMessageTriggersCut() {
-    let msgs = ArrayList<Message>()
-    msgs.add(UserMessage(ContentList.ofText(bigText()), 0))  // 30 tokens
-    msgs.add(UserMessage(ContentList.ofText("tail"), 0))     // 6 tokens
-    // total=36 > reserve=5，threshold=30-5=25 < 36 → 触发压缩
-    let out = compactMessages(msgs, 30, 5, 10)
-    @Expect(out.size, 2)
-    match (out[0]) {
-        case cm: CompactionMessage => @Expect(cm.tokensBefore, 30)
-        case _ => @Fail("expected CompactionMessage")
     }
 }
 
@@ -227,7 +281,7 @@ func compactWithSummary_multiMessageReach() {
     let out = compactWithSummary(msgs, 8, "摘要", 30)
     @Expect(out.size, 2)
     match (out[0]) {
-        case cm: CompactionMessage => @Expect(cm.summary, "摘要")
+        case cm: CompactionMessage => @Expect(checkpointBody(cm.summary), "摘要")
         case _ => @Fail("expected CompactionMessage")
     }
     match (out[1]) {
@@ -317,4 +371,210 @@ func compactionConfig_cutCrossPairsConverges() {
     msgs.add(UserMessage(ContentList.ofText("m1"), 0))
     let cut = protectCutPoint(msgs, 3)
     @Expect(cut, 0)  // 前移保留全部对，配对完整
+}
+
+// ---------- 溢出恢复的纯函数 ----------
+
+@Test
+func overflowErrorMatcher_knownPhrasings() {
+    // 各家措辞不同：按已知措辞匹配，大小写不敏感
+    @Expect(isContextOverflowError("Error 400: This model's maximum context length is 8192 tokens"), true)
+    @Expect(isContextOverflowError("invalid_request_error: context_length_exceeded"), true)
+    @Expect(isContextOverflowError("prompt is too long: 210000 tokens > 200000 maximum"), true)
+    @Expect(isContextOverflowError("Input is too long for requested model"), true)
+    @Expect(isContextOverflowError("Please reduce the length of the messages"), true)
+    // 无关错误不能误判（误判会白花一次摘要调用）
+    @Expect(isContextOverflowError("connection reset by peer"), false)
+    @Expect(isContextOverflowError("401 Unauthorized: invalid api key"), false)
+    @Expect(isContextOverflowError(""), false)
+}
+
+@Test
+func compactFrom_keepsTailAndProtectsPairing() {
+    let msgs = ArrayList<Message>()
+    msgs.add(UserMessage(ContentList.ofText("m1"), 0))
+    msgs.add(AssistantMessage(ContentList.ofText("a1"), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0))
+    msgs.add(UserMessage(ContentList.ofText("m2"), 0))
+
+    // 保留最后一条用户消息起的内容，前面换成摘要
+    @Expect(lastUserIndex(msgs), 2)
+    let out = compactFrom(msgs, 2, "摘要", 100)
+    @Expect(out.size, 2)
+    match (out[0]) {
+        case cm: CompactionMessage => @Expect(checkpointBody(cm.summary), "摘要")
+        case _ => @Fail("expected CompactionMessage first")
+    }
+    match (out[1]) {
+        case um: UserMessage => @Expect(um.content.blocks().size, 1)
+        case _ => @Fail("expected tail user message")
+    }
+
+    // 切点落在 0 = 没有可压的头部 → 原样返回（绝不把事情弄得更糟）
+    @Expect(compactFrom(msgs, 0, "摘要", 100).size, 3)
+}
+
+@Test
+func lastUserIndex_noneWhenNoUserMessage() {
+    let msgs = ArrayList<Message>()
+    msgs.add(AssistantMessage(ContentList.ofText("a1"), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0))
+    @Expect(lastUserIndex(msgs), -1)
+}
+
+// ---------- 工具结果修剪 ----------
+
+func repeatText(unit: String, times: Int64): String {
+    let sb = StringBuilder()
+    var i = 0
+    while (i < times) {
+        sb.append(unit)
+        i++
+    }
+    sb.toString()
+}
+
+@Test
+func pruneText_belowThresholdUntouched() {
+    let cfg = ToolResultPruneConfig()
+    let small = repeatText("abc", 10)   // 30 码点 < 8192
+    @Expect(pruneText(small, cfg), small)
+}
+
+@Test
+func pruneText_keepsHeadAndTailWithMarker() {
+    let cfg = ToolResultPruneConfig(true, 100, 40, 20)
+    let text = "H" + repeatText("m", 200) + "T"
+    let out = pruneText(text, cfg)
+    @Expect(out.contains(PRUNE_MARKER), true)
+    @Expect(out.startsWith("H" + repeatText("m", 39)), true)
+    @Expect(out.endsWith("T"), true)
+    // 修剪必须让文本变短
+    @Expect(Int64(out.toRuneArray().size) < Int64(text.toRuneArray().size), true)
+}
+
+@Test
+func pruneText_neverGrowsEvenWithBadConfig() {
+    // 头 + 标记 + 尾 > 阈值：自动收紧尾部，绝不比原文更短不了
+    let cfg = ToolResultPruneConfig(true, 50, 40, 40)
+    let text = repeatText("x", 200)
+    let out = pruneText(text, cfg)
+    @Expect(Int64(out.toRuneArray().size) <= 50, true)
+    @Expect(Int64(out.toRuneArray().size) < Int64(text.toRuneArray().size), true)
+}
+
+@Test
+func pruneText_countsCodePointsNotBytes() {
+    // 每个 emoji 都是多字节但只算一个码点：按码点切不会劈开它们
+    let cfg = ToolResultPruneConfig(true, 40, 4, 3)
+    let text = repeatText("🙂", 60)   // 60 码点 > 阈值 40
+    let out = pruneText(text, cfg)
+    var emojiCount: Int64 = 0
+    for (r in out.toRuneArray()) {
+        if (r == Rune(UInt32(0x1F642))) { emojiCount++ }
+    }
+    @Expect(emojiCount, 7)   // head 4 + tail 3，中间是标记
+}
+
+@Test
+func pruneToolResults_onlyOversizedTextBlocks() {
+    let cfg = ToolResultPruneConfig(true, 100, 40, 20)
+    let msgs = ArrayList<Message>()
+    msgs.add(UserMessage(ContentList.ofText("问"), 0))
+    msgs.add(ToolResultMessage("c1", "bash", ContentList.ofText(repeatText("y", 500)), false, 0))
+    msgs.add(ToolResultMessage("c2", "read_file", ContentList.ofText("短结果"), false, 0))
+
+    let (out, count) = pruneToolResults(msgs, cfg)
+    @Expect(count, Int64(1))
+    @Expect(out.size, 3)
+    // 原列表不动（只有发给模型的请求用修剪版，落库的历史保持原样）
+    match (msgs[1]) {
+        case tr: ToolResultMessage =>
+            @Expect(Int64(textOfMsg(tr).toRuneArray().size), Int64(500))
+        case _ => @Fail("expected tool result")
+    }
+    // 修剪版变短且带标记
+    match (out[1]) {
+        case tr: ToolResultMessage =>
+            @Expect(textOfMsg(tr).contains(PRUNE_MARKER), true)
+            @Expect(Int64(textOfMsg(tr).toRuneArray().size) < Int64(500), true)
+        case _ => @Fail("expected tool result")
+    }
+    // 小结果原样
+    match (out[2]) {
+        case tr: ToolResultMessage => @Expect(textOfMsg(tr), "短结果")
+        case _ => @Fail("expected small tool result")
+    }
+}
+
+@Test
+func pruneToolResults_disabledIsNoOp() {
+    let cfg = ToolResultPruneConfig(false, 100, 40, 20)
+    let msgs = ArrayList<Message>()
+    msgs.add(ToolResultMessage("c1", "bash", ContentList.ofText(repeatText("y", 500)), false, 0))
+    let (out, count) = pruneToolResults(msgs, cfg)
+    @Expect(count, Int64(0))
+    match (out[0]) {
+        case tr: ToolResultMessage => @Expect(Int64(textOfMsg(tr).toRuneArray().size), Int64(500))
+        case _ => @Fail("expected untouched tool result")
+    }
+}
+
+// ---------- 检查点框架（前言 + 标签） ----------
+
+@Test
+func checkpointFrame_wrapsAndUnwraps() {
+    let framed = frameCheckpoint("裸摘要内容")
+    // 模型看到的是"既定背景"，不是一条新指令
+    @Expect(framed.startsWith(COMPACTION_CHECKPOINT_PREAMBLE), true)
+    @Expect(framed.contains(SUMMARY_OPEN_TAG + "\n裸摘要内容\n" + SUMMARY_CLOSE_TAG), true)
+    // 显示/复用要拿回裸摘要
+    @Expect(checkpointBody(framed), "裸摘要内容")
+    // 旧会话里的裸摘要（没有框架）原样返回，不报错也不截断
+    @Expect(checkpointBody("旧格式的摘要"), "旧格式的摘要")
+}
+
+@Test
+func checkpointFrame_replacementMessageCarriesFraming() {
+    let msgs = ArrayList<Message>()
+    msgs.add(UserMessage(ContentList.ofText("m1"), 0))
+    msgs.add(UserMessage(ContentList.ofText("m2"), 0))
+    let compacted = compactWithSummary(msgs, 1, "SUM", 100)
+    match (compacted[0]) {
+        case cm: CompactionMessage =>
+            // 落库的替换消息就带框架：模型看到的即所存的（回放/续跑一致）
+            @Expect(cm.summary.startsWith(COMPACTION_CHECKPOINT_PREAMBLE), true)
+            @Expect(checkpointBody(cm.summary), "SUM")
+        case _ => @Fail("expected CompactionMessage")
+    }
+}
+
+@Test
+func checkpointFrame_findPreviousSummaryStripsFraming() {
+    let msgs = ArrayList<Message>()
+    msgs.add(CompactionMessage(frameCheckpoint("上一份摘要"), 10, 0))
+    msgs.add(UserMessage(ContentList.ofText("m"), 0))
+    match (findPreviousSummary(msgs)) {
+        case Some(s) => @Expect(s, "上一份摘要")
+        case None => @Fail("expected previous summary")
+    }
+}
+
+// ---------- 压缩事务台账 ----------
+
+@Test
+func compactionLedger_mutualExclusionPerSession() {
+    let ledger = CompactionLedger()
+    @Expect(ledger.begin("s1", "c1"), true)
+    // 同一会话已有在飞 → 后来者拿不到（要跳过，不是排队）
+    @Expect(ledger.begin("s1", "c2"), false)
+    @Expect(ledger.isOpen("s1"), true)
+    match (ledger.openId("s1")) {
+        case Some(v) => @Expect(v, "c1")
+        case None => @Fail("expected open id")
+    }
+    // 别的会话不受影响
+    @Expect(ledger.begin("s2", "c3"), true)
+    // 释放后可再次登记
+    ledger.end("s1")
+    @Expect(ledger.isOpen("s1"), false)
+    @Expect(ledger.begin("s1", "c4"), true)
 }

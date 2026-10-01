@@ -2,95 +2,184 @@ package atelier.context
 
 import atelier.message.*
 import std.collection.*
+import std.sync.Mutex
 import mustache.{Template, MustacheComponent}
 import stdx.serialization.serialization.*
 import stdx.encoding.json.stream.*
 import jsonvalue.*
 
-public func compactMessages(messages: ArrayList<Message>, contextWindow: Int64, reserveTokens: Int64, keepRecentTokens: Int64): ArrayList<Message> {
-    let total = estimateTokens(messages)
-    if (total <= reserveTokens || contextWindow == 0) {
-        return messages  // no compaction needed
-    }
+/**
+ * 压力预算：把宿主声明的窗口与**生效请求输出上限**换算成"什么时候压、压完保留多少"。
+ *
+ * 口径（与 dsh 一致）：
+ * ```text
+ * messageBudget  = W − O              // 窗口里留给消息的部分（O = 本次请求的输出预留）
+ * pressureBudget = messageBudget − B  // 再留一笔余量 B（估算误差 / 图片 / 工具声明）
+ * threshold      = floor(min(W × ratio, pressureBudget))
+ * retain         = retainTokens ?? floor(messageBudget × retainRatio)
+ * ```
+ *
+ * 三个不变量（`messageBudget > 0`、`pressureBudget > 0`、`retain < threshold`）任一不成立
+ * 都**不压**：`spec = None` + `reason` 说明原因，调用方留痕一次即可 —— 配置坏了不该把会话
+ * 变成不可用（溢出恢复那条路仍然可用）。
+ */
+public struct CompactSpec {
+    /** 本路由的窗口 */
+    public let contextWindow: Int64
+    /** 窗口里留给消息的预算（W − O） */
+    public let messageBudget: Int64
+    /** 越过它就该压缩 */
+    public let thresholdTokens: Int64
+    /** 压缩后逐字保留的近期历史预算 */
+    public let retainTokens: Int64
+    /** 摘要子调用的输出上限 */
+    public let summaryMaxTokens: Int64
 
-    let threshold = contextWindow - reserveTokens
-    if (total <= threshold) {
-        return messages
+    public init(contextWindow: Int64, messageBudget: Int64, thresholdTokens: Int64,
+        retainTokens: Int64, summaryMaxTokens: Int64) {
+        this.contextWindow = contextWindow
+        this.messageBudget = messageBudget
+        this.thresholdTokens = thresholdTokens
+        this.retainTokens = retainTokens
+        this.summaryMaxTokens = summaryMaxTokens
     }
-
-    // Simple strategy: keep the last keepRecentTokens worth of messages,
-    // summarize everything before that
-    var running: Int64 = 0
-    var cutIndex: Int64 = 0
-    var i = messages.size - 1
-    while (i >= 0 && running < keepRecentTokens) {
-        running += estimateMessageTokens(messages[i])
-        if (running >= keepRecentTokens) { break }
-        i--
-    }
-    cutIndex = i + 1
-    cutIndex = protectCutPoint(messages, cutIndex)
-    if (cutIndex <= 0) {
-        return messages  // all messages fit
-    }
-
-    // Replace cut messages with a summary
-    let compacted = ArrayList<Message>()
-        let subList = ArrayList<Message>()
-        for (k in 0..cutIndex) { subList.add(messages[Int64(k)]) }
-        compacted.add(CompactionMessage("... ${cutIndex} previous messages summarized ...", estimateTokens(subList), 0))
-        for (j in cutIndex..Int64(messages.size)) {
-        compacted.add(messages[Int64(j)])
-    }
-    compacted
 }
 
+/** 解析结果：`spec` 为 None 时 `reason` 说明为什么不压（配置错误） */
+public struct CompactSpecResolution {
+    public let spec: Option<CompactSpec>
+    public let reason: String
+
+    public init(spec: Option<CompactSpec>, reason: String) {
+        this.spec = spec
+        this.reason = reason
+    }
+}
+
+public func resolveCompactSpec(cc: CompactionConfig, contextWindow: Int64,
+    reservedCompletionTokens: Int64): CompactSpecResolution {
+    if (contextWindow <= 0) {
+        // 窗口未知 = 不做主动压缩（旧行为一致：拿不到窗口就不猜）
+        return CompactSpecResolution(None, "context window unknown")
+    }
+    let messageBudget = contextWindow - reservedCompletionTokens
+    if (messageBudget <= 0) {
+        return CompactSpecResolution(None,
+            "reserves ${reservedCompletionTokens} completion tokens of a ${contextWindow}-token window, leaving no message budget: raise the model contextWindow above the effective maxOutputTokens")
+    }
+    let pressureBudget = messageBudget - cc.headroomTokens
+    if (pressureBudget <= 0) {
+        return CompactSpecResolution(None,
+            "reserves ${reservedCompletionTokens} completion + ${cc.headroomTokens} headroom of a ${contextWindow}-token window, leaving no pressure budget: reduce maxOutputTokens/headroomTokens or raise the contextWindow")
+    }
+    var threshold = Int64(Float64(contextWindow) * cc.thresholdRatio)
+    if (pressureBudget < threshold) { threshold = pressureBudget }
+    let retain = match (cc.retainTokens) {
+        case Some(v) => v
+        case None => Int64(Float64(messageBudget) * cc.retainRatio)
+    }
+    if (retain >= threshold) {
+        return CompactSpecResolution(None,
+            "retain (${retain}) must be less than the compaction threshold (${threshold})")
+    }
+    let summaryMax = if (cc.summaryMaxTokens > 0) { cc.summaryMaxTokens } else { cc.headroomTokens }
+    CompactSpecResolution(Some(CompactSpec(contextWindow, messageBudget, threshold, retain, summaryMax)),
+        "")
+}
+
+/**
+ * 默认压缩指令（结构照 dsh 的 `COMPACTION_INSTRUCTION`：固定的 Markdown 检查点骨架 +
+ * 一组硬规则；对话在前、指令在后，与 dsh「回放对话 → 末尾追加指令」的顺序一致）。
+ *
+ * 与 dsh 的两点差异，都是刻意的：
+ * - 指令用中文：本工程其余提示词与用户会话都是中文，摘要必须服务同一场对话
+ *   （dsh 的规则里写的是 "concise English engineering prose"）
+ * - 默认模板**不内联对话**：被压区域的消息原样回放成 messages，指令作为最后一条 user 消息追加。
+ *   这是为了命中 provider 的前缀缓存（DeepSeek 按"缓存前缀单元完整匹配"计费），内联会把
+ *   整段长输入变成未命中。`{{conversation}}` 变量仍保留给自定义模板（填的是被压区域的扁平文本）
+ */
 public let DEFAULT_PROMPT_TEMPLATE = """
-你是一个上下文压缩引擎。请将以下对话压缩成一份结构化的摘要，以便另一个 AI 能够无缝接续工作。
+你是这个 AI 编程助手的压缩引擎。把上面这段对话压缩成一份结构化检查点，让另一个模型能在不丢失关键上下文的前提下接续工作。
 
-<conversation>
-{{conversation}}
-</conversation>
+严格按下面的 Markdown 结构输出：每一节都要保留、顺序不变。用简短要点，不要写大段散文；某一节没有内容就写 "(none)"，不要省略该节。
 
-{{#previous_summary}}
-<previous_summary>
-{{previous_summary}}
-</previous_summary>
-{{/previous_summary}}
+## Primary Request and Intent
+- [用户最初与演进后的目标；措辞本身重要时逐字保留]
 
-输出要求：
-1. 严格输出 JSON 格式
-2. 必须包含以下字段：
-   - goal: 用户的核心目标
-   - key_findings: 关键发现列表
-   - files_modified: 修改过的文件路径列表
-   - errors: 遇到的错误及解决方案
-   - pending_actions: 下一步待办事项
-3. 不要添加任何额外的解释或散文。
-4. 摘要的总长度请控制在 {{max_tokens}} tokens 以内。"""
+## Key Technical Concepts
+- [涉及的技术、框架、模式与约定]
+
+## Files and Code
+- [精确路径：为什么重要、关键改动或代码片段]
+
+## Errors and Fixes
+- [错误：如何解决的，以及相关的用户反馈]
+
+## Pending Jobs
+- [明确要求但尚未完成的工作]
+
+## Current Work
+- [写这份检查点时正在做的事]
+
+## Next Step
+- [下一个动作，直接对着最近一次要求；没有就写 "(none)"]
+
+## Critical Context
+- [决策及其理由、约束、用户偏好、未决问题、继续所需的数据]
+
+规则：
+- 用简洁的工程化表述；保留精确的文件路径、命令、报错原文、标识符、数值、函数签名与语法片段。
+- 忠实记录用户反馈与明确指令，尤其是纠正。
+- 不要提到这次摘要请求，也不要提到上下文被压缩过。
+- 只输出检查点文本：不要调用任何工具，不要做其它动作。
+- 若上面已经出现过历史摘要，那是**上一份检查点**：不要原样照抄，保留仍然成立的事实、丢掉过时的，把新信息并进同一套结构。"""
 
 public struct CompactionConfig <: JsonSerializable & JsonDeserializable<CompactionConfig> {
     public let enabled: Bool
-    public let reserveTokens: Int64
-    public let keepRecentTokens: Int64
+    /** 触发阈值占窗口的比例（dsh 默认 0.8） */
+    public let thresholdRatio: Float64
+    /** 输出预留之外的额外压力余量（默认 65536；估算误差/图片/工具声明的缓冲） */
+    public let headroomTokens: Int64
+    /** 逐字保留的近期历史占"消息预算"的比例（默认 0.16） */
+    public let retainRatio: Float64
+    /** 绝对保留预算；给定时压过 [retainRatio] */
+    public let retainTokens: Option<Int64>
+    /** 已确认上下文溢出后的最大重试次数（0 = 关闭溢出恢复） */
+    public let maxOverflowRetries: Int64
+    /** 摘要子调用的输出上限；0 = 跟随 [headroomTokens] */
+    public let summaryMaxTokens: Int64
+    /** 工具结果修剪；None = 用默认配置（开启，8192 码点 → 头 4096 + 标记 + 尾 1024） */
+    public let prune: Option<ToolResultPruneConfig>
     public let promptTemplate: String
     public let outputSchema: Option<JsonValue>
     public let summaryModel: Option<String>
 
     public init() {
         this.enabled = true
-        this.reserveTokens = 16384
-        this.keepRecentTokens = 20000
+        this.thresholdRatio = 0.8
+        this.headroomTokens = 65536
+        this.retainRatio = 0.16
+        this.retainTokens = None
+        this.maxOverflowRetries = 1
+        this.summaryMaxTokens = 0
+        this.prune = None
         this.promptTemplate = DEFAULT_PROMPT_TEMPLATE
         this.outputSchema = None
         this.summaryModel = None
     }
 
-    public init(enabled: Bool, reserveTokens: Int64, keepRecentTokens: Int64,
-        promptTemplate: String, outputSchema: Option<JsonValue>, summaryModel: Option<String>) {
+    public init(enabled: Bool, thresholdRatio: Float64, headroomTokens: Int64,
+        retainRatio: Float64, retainTokens: Option<Int64>, maxOverflowRetries: Int64,
+        promptTemplate: String, outputSchema: Option<JsonValue>, summaryModel: Option<String>,
+        summaryMaxTokens!: Int64 = 0, prune!: Option<ToolResultPruneConfig> = None) {
         this.enabled = enabled
-        this.reserveTokens = reserveTokens
-        this.keepRecentTokens = keepRecentTokens
+        this.thresholdRatio = thresholdRatio
+        this.headroomTokens = headroomTokens
+        this.retainRatio = retainRatio
+        this.retainTokens = retainTokens
+        this.maxOverflowRetries = maxOverflowRetries
+        this.summaryMaxTokens = summaryMaxTokens
+        this.prune = prune
         this.promptTemplate = promptTemplate
         this.outputSchema = outputSchema
         this.summaryModel = summaryModel
@@ -99,8 +188,18 @@ public struct CompactionConfig <: JsonSerializable & JsonDeserializable<Compacti
     public func toJson(w: JsonWriter): Unit {
         w.startObject()
         w.writeName("enabled").writeValue(this.enabled)
-        w.writeName("reserveTokens").writeValue(this.reserveTokens)
-        w.writeName("keepRecentTokens").writeValue(this.keepRecentTokens)
+        w.writeName("thresholdRatio").writeValue(this.thresholdRatio)
+        w.writeName("headroomTokens").writeValue(this.headroomTokens)
+        w.writeName("retainRatio").writeValue(this.retainRatio)
+        w.writeName("retainTokens").writeValue(this.retainTokens)
+        w.writeName("maxOverflowRetries").writeValue(this.maxOverflowRetries)
+        w.writeName("summaryMaxTokens").writeValue(this.summaryMaxTokens)
+        match (this.prune) {
+            case Some(p) =>
+                w.writeName("prune")
+                p.toJson(w)
+            case None => w.writeName("prune").writeNullValue()
+        }
         w.writeName("promptTemplate").writeValue(this.promptTemplate)
         w.writeName("outputSchema").writeValue(this.outputSchema)
         w.writeName("summaryModel").writeValue(this.summaryModel)
@@ -109,8 +208,13 @@ public struct CompactionConfig <: JsonSerializable & JsonDeserializable<Compacti
 
     public static func fromJson(r: JsonReader): CompactionConfig {
         var enabled = true
-        var reserve = Int64(16384)
-        var keepRecent = Int64(20000)
+        var ratio = Float64(0.8)
+        var headroom = Int64(65536)
+        var retainRatio = Float64(0.16)
+        var retain: Option<Int64> = None
+        var overflowRetries = Int64(1)
+        var summaryMax = Int64(0)
+        var prune: Option<ToolResultPruneConfig> = None
         var template = DEFAULT_PROMPT_TEMPLATE
         var schema: Option<JsonValue> = None
         var summaryModel: Option<String> = None
@@ -118,8 +222,19 @@ public struct CompactionConfig <: JsonSerializable & JsonDeserializable<Compacti
         while (r.peek() != EndObject) {
             match (r.readName()) {
                 case "enabled" => enabled = r.readValue<Bool>()
-                case "reserveTokens" => reserve = r.readValue<Int64>()
-                case "keepRecentTokens" => keepRecent = r.readValue<Int64>()
+                case "thresholdRatio" => ratio = r.readValue<Float64>()
+                case "headroomTokens" => headroom = r.readValue<Int64>()
+                case "retainRatio" => retainRatio = r.readValue<Float64>()
+                case "retainTokens" => retain = r.readValue<Option<Int64>>()
+                case "maxOverflowRetries" => overflowRetries = r.readValue<Int64>()
+                case "summaryMaxTokens" => summaryMax = r.readValue<Int64>()
+                case "prune" =>
+                    if (r.peek() == JsonNull) {
+                        r.skip()
+                        prune = None
+                    } else {
+                        prune = Some(ToolResultPruneConfig.fromJson(r))
+                    }
                 case "promptTemplate" => template = r.readValue<String>()
                 case "outputSchema" =>
                     if (r.peek() == JsonNull) {
@@ -133,7 +248,8 @@ public struct CompactionConfig <: JsonSerializable & JsonDeserializable<Compacti
             }
         }
         r.endObject()
-        CompactionConfig(enabled, reserve, keepRecent, template, schema, summaryModel)
+        CompactionConfig(enabled, ratio, headroom, retainRatio, retain, overflowRetries,
+            template, schema, summaryModel, summaryMaxTokens: summaryMax, prune: prune)
     }
 }
 
@@ -176,7 +292,7 @@ public func findPreviousSummary(messages: ArrayList<Message>): Option<String> {
     var i = messages.size - 1
     while (i >= 0) {
         match (messages[i]) {
-            case cm: CompactionMessage => return Some(cm.summary)
+            case cm: CompactionMessage => return Some(checkpointBody(cm.summary))
             case am: ArchiveMessage => return Some(am.summary)
             case _ => ()
         }
@@ -222,32 +338,339 @@ public func validateSummary(config: CompactionConfig, schema: HashMap<String, Js
     true
 }
 
-// 切点替换：保留最近 keepRecentTokens，之前替换为 CompactionMessage(summary, tokensBefore, 0)
-// keepRecentTokens <= 0 时全部替换；单条消息即达标时仅保留其后消息
-public func compactWithSummary(messages: ArrayList<Message>, keepRecentTokens: Int64,
-    summary: String, tokensBefore: Int64): ArrayList<Message> {
-    if (keepRecentTokens <= 0) {
-        let r = ArrayList<Message>()
-        r.add(CompactionMessage(summary, tokensBefore, 0))
-        return r
-    }
+/**
+ * 按保留预算算切点：从尾部往回累加，够 [retainTokens] 就停；再过一遍工具配对保护。
+ * 返回"保留区第一条"的下标（0 = 整个历史都在保留区里，压不动）。
+ *
+ * 摘要子调用也要用它切出**被压区域**（回放给模型的那一段），两处必须是同一个切点。
+ */
+public func retainedCutIndex(messages: ArrayList<Message>, retainTokens: Int64): Int64 {
+    if (retainTokens <= 0) { return Int64(messages.size) }
     var running: Int64 = 0
-    var cutIndex: Int64 = 0
     var i = messages.size - 1
-    while (i >= 0 && running < keepRecentTokens) {
+    while (i >= 0 && running < retainTokens) {
         running += estimateMessageTokens(messages[i])
-        if (running >= keepRecentTokens) { break }
+        if (running >= retainTokens) { break }
         i--
     }
-    cutIndex = i + 1
-    cutIndex = protectCutPoint(messages, cutIndex)
-    if (cutIndex <= 0) { return messages }
+    protectCutPoint(messages, i + 1)
+}
+
+// 切点替换：保留最近 retainTokens，之前替换为 CompactionMessage(summary, tokensBefore, 0)
+// retainTokens <= 0 时全部替换；单条消息即达标时仅保留其后消息
+public func compactWithSummary(messages: ArrayList<Message>, retainTokens: Int64,
+    summary: String, tokensBefore: Int64): ArrayList<Message> {
+    let cut = retainedCutIndex(messages, retainTokens)
+    if (cut <= 0) { return messages }
     let compacted = ArrayList<Message>()
-    compacted.add(CompactionMessage(summary, tokensBefore, 0))
-    for (j in cutIndex..Int64(messages.size)) {
+    compacted.add(CompactionMessage(frameCheckpoint(summary), tokensBefore, 0))
+    for (j in cut..Int64(messages.size)) {
         compacted.add(messages[Int64(j)])
     }
     compacted
+}
+
+/**
+ * 压缩事务台账：同一会话同时只允许一次压缩在飞。
+ *
+ * 为什么必须有：压缩会**重写历史**（头部换成检查点）。进程内两个 runtime 驱动同一会话
+ * （典型是交互界面与 ACP 各起一个）各自基于同一份旧历史压缩时，后写的会把先写的覆盖 ——
+ * 摘要与保留区来自不同快照，历史就分叉了。台账把并发挡在门外：后来者**跳过**这次压缩
+ * 并留痕（不是排队等，压完再压一次的结果没有意义）。
+ *
+ * 进程级而不是 per-runtime：要挡的正是"两个 runtime 各持一份自己的状态"这种情形。
+ * 这是内存台账，不落库 —— 压缩结果与消息表是**同一次原子写入**，进程崩在中间不会留下
+ * "压了一半"的持久状态（留下的仍是压缩前的历史），所以只需挡进程内的并发。
+ */
+public class CompactionLedger {
+    private let lock = Mutex()
+    private let open = HashMap<String, String>()
+
+    public init() {}
+
+    /** 登记一次压缩；返回 false = 该会话已有压缩在飞（调用方应跳过，不要排队） */
+    public func begin(sessionId: String, compactionId: String): Bool {
+        synchronized(this.lock) {
+            if (this.open.contains(sessionId)) { return false }
+            this.open[sessionId] = compactionId
+            true
+        }
+    }
+
+    /** 释放（必须与 begin 配对，包括压缩失败/放弃的路径） */
+    public func end(sessionId: String): Unit {
+        synchronized(this.lock) {
+            this.open.remove(sessionId)
+        }
+    }
+
+    public func isOpen(sessionId: String): Bool {
+        synchronized(this.lock) {
+            this.open.contains(sessionId)
+        }
+    }
+
+    /** 在飞的压缩 id（诊断用） */
+    public func openId(sessionId: String): Option<String> {
+        synchronized(this.lock) {
+            this.open.get(sessionId)
+        }
+    }
+}
+
+/** 进程级台账：压缩的互斥范围就是"同一会话"，与 runtime 实例数无关 */
+public let globalCompactionLedger = CompactionLedger()
+
+/**
+ * 检查点前言（照 dsh 的 `CHECKPOINT_PREAMBLE`）：让模型把这段摘要当**既定背景**，
+ * 而不是一条新指令 —— 否则它容易"复述摘要"或对压缩这件事做出反应。
+ */
+public let COMPACTION_CHECKPOINT_PREAMBLE = "这是自动生成的检查点，用于压缩较早的一段对话以腾出上下文。把它当作既定的背景信息，直接在此基础上继续，不要复述它；从它之后的消息继续任务，也不要提及这份检查点。"
+
+public let SUMMARY_OPEN_TAG = "<compacted-summary>"
+public let SUMMARY_CLOSE_TAG = "</compacted-summary>"
+
+/** 把裸摘要包成检查点：前言 + 标签。**落库的替换消息用这份文本**（模型看到的即所存的） */
+public func frameCheckpoint(summary: String): String {
+    COMPACTION_CHECKPOINT_PREAMBLE + "\n\n" + SUMMARY_OPEN_TAG + "\n" + summary + "\n" + SUMMARY_CLOSE_TAG
+}
+
+/**
+ * 从检查点文本里取回裸摘要（显示、以及作为"上一份检查点"再喂给模板时用）。
+ * 没有框架（历史会话里的旧摘要）时原样返回。
+ */
+public func checkpointBody(framed: String): String {
+    let open = framed.indexOf(SUMMARY_OPEN_TAG)
+    match (open) {
+        case Some(i) =>
+            let start = i + SUMMARY_OPEN_TAG.size
+            match (framed.indexOf(SUMMARY_CLOSE_TAG)) {
+                case Some(j) =>
+                    if (j > start) {
+                        return framed[start..j].trimAscii()
+                    }
+                case None => ()
+            }
+        case None => ()
+    }
+    framed
+}
+
+/**
+ * 从 `keepFrom` 起保留，之前替换为摘要（**溢出恢复**用：尽量多压，只留最后一段）。
+ *
+ * 与 [compactWithSummary] 的差别是切点由调用方直接指定（不按 token 预算回退），
+ * 仍然过 [protectCutPoint]，保证不拆散工具调用对；切点落到 0 表示压无可压。
+ */
+public func compactFrom(messages: ArrayList<Message>, keepFrom: Int64,
+    summary: String, tokensBefore: Int64): ArrayList<Message> {
+    let cut = protectCutPoint(messages, keepFrom)
+    if (cut <= 0) { return messages }
+    let out = ArrayList<Message>()
+    out.add(CompactionMessage(frameCheckpoint(summary), tokensBefore, 0))
+    for (j in cut..Int64(messages.size)) {
+        out.add(messages[Int64(j)])
+    }
+    out
+}
+
+// 最后一条用户消息的下标（-1 = 没有）；溢出恢复时至少保住它，否则等于把本次输入丢了
+public func lastUserIndex(messages: ArrayList<Message>): Int64 {
+    var i = Int64(messages.size) - 1
+    while (i >= 0) {
+        match (messages[i]) {
+            case _: UserMessage => return i
+            case _ => ()
+        }
+        i--
+    }
+    -1
+}
+
+/**
+ * provider 报的是不是"超上下文窗口"（可恢复）。
+ *
+ * 各家措辞不统一（OpenAI `maximum context length` / Anthropic `prompt is too long` /
+ * DeepSeek 同 OpenAI），所以按**已知措辞**匹配小写文本；匹配不到就当普通失败处理——
+ * 宁可少恢复一次，也不要把无关错误误判成溢出（那会白花一次摘要调用）。
+ *
+ * 长期做法是让 provider 层抛带错误码的异常（llm_api 侧），这里先按文本兜住。
+ */
+public func isContextOverflowError(errorText: String): Bool {
+    let t = errorText.toAsciiLower()
+    let markers = [
+        "maximum context length",
+        "context length exceeded",
+        "context_length_exceeded",
+        "context window exceeded",
+        "context_window_exceeded",
+        "prompt is too long",
+        "input is too long",
+        "too many tokens",
+        "reduce the length of the messages"
+    ]
+    for (m in markers) {
+        if (t.contains(m)) { return true }
+    }
+    false
+}
+
+/**
+ * 工具结果修剪配置：把超长的工具输出换成"头 + 标记 + 尾"。
+ *
+ * 目的与摘要不同——**不发模型调用**，纯字符操作，而且可能让压力回到阈值内、
+ * 从而把摘要整个省掉。与 dsh 一致：只在压缩触发条件满足后才跑。
+ *
+ * 语义要点：只影响**发出请求的那份**消息（运行时构造请求时用修剪版），落库的历史保持原样，
+ * 所以回放/导出仍然拿得到完整输出。
+ */
+public struct ToolResultPruneConfig <: JsonSerializable & JsonDeserializable<ToolResultPruneConfig> {
+    public let enabled: Bool
+    /** 合并文本超过这么多**码点**才修剪 */
+    public let thresholdChars: Int64
+    public let headChars: Int64
+    public let tailChars: Int64
+
+    public init() {
+        this.enabled = true
+        this.thresholdChars = 8192
+        this.headChars = 4096
+        this.tailChars = 1024
+    }
+
+    public init(enabled: Bool, thresholdChars: Int64, headChars: Int64, tailChars: Int64) {
+        this.enabled = enabled
+        this.thresholdChars = thresholdChars
+        this.headChars = headChars
+        this.tailChars = tailChars
+    }
+
+    public func toJson(w: JsonWriter): Unit {
+        w.startObject()
+        w.writeName("enabled").writeValue(this.enabled)
+        w.writeName("thresholdChars").writeValue(this.thresholdChars)
+        w.writeName("headChars").writeValue(this.headChars)
+        w.writeName("tailChars").writeValue(this.tailChars)
+        w.endObject()
+    }
+
+    public static func fromJson(r: JsonReader): ToolResultPruneConfig {
+        let def = ToolResultPruneConfig()
+        var enabled = def.enabled
+        var threshold = def.thresholdChars
+        var head = def.headChars
+        var tail = def.tailChars
+        r.startObject()
+        while (r.peek() != EndObject) {
+            match (r.readName()) {
+                case "enabled" => enabled = r.readValue<Bool>()
+                case "thresholdChars" => threshold = r.readValue<Int64>()
+                case "headChars" => head = r.readValue<Int64>()
+                case "tailChars" => tail = r.readValue<Int64>()
+                case _ => r.skip()
+            }
+        }
+        r.endObject()
+        ToolResultPruneConfig(enabled, threshold, head, tail)
+    }
+}
+
+public let PRUNE_MARKER = "\n... [middle pruned] ...\n"
+
+/**
+ * 修剪一段文本：按**码点**切，不会劈开 emoji 的代理对。
+ *
+ * `head + 标记 + tail` 必须不超过 [ToolResultPruneConfig.thresholdChars]，
+ * 否则修剪反而让文本变长（配置写歪时自动收紧尾部，不报错）。
+ */
+public func pruneText(text: String, cfg: ToolResultPruneConfig): String {
+    let runes = text.toRuneArray()
+    let total = Int64(runes.size)
+    if (total <= cfg.thresholdChars) { return text }
+    let markerLen = Int64(PRUNE_MARKER.toRuneArray().size)
+    // 阈值小到连标记都放不下：宁可不动，也不能让"修剪"把文本变长
+    if (cfg.thresholdChars <= markerLen + 1) { return text }
+    // 收紧：头 + 标记 + 尾 <= 阈值（头先收，再按剩余预算收尾）
+    var head = cfg.headChars
+    if (head > cfg.thresholdChars - markerLen) { head = cfg.thresholdChars - markerLen }
+    if (head > total) { head = total }
+    let budget = cfg.thresholdChars - markerLen - head
+    var tail = cfg.tailChars
+    if (tail > budget) { tail = if (budget > 0) { budget } else { 0 } }
+    if (head + tail >= total) { return text }
+    let sb = StringBuilder()
+    var i: Int64 = 0
+    while (i < head) {
+        sb.append(runes[i])
+        i++
+    }
+    sb.append(PRUNE_MARKER)
+    var j = total - tail
+    while (j < total) {
+        sb.append(runes[j])
+        j++
+    }
+    sb.toString()
+}
+
+/**
+ * 修剪一条工具结果里的文本块：合并所有文本块、超阈值就换成"头 + 标记 + 尾"，
+ * 非文本块（图片等）保持原有顺序。返回 None = 这条不需要修剪。
+ */
+func prunedToolResult(msg: ToolResultMessage, cfg: ToolResultPruneConfig): Option<ToolResultMessage> {
+    var merged = ""
+    var textCount: Int64 = 0
+    for (b in msg.content.blocks()) {
+        match (b) {
+            case ContentBlock.TextBlock(t) =>
+                merged = merged + t
+                textCount++
+            case _ => ()
+        }
+    }
+    if (textCount == 0 || Int64(merged.toRuneArray().size) <= cfg.thresholdChars) {
+        return None
+    }
+    let pruned = pruneText(merged, cfg)
+    if (pruned == merged) { return None }
+    let blocks = ArrayList<ContentBlock>()
+    var inserted = false
+    for (b in msg.content.blocks()) {
+        match (b) {
+            case ContentBlock.TextBlock(_) =>
+                // 文本块合并成一段（插在第一个文本块的位置），其余文本块丢弃
+                if (!inserted) {
+                    blocks.add(ContentBlock.TextBlock(pruned))
+                    inserted = true
+                }
+            case _ => blocks.add(b)
+        }
+    }
+    Some(ToolResultMessage(msg.toolCallId, msg.toolName, ContentList(blocks), msg.isError, msg.timestamp))
+}
+
+/**
+ * 修剪整份消息列表里的超大工具结果（**返回新列表，原列表不动**）。
+ *
+ * 只在压缩触发条件满足后调用；低于压力阈值的对话绝不该被触碰。
+ */
+public func pruneToolResults(messages: ArrayList<Message>, cfg: ToolResultPruneConfig): (ArrayList<Message>, Int64) {
+    if (!cfg.enabled) { return (messages, 0) }
+    let out = ArrayList<Message>()
+    var prunedCount: Int64 = 0
+    for (m in messages) {
+        match (m) {
+            case tr: ToolResultMessage =>
+                match (prunedToolResult(tr, cfg)) {
+                    case Some(p) =>
+                        out.add(p)
+                        prunedCount++
+                    case None => out.add(m)
+                }
+            case _ => out.add(m)
+        }
+    }
+    (out, prunedCount)
 }
 
 // 切点配对保护：cutIndex 不拆散 ToolCall ↔ ToolResult 对。

@@ -24,7 +24,7 @@ class SpecProbeTool <: Tool {
 func cfgOf(model: String, provider: Option<String>): AgentConfig {
     AgentConfig("t", None, "", None, model, provider, ArrayList<String>(), ArrayList<String>(), Int64(0),
         UInt32(20), Float32(0.7), UInt32(4096), None,
-        false, UInt32(16384), UInt32(20000), None, UInt32(50), UInt32(30), UInt32(0),
+        false, None, UInt32(50), UInt32(30), UInt32(0),
         ArrayList<String>(), None, Int64(0), Int64(0))
 }
 
@@ -189,7 +189,7 @@ func modelFacts_maxTokensResolvesPerLayer() {
 func cfgOfNoBudget(model: String): AgentConfig {
     AgentConfig("t", None, "", None, model, None, ArrayList<String>(), ArrayList<String>(), Int64(0),
         UInt32(20), Float32(0.7), UInt32(0), None,
-        false, UInt32(16384), UInt32(20000), None, UInt32(50), UInt32(30), UInt32(0),
+        false, None, UInt32(50), UInt32(30), UInt32(0),
         ArrayList<String>(), None, Int64(0), Int64(0))
 }
 

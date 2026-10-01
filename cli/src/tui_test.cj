@@ -204,7 +204,7 @@ func chatTui_systemPromptExcludedFromConversation() {
     let trustMgr = TrustManager()
     let cfg = AgentConfig("t", None, "你是系统提示词", None, "m", None,
         ArrayList<String>(), ArrayList<String>(), 3, UInt32(20), Float32(0.7),
-        UInt32(4096), None, false, UInt32(16384), UInt32(20000), None,
+        UInt32(4096), None, false, None,
         UInt32(50), UInt32(30), UInt32(0), ArrayList<String>(), None, Int64(0), Int64(0))
     let tui = ChatTui("default", SlashCommandRegistry(trustMgr), cfg,
         cliTestSpec(ToolRegistry(), store, trustMgr, SkillRegistry(), AgentRegistry(), ProviderRegistry(), McpManager(), StubProvider()),
@@ -544,13 +544,13 @@ func chatTui_newAliasStartsNewSession() {
 func uniqueModels_dedupesByOrder() {
     let agents = ArrayList<(String, AgentConfig)>()
     agents.add(("a1", AgentConfig("a1", None, "", None, "gpt-4o", None, ArrayList<String>(), ArrayList<String>(), 3,
-        UInt32(20), Float32(0.7), UInt32(4096), None, false, UInt32(16384), UInt32(20000), None,
+        UInt32(20), Float32(0.7), UInt32(4096), None, false, None,
         UInt32(50), UInt32(30), UInt32(0), ArrayList<String>(), None, Int64(0), Int64(0))))
     agents.add(("a2", AgentConfig("a2", None, "", None, "deepseek-chat", None, ArrayList<String>(), ArrayList<String>(), 3,
-        UInt32(20), Float32(0.7), UInt32(4096), None, false, UInt32(16384), UInt32(20000), None,
+        UInt32(20), Float32(0.7), UInt32(4096), None, false, None,
         UInt32(50), UInt32(30), UInt32(0), ArrayList<String>(), None, Int64(0), Int64(0))))
     agents.add(("a3", AgentConfig("a3", None, "", None, "gpt-4o", None, ArrayList<String>(), ArrayList<String>(), 3,
-        UInt32(20), Float32(0.7), UInt32(4096), None, false, UInt32(16384), UInt32(20000), None,
+        UInt32(20), Float32(0.7), UInt32(4096), None, false, None,
         UInt32(50), UInt32(30), UInt32(0), ArrayList<String>(), None, Int64(0), Int64(0))))
     let models = uniqueModels(agents)
     @Expect(models.size, 2)

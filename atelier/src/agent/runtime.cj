@@ -7,7 +7,7 @@ import atelier.provider.*
 import atelier.skill.*
 import atelier.session.*
 import atelier.trust.*
-import atelier.context.compactMessages
+import atelier.context.{resolveCompactSpec, CompactSpec, compactFrom, retainedCutIndex, lastUserIndex, isContextOverflowError, pruneToolResults, ToolResultPruneConfig, checkpointBody, globalCompactionLedger}
 import atelier.context.ContextBuilder
 import atelier.context.PromptSegmentContributor
 import atelier.context.ModelContextRegistry
@@ -90,6 +90,8 @@ public open class AgentRuntime {
     private let modelRegistry: ModelContextRegistry
     // 未命中模型表只提醒一次（每回合一条会把日志淹掉）
     private let warnedModels = HashSet<String>()
+    // 压缩配置算不出预算时也只提醒一次
+    private var warnedCompactionSpec = false
     private let warnLock = Mutex()
     private let sessionEnv: SessionEnvironment
     private let mcpManager: McpManager
@@ -138,6 +140,255 @@ public open class AgentRuntime {
     /** 本次运行所用的装配束（子 agent / 工具代理要照同一份组件再建 runtime 时用） */
     public func components(): HarnessSpec {
         this.spec
+    }
+
+    // 生效的压缩策略：嵌套 CompactionConfig 优先，缺省用其默认值
+    private func compactionConfig(): CompactionConfig {
+        match (this.config.compaction) {
+            case Some(c) => c
+            case None => CompactionConfig()
+        }
+    }
+
+    // 是否启用压缩：平面开关或嵌套策略任一开启
+    private func compactionEnabledFor(): Bool {
+        if (this.config.compactionEnabled) { return true }
+        match (this.config.compaction) {
+            case Some(c) => c.enabled
+            case None => false
+        }
+    }
+
+    // 当前压力（token）：Provider 报告的实际用量优先，本地估算兜底
+    private func pressureTokens(assistantMsg: AssistantMessage, messages: ArrayList<Message>): Int64 {
+        if (assistantMsg.usage.inputTokens > 0) { return assistantMsg.usage.inputTokens }
+        estimateTokens(messages)
+    }
+
+    /**
+     * 带事务括弧的压缩：同一会话同时只允许一次（跨 runtime 的台账），
+     * 全程 `compaction_start` / `compaction_end` 成对（消费端据此显示进度与审计）。
+     *
+     * 台账被占时**跳过**并留痕：并发压缩各自基于同一份旧历史，后写的会覆盖先写的，
+     * 摘要与保留区来自不同快照 —— 与其压出分叉的历史，不如这次不压。
+     */
+    private func compactBracketed(trigger: String, sessionId: String, messages: ArrayList<Message>,
+        tokensBefore: Int64, log: Logger,
+        body: (ArrayList<Message>, Int64) -> ArrayList<Message>): ArrayList<Message> {
+        let compactionId = "cmp_" + nextId()
+        if (!globalCompactionLedger.begin(sessionId, compactionId)) {
+            log.warn("compaction skipped: another compaction is in flight for this session (${sessionId})", Array<Attr>())
+            return messages
+        }
+        this.publishCompactionStart(compactionId, trigger, tokensBefore)
+        var result = messages
+        try {
+            result = body(messages, tokensBefore)
+        } finally {
+            this.publishCompactionEnd(compactionId, trigger, Int64(messages.size), result)
+            globalCompactionLedger.end(sessionId)
+        }
+        result
+    }
+
+    // 压缩事件与其它事件同源（走事件总线）；没有总线时退化为无事件，不影响压缩本身
+    private func publishCompactionStart(compactionId: String, trigger: String, tokensBefore: Int64): Unit {
+        match (this.eventBus) {
+            case Some(bus) => bus.publish(CompactionStartEvent(compactionId, trigger, tokensBefore))
+            case None => ()
+        }
+    }
+
+    private func publishCompactionEnd(compactionId: String, trigger: String,
+        messagesBefore: Int64, result: ArrayList<Message>): Unit {
+        match (this.eventBus) {
+            case Some(bus) => bus.publish(CompactionEndEvent(compactionId, trigger, messagesBefore,
+                Int64(result.size), estimateTokens(result)))
+            case None => ()
+        }
+    }
+
+    /**
+     * 真正发给模型的那一份请求：按需把超大工具结果换成"头 + 标记 + 尾"。
+     *
+     * **只作用于这一份**（历史保持原样，回放/导出仍拿得到完整输出）；这一步必须在
+     * `currentMessages = chatReq.messages` 收编之后做，否则修剪会顺着收编流进落库历史。
+     */
+    private func wireRequest(req: ChatRequest): ChatRequest {
+        if (!this.compactionEnabledFor()) { return req }
+        let cc = this.compactionConfig()
+        let cfg = match (cc.prune) {
+            case Some(p) => p
+            case None => ToolResultPruneConfig()
+        }
+        if (!cfg.enabled) { return req }
+        let (pruned, prunedCount) = pruneToolResults(req.messages, cfg)
+        if (prunedCount == 0) { return req }
+        let log = getGlobalLogger([("name", "AgentRuntime")])
+        log.info("pruned ${prunedCount} oversized tool result(s) for this request", Array<Attr>())
+        ChatRequest(req.model, pruned, req.temperature, req.maxTokens, req.reasoningEffort,
+            req.tools, req.extra, systemPrompt: req.systemPrompt)
+    }
+
+    /**
+     * 下一次请求的压力估算：以**最近一次带用量的 assistant 消息**为锚（它反映那次请求的
+     * 提示词规模），加上其后新增消息的估算 —— 与 dsh「provider 用量锚 + 表面增量」同源。
+     * 没有锚（首轮 / provider 不报用量）时退回整体估算。
+     */
+    private func pressureForNextRequest(messages: ArrayList<Message>): Int64 {
+        var i = Int64(messages.size) - 1
+        while (i >= 0) {
+            match (messages[i]) {
+                case am: AssistantMessage =>
+                    if (am.usage.inputTokens > 0) {
+                        let tail = ArrayList<Message>()
+                        var j = i + 1
+                        while (j < Int64(messages.size)) {
+                            tail.add(messages[Int64(j)])
+                            j++
+                        }
+                        return am.usage.inputTokens + estimateTokens(tail)
+                    }
+                case _ => ()
+            }
+            i--
+        }
+        estimateTokens(messages)
+    }
+
+    /**
+     * 摘要 + 切点替换：摘要失败时退化为占位摘要（保住会话可继续，而不是把 run 打断）。
+     *
+     * 摘要子调用**复用主对话的前缀**：system 提示词 + 工具声明 + 被压区域消息原样回放，
+     * 指令作为最后一条 user 消息追加。provider 的前缀缓存按"缓存前缀单元完整匹配"计费
+     * （DeepSeek 的硬盘缓存即如此），这样那段长输入走缓存价；若把对话内联进一个 user 消息，
+     * 前缀从第一个 token 就不同，整段按未命中计价。
+     */
+    private func summarizeAndCompact(messages: ArrayList<Message>, cc: CompactionConfig,
+        spec: CompactSpec, total: Int64, actualModel: String, systemText: String,
+        tools: ArrayList<OpenAITool>, log: Logger): ArrayList<Message> {
+        let cut = retainedCutIndex(messages, spec.retainTokens)
+        let summary = try {
+            let region = ArrayList<Message>()
+            var i: Int64 = 0
+            while (i < cut) {
+                region.add(messages[i])
+                i++
+            }
+            let conversation = summarizeText(region, 0)
+            let prev = findPreviousSummary(region)
+            let prompt = renderCompactionPrompt(cc, conversation, prev, spec.summaryMaxTokens)
+            let summaryModel = match (cc.summaryModel) {
+                case Some(m) => m
+                case None => actualModel
+            }
+            // 被压区域原样回放 + 末尾追加指令：前缀与主请求一致，才能吃到缓存
+            let reqMessages = ArrayList<Message>(region)
+            reqMessages.add(UserMessage(ContentList.ofText(prompt), 0))
+            let req = ChatRequest(summaryModel, reqMessages, Float64(0.2), spec.summaryMaxTokens,
+                None, tools, systemPrompt: systemText)
+            let resp = this.provider.chat(req)
+            let raw = plainTextOf(resp.message)
+            match (cc.outputSchema) {
+                case Some(JsonValue.Map(schema)) =>
+                    if (!validateSummary(cc, schema, raw)) {
+                        throw Exception("summary failed schema validation")
+                    }
+                case _ => ()
+            }
+            raw
+        } catch (e: Exception) {
+            log.warn("compaction summary failed: ${e.message}, fallback to placeholder", Array<Attr>())
+            "... ${total} previous tokens summarized ..."
+        }
+        let next = compactWithSummary(messages, spec.retainTokens, summary, total)
+        // 摘要没让历史变短 = 白花一次调用，而且下回合还会再触发：留痕
+        if (next.size >= messages.size) {
+            log.warn("compaction did not shrink history (${messages.size} messages); check retain budget vs threshold", Array<Attr>())
+        }
+        next
+    }
+
+    /**
+     * 溢出恢复：provider 明确报"超上下文窗口"时，压掉**最大的一段头部**（只保最后一条用户
+     * 消息起的内容，且不拆散工具调用对），让调用方带着新历史重试同一请求。
+     *
+     * 返回 None = 这次救不了（不是溢出 / 重试次数用完 / 压无可压 / 摘要失败），
+     * 调用方按普通失败收敛 —— 不留半截状态。
+     */
+    private func recoverFromOverflow(errText: String, messages: ArrayList<Message>,
+        retries: Int64, cc: CompactionConfig, chatReq: ChatRequest, actualModel: String,
+        systemText: String, tools: ArrayList<OpenAITool>, sessionId: String,
+        log: Logger): Option<ArrayList<Message>> {
+        if (!isContextOverflowError(errText)) { return None }
+        if (retries >= cc.maxOverflowRetries) {
+            log.warn("context overflow: recovery exhausted after ${retries} attempt(s)", Array<Attr>())
+            return None
+        }
+        let keepFrom = lastUserIndex(messages)
+        if (keepFrom <= 0) {
+            // 只有一条用户消息（或没有）——没有可压的头部，摘要也救不了
+            log.warn("context overflow: nothing to compact (single-turn history)", Array<Attr>())
+            return None
+        }
+        let total = estimateTokens(messages)
+        // 溢出恢复同样是一次改写历史的事务：括弧照开照合（放弃时 after == before）
+        let outcome = this.compactBracketed("overflow", sessionId, messages, total, log,
+            { msgs, totalBefore => this.summarizeHeadForOverflow(msgs, keepFrom, cc, actualModel,
+                systemText, tools, totalBefore, log) })
+        if (outcome.size >= messages.size) { return None }
+        return Some(outcome)
+    }
+
+    // 溢出恢复的摘要 + 替换（括弧内的主体）：只保最后一条用户消息起的内容
+    private func summarizeHeadForOverflow(messages: ArrayList<Message>, keepFrom: Int64,
+        cc: CompactionConfig, actualModel: String, systemText: String,
+        tools: ArrayList<OpenAITool>, total: Int64, log: Logger): ArrayList<Message> {
+        let summary = try {
+            let region = ArrayList<Message>()
+            var k: Int64 = 0
+            while (k < keepFrom) {
+                region.add(messages[k])
+                k++
+            }
+            let conversation = summarizeText(region, 0)
+            let prev = findPreviousSummary(region)
+            let prompt = renderCompactionPrompt(cc, conversation, prev, cc.headroomTokens)
+            let summaryModel = match (cc.summaryModel) {
+                case Some(m) => m
+                case None => actualModel
+            }
+            // 同样复用主对话前缀（system + tools + 被压区域），让恢复用的摘要也走缓存价
+            let reqMessages = ArrayList<Message>(region)
+            reqMessages.add(UserMessage(ContentList.ofText(prompt), 0))
+            let req = ChatRequest(summaryModel, reqMessages, Float64(0.2), cc.headroomTokens,
+                None, tools, systemPrompt: systemText)
+            plainTextOf(this.provider.chat(req).message)
+        } catch (e: Exception) {
+            log.warn("context overflow: summary failed (${e.message}); giving up recovery", Array<Attr>())
+            return messages
+        }
+        let next = compactFrom(messages, keepFrom, summary, total)
+        if (next.size >= messages.size) {
+            log.warn("context overflow: compaction did not shrink history", Array<Attr>())
+            return messages
+        }
+        log.info("context overflow recovered: ${messages.size} -> ${next.size} messages", Array<Attr>())
+        next
+    }
+
+    // 配置算不出压力预算：每个原因只提醒一次（否则每回合一条，把日志淹掉）
+    private func warnCompactionSpecOnce(reason: String, log: Logger): Unit {
+        var first = false
+        synchronized(this.warnLock) {
+            if (!this.warnedCompactionSpec) {
+                this.warnedCompactionSpec = true
+                first = true
+            }
+        }
+        if (first) {
+            log.warn("compaction skipped: ${reason}", Array<Attr>())
+        }
     }
 
     /** 本 agent 实际使用的上下文窗口（token）：声明 > provider 自报 > 兜底 */
@@ -300,6 +551,40 @@ public open class AgentRuntime {
                     } else {
                         baseSystemText + "\n\n" + PtcSdkRenderer.render(visible)
                     }
+                    // —— 请求派发前的上下文压力处理（dsh 的 pre-step 位置）——
+                    // 先修剪（只影响本次请求，不落库），修剪后仍在阈值之上才摘要 + 替换历史。
+                    // 放在请求前而不是回合结束后：回合结束后再压，本轮该发的请求早就发出去了。
+                    // 注意：这里算出的修剪版**只用于测量与决策**。真正发出去的请求在
+                    // wireRequest() 里再修剪一次 —— 因为下面 `currentMessages = chatReq.messages`
+                    // 会把请求的消息表收编为历史，若在这里就把修剪版写回去，修剪会落进落库历史。
+                    var measureMessages = currentMessages
+                    if (this.compactionEnabledFor()) {
+                        let cc = this.compactionConfig()
+                        let resolution = resolveCompactSpec(cc,
+                            this.modelInfoInUse().info.contextWindow, this.maxOutputTokensInUse())
+                        match (resolution.spec) {
+                            case Some(cSpec) =>
+                                let pruneCfg = match (cc.prune) {
+                                    case Some(p) => p
+                                    case None => ToolResultPruneConfig()
+                                }
+                                if (pruneCfg.enabled) {
+                                    let (pruned, _) = pruneToolResults(currentMessages, pruneCfg)
+                                    measureMessages = pruned
+                                }
+                                let total = this.pressureForNextRequest(measureMessages)
+                                if (total > cSpec.thresholdTokens) {
+                                    currentMessages = this.compactBracketed("pressure", sessionId,
+                                        currentMessages, total, log, { msgs, totalBefore =>
+                                        this.summarizeAndCompact(msgs, cc, cSpec, totalBefore,
+                                            actualModel, systemText, tools, log)
+                                    })
+                                }
+                            // 配置算不出预算（窗口未知 / 留不出余量 / 保留不小于阈值）：
+                            // 留痕一次并跳过**主动**压缩 —— 配置坏了不该让会话不可用
+                            case None => this.warnCompactionSpecOnce(resolution.reason, log)
+                        }
+                    }
                     var chatReq = ctxBuilder.buildChatRequest(actualModel, systemText, currentMessages,
                         Float64(this.config.temperature), this.maxOutputTokensInUse(),
                         this.config.thinkingLevel, tools)
@@ -330,42 +615,71 @@ public open class AgentRuntime {
                         log.warn("history had ${patched} tool call(s) without results; inserted placeholders to keep the request valid", Array<Attr>())
                     }
 
-                    let chatStream = this.provider.chatStreaming(chatReq)
-                    var contentBuilder = StringBuilder()
+                    // provider 调用 + **溢出恢复**：明确报"超上下文窗口"时，压掉最大的一段头部
+                    // 再重试同一请求（次数受 CompactionConfig.maxOverflowRetries 限制）。这条
+                    // 恢复路径不受压力阈值约束 —— 已经被拒了，阈值就没有意义了。
+                    let ccForOverflow = this.compactionConfig()
+                    var overflowRetries: Int64 = 0
                     var assistantMsg = AssistantMessage(ContentList.ofText(""), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0)
-                    try {
-                        var aborted = false
-                        while (!aborted) {
-                            if (cancelFlag.load()) {
-                                // 取消：用已累积内容构造部分消息，跳过 result() 等待
-                                assistantMsg = AssistantMessage(ContentList.ofText(contentBuilder.toString()), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0)
-                                aborted = true
-                                break
+                    var requestFailed = false
+                    while (true) {
+                        var contentBuilder = StringBuilder()
+                        var attemptOk = false
+                        try {
+                            // provider 通常在**发起请求时**就抛（HTTP 4xx 拿不到流），
+                            // 所以这一步也必须在 try 内，否则溢出恢复接不到
+                            let chatStream = this.provider.chatStreaming(this.wireRequest(chatReq))
+                            var aborted = false
+                            while (!aborted) {
+                                if (cancelFlag.load()) {
+                                    // 取消：用已累积内容构造部分消息，跳过 result() 等待
+                                    assistantMsg = AssistantMessage(ContentList.ofText(contentBuilder.toString()), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0)
+                                    aborted = true
+                                    break
+                                }
+                                match (chatStream.receive(5 * Duration.second)) {
+                                    case Some(delta) =>
+                                        if (delta.delta != "") {
+                                            contentBuilder.append(delta.delta)
+                                            this.emit(stream, MessageUpdateEvent(
+                                                AssistantMessage(ContentList.ofText(contentBuilder.toString()), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0),
+                                                delta.delta))
+                                        }
+                                        match (delta.finishReason) {
+                                            case Some(_) => break
+                                            case None => ()
+                                        }
+                                    case None => break
+                                }
                             }
-                            match (chatStream.receive(5 * Duration.second)) {
-                                case Some(delta) =>
-                                    if (delta.delta != "") {
-                                        contentBuilder.append(delta.delta)
-                                        this.emit(stream, MessageUpdateEvent(
-                                            AssistantMessage(ContentList.ofText(contentBuilder.toString()), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0),
-                                            delta.delta))
-                                    }
-                                    match (delta.finishReason) {
-                                        case Some(_) => break
-                                        case None => ()
-                                    }
-                                case None => break
+                            if (!aborted) { assistantMsg = chatStream.result() }
+                            attemptOk = true
+                        } catch (e: Exception) {
+                            // 用 toString() 而不是 message：Socket/FS 这类异常的 message 常为空，
+                            // 只打 message 在日志里就是一行「provider error: 」，等于没有信息
+                            let errText = e.toString()
+                            match (this.recoverFromOverflow(errText, currentMessages, overflowRetries,
+                                ccForOverflow, chatReq, actualModel, systemText, tools, sessionId, log)) {
+                                case Some(nextMsgs) =>
+                                    overflowRetries++
+                                    currentMessages = nextMsgs
+                                    // 用同一套参数重建请求（保留可能已被 hook 改过的 model）
+                                    chatReq = ctxBuilder.buildChatRequest(chatReq.model, systemText, currentMessages,
+                                        Float64(this.config.temperature), this.maxOutputTokensInUse(),
+                                        this.config.thinkingLevel, tools)
+                                    continue
+                                case None =>
+                                    log.error("provider error: ${errText}", Array<Attr>())
+                                    let failureMsg = AssistantMessage(ContentList.ofText("[provider error] ${errText}"), "", "", StopReason.Error, TokenUsage(0, 0), 0)
+                                    // 同短路分支：错误必须进消息列表，否则消费端与界面都看不到它
+                                    currentMessages.add(failureMsg)
+                                    this.emit(stream, TurnEndEvent(failureMsg, ArrayList<ToolResultMessage>()))
+                                    requestFailed = true
                             }
                         }
-                        if (!aborted) { assistantMsg = chatStream.result() }
-                    } catch (e: Exception) {
-                        // 用 toString() 而不是 message：Socket/FS 这类异常的 message 常为空，
-                        // 只打 message 在日志里就是一行「provider error: 」，等于没有信息
-                        log.error("provider error: ${e.toString()}", Array<Attr>())
-                        let failureMsg = AssistantMessage(ContentList.ofText("[provider error] ${e.toString()}"), "", "", StopReason.Error, TokenUsage(0, 0), 0)
-                        // 同短路分支：错误必须进消息列表，否则消费端与界面都看不到它
-                        currentMessages.add(failureMsg)
-                        this.emit(stream, TurnEndEvent(failureMsg, ArrayList<ToolResultMessage>()))
+                        if (requestFailed || attemptOk) { break }
+                    }
+                    if (requestFailed) {
                         finished = true
                         break
                     }
@@ -663,57 +977,6 @@ public open class AgentRuntime {
                                 this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
                                 finished = true
                                 break
-                            }
-                            if (this.config.compactionEnabled || match (this.config.compaction) {
-                                case Some(c) => c.enabled
-                                case None => false }) {
-                                let contextWindow = this.modelInfoInUse().info.contextWindow
-                                let cc = match (this.config.compaction) {
-                                    case Some(c) => c
-                                    case None => CompactionConfig()
-                                }
-                                let reserve = match (this.config.compaction) {
-                                    case Some(c) => c.reserveTokens
-                                    case None => Int64(this.config.compactionReserveTokens)
-                                }
-                                let keepRecent = match (this.config.compaction) {
-                                    case Some(c) => c.keepRecentTokens
-                                    case None => Int64(this.config.keepRecentTokens)
-                                }
-                                // 用量优先：Provider 报告的实际用量 > 0 时优先，本地估算兜底
-                                let total = if (assistantMsg.usage.inputTokens > 0) { assistantMsg.usage.inputTokens }
-                                    else { estimateTokens(currentMessages) }
-                                if (total > reserve && contextWindow != 0 && total > contextWindow - reserve) {
-                                    // 独立子调用（请求体无 system/tools，缓存 Key 独立，不污染主对话）
-                                    let summary = try {
-                                        let conversation = summarizeText(currentMessages, reserve)
-                                        let prev = findPreviousSummary(currentMessages)
-                                        let prompt = renderCompactionPrompt(cc, conversation, prev, reserve)
-                                        let summaryModel = match (cc.summaryModel) {
-                                            case Some(m) => m
-                                            case None => actualModel
-                                        }
-                                        let req = ChatRequest(summaryModel,
-                                            ArrayList<Message>([UserMessage(ContentList.ofText(prompt), 0)]),
-                                            Float64(0.2), reserve, None, ArrayList<OpenAITool>())
-                                        let resp = this.provider.chat(req)
-                                        let raw = plainTextOf(resp.message)
-                                        match (cc.outputSchema) {
-                                            case Some(JsonValue.Map(schema)) =>
-                                                if (!validateSummary(cc, schema, raw)) {
-                                                    throw Exception("summary failed schema validation")
-                                                }
-                                            case _ => ()
-                                        }
-                                        raw
-                                    } catch (e: Exception) {
-                                        log.warn("compaction summary failed: ${e.message}, fallback to placeholder", Array<Attr>())
-                                        "... ${total} previous tokens summarized ..."
-                                    }
-                                    currentMessages = compactWithSummary(currentMessages, keepRecent, summary, total)
-                                } else {
-                                    currentMessages = compactMessages(currentMessages, contextWindow, reserve, keepRecent)
-                                }
                             }
                             this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
                             finished = true
@@ -1033,7 +1296,7 @@ func summarizeText(msgs: ArrayList<Message>, limit: Int64): String {
             case um: UserMessage => plainTextOf(um)
             case am: AssistantMessage => plainTextOf(am)
             case tm: ToolResultMessage => "[tool " + tm.toolName + "]: " + plainTextOf(tm)
-            case cm: CompactionMessage => "[summary] " + cm.summary
+            case cm: CompactionMessage => "[summary] " + checkpointBody(cm.summary)
             case am2: ArchiveMessage => "[archived " + am2.startIndex.toString() + "-" + am2.endIndex.toString() + "]: " + am2.summary
             case _ => ""
         }

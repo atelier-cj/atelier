@@ -38,7 +38,7 @@ func ptcRuntimeConfig(mode: ToolPresentationMode,
     let skills = ArrayList<String>()
     AgentConfig("ptc-agent", None, "", None, "m", None, tools, skills, 3,
         UInt32(5), Float32(0.7), UInt32(4096), None,
-        false, UInt32(16384), UInt32(20000), None, UInt32(50), toolTimeoutSeconds, UInt32(0),
+        false, None, UInt32(50), toolTimeoutSeconds, UInt32(0),
         ArrayList<String>(), None, Int64(0), Int64(0),
         toolPresentation: mode)
 }

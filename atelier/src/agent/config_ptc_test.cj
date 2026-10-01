@@ -23,7 +23,7 @@ func config_ptcFieldsRoundTrip() {
         "ptc-agent", None, "", None, "gpt-4o", None,
         ArrayList<String>(), ArrayList<String>(), Int64(0),
         UInt32(20), Float32(0.7), UInt32(4096), None,
-        true, UInt32(16384), UInt32(20000), None, UInt32(50), UInt32(30), UInt32(0),
+        true, None, UInt32(50), UInt32(30), UInt32(0),
         ArrayList<String>(), None, Int64(0), Int64(0),
         toolPresentation: ToolPresentationMode.Ptc,
         ptcTimeoutSeconds: UInt32(45),
@@ -45,7 +45,7 @@ func config_bothModeRoundTrip() {
         "both-agent", None, "", None, "gpt-4o", None,
         ArrayList<String>(), ArrayList<String>(), Int64(0),
         UInt32(20), Float32(0.7), UInt32(4096), None,
-        true, UInt32(16384), UInt32(20000), None, UInt32(50), UInt32(30), UInt32(0),
+        true, None, UInt32(50), UInt32(30), UInt32(0),
         ArrayList<String>(), None, Int64(0), Int64(0),
         toolPresentation: ToolPresentationMode.Both)
 
