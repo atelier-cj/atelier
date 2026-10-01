@@ -23,6 +23,8 @@ repository = "https://atomgit.com/ystyle/atelier"
 "acp" = "0.2.6"
 # PTC 程序执行引擎（中断检查点 / 纯函数子集 / 严格解析由 xisp 0.4.1 提供）
 "ystyle::xisp" = "0.4.1"
+# TOML 配置装载（Agent/Provider 配置模型；下游宿主也用这套）
+"tomlcj" = "1.0.0"
 
 [profile.test]
 filter = "-ProviderIntegrationTest.*"
