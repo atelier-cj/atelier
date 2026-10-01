@@ -14,7 +14,8 @@ Atelier 是一个纯仓颉实现的 Agent Harness —— 把模型变成 Agent �
 - **树形会话**：Entry + ParentID 树模型，支持 fork/clone/JSONL 持久化
 - **信任闸门**：目录级权限控制，`Undecided` 时发出结构化审批（允许本次 / 总是允许 / 拒绝）
 - **Skill 系统**：按 AgentSkills 规范的声明式技能注入
-- **上下文压缩**：provider 报告用量 + 本地估算双策略
+- **上下文压缩**：dsh 口径阈值（`min(W × ratio, W − O − headroom)`）+ 超窗恢复 + 工具结果修剪 +
+  摘要复用主对话前缀（吃 provider 缓存）+ 手动 `/compact`；provider 用量优先、本地估算兜底
 - **钩子系统**：6 个生命周期钩子（beforeRun~afterTool）
 - **Agent-as-Tool**：子 Agent 委派模式，同进程隔离上下文
 - **可持续子 Agent**：常驻子 Agent + 双向 send_message（汇报/提问/唤醒取代单向 report）

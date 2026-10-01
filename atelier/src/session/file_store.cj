@@ -4,6 +4,7 @@ import bstorm.*
 import bstorm.macros.Model
 import bstorm.macros.Id
 import stdx.encoding.json.stream.*
+import stdx.serialization.serialization.*
 import atelier.message.*
 import atelier.util.{toJsonString, fromJsonString}
 import std.collection.*
@@ -18,6 +19,20 @@ public class SessionRecord {
     public init() {}
 }
 
+/**
+ * 压缩台账行：一条会话一行，整份台账（ArrayList<CompactionRecord> 的 JSON）存在 [json] 里。
+ *
+ * 独立表而不是给 SessionRecord 加列：加列要面对既有行的缺列问题，而这张表按 id 键读写、
+ * 用新表名，既有会话零影响。一条会话的台账只有寥寥几条，整份重写的代价可忽略。
+ */
+@Model
+public class CompactionJournalRow {
+    @Id
+    public var id: String = ""
+    public var json: String = ""
+    public init() {}
+}
+
 public class StormSessionStore <: SessionStore {
     private let db: Storm
 
@@ -26,6 +41,24 @@ public class StormSessionStore <: SessionStore {
     }
 
     public func close(): Unit { this.db.close() }
+
+    private func journalId(sessionId: String): String { "compact:" + sessionId }
+
+    public func appendCompaction(record: CompactionRecord): Unit {
+        let records = this.loadCompactions(record.sessionId)
+        records.add(record)
+        let row = CompactionJournalRow()
+        row.id = this.journalId(record.sessionId)
+        row.json = recordsToJson(records)
+        this.db.save(row)
+    }
+
+    public func loadCompactions(sessionId: String): ArrayList<CompactionRecord> {
+        match (this.db.get<CompactionJournalRow>(this.journalId(sessionId))) {
+            case Some(row) => recordsFromJson(row.json)
+            case None => ArrayList<CompactionRecord>()
+        }
+    }
 
     public func save(id: String, header: SessionHeader, messages: ArrayList<Message>): Unit {
         var entries = ArrayList<Entry>()
@@ -99,5 +132,18 @@ public class StormSessionStore <: SessionStore {
     public func fork(sourceId: String, leafId: String): SessionData {
         let data = this.loadEntries(sourceId)
         SessionData(data.header, pathToLeaf(data.entries, leafId))
+    }
+}
+
+// 台账列表的 JSON 编解码：复用 util 的助手（与 entries 同一套口径）
+func recordsToJson(records: ArrayList<CompactionRecord>): String {
+    toJsonString(records)
+}
+
+func recordsFromJson(json: String): ArrayList<CompactionRecord> {
+    // 台账坏了不该影响会话可用性：留痕 + 当作空台账
+    try { fromJsonString<ArrayList<CompactionRecord>>(json) } catch (e: Exception) {
+        eprintln("[atelier] compaction journal deserialize failed: ${e.toString()}")
+        ArrayList<CompactionRecord>()
     }
 }

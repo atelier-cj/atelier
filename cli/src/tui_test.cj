@@ -6,6 +6,7 @@ import atelier.message.*
 import atelier.agent.*
 import atelier.provider.*
 import atelier.session.*
+import atelier.context.{CompactionConfig, DEFAULT_PROMPT_TEMPLATE}
 import atelier.tool.*
 import atelier.trust.*
 import atelier.skill.*
@@ -982,3 +983,55 @@ func chatTui_askModalSwallowsTypedTextInsteadOfSubmittingMessage() {
     @Expect(countUserTurns(tui.messages), 0)
 }
 
+
+// /compact：手动压缩当前会话 —— 历史被改写，落库必须整份重写（追加式会留下两份头部）
+@Test
+func chatTui_compactCommandRewritesHistoryInStore() {
+    let store = MemorySessionStore()
+    let trustMgr = TrustManager()
+    let seeded = ArrayList<Message>()
+    seeded.add(UserMessage(ContentList.ofText("第一轮"), 0))
+    seeded.add(AssistantMessage(ContentList.ofText("回答"), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0))
+    seeded.add(UserMessage(ContentList.ofText("第二轮"), 0))
+    store.save("sess_test_compact", SessionHeader(1, "sess_test_compact", 0, 0, "", "", "", None), seeded)
+
+    // 模型 "m" 未知 → 窗口取兜底 8192、输出预留 4096；余量与保留收紧后策略可解
+    let policy = CompactionConfig(true, 0.8, 1024, 0.16, Some(Int64(4)), 1,
+        DEFAULT_PROMPT_TEMPLATE, None, None)
+    let cfg = AgentConfig("t", None, "sys", None, "m", None,
+        ArrayList<String>(), ArrayList<String>(), 3, UInt32(20), Float32(0.7),
+        UInt32(4096), None, false, Some(policy),
+        UInt32(50), UInt32(30), UInt32(0), ArrayList<String>(), None, Int64(0), Int64(0))
+    let tui = ChatTui("default", SlashCommandRegistry(trustMgr), cfg,
+        cliTestSpec(ToolRegistry(), store, trustMgr, SkillRegistry(), AgentRegistry(), ProviderRegistry(), McpManager(), StubProvider()),
+        "sess_test_compact", "/tmp/atelier-tui-test")
+
+    tui.runCommand("/compact")
+    let after = store.load("sess_test_compact")
+    @Expect(after.size < seeded.size, true)
+    match (after[0]) {
+        case cm: CompactionMessage =>
+            // 检查点带前言与标签，且原样的用户文本不再出现在历史头部
+            @Expect(cm.summary.contains("<compacted-summary>"), true)
+        case _ => @Fail("expected checkpoint message first after /compact")
+    }
+    // 整份重写：条目数与历史一致（追加式会让条目数 > 消息数）
+    @Expect(store.loadEntries("sess_test_compact").entries.size, after.size)
+    // 台账落在该会话名下（一开一合）
+    let journal = store.loadCompactions("sess_test_compact")
+    @Expect(journal.size, 2)
+    @Expect(journal[1].trigger, "manual")
+    @Expect(journal[1].outcome, "replaced")
+}
+
+// /compact：空会话 → 明确提示，不做任何事
+@Test
+func chatTui_compactCommandOnEmptySessionIsNoop() {
+    let store = MemorySessionStore()
+    let trustMgr = TrustManager()
+    let tui = ChatTui("default", SlashCommandRegistry(trustMgr), AgentConfig.default(),
+        cliTestSpec(ToolRegistry(), store, trustMgr, SkillRegistry(), AgentRegistry(), ProviderRegistry(), McpManager(), StubProvider()),
+        "sess_test_compact_empty", "/tmp/atelier-tui-test")
+    tui.runCommand("/compact")
+    @Expect(store.loadCompactions("sess_test_compact_empty").size, 0)
+}

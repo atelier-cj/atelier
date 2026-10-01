@@ -7,6 +7,8 @@ import atelier.provider.*
 import atelier.skill.*
 import atelier.session.*
 import atelier.trust.*
+import atelier.session.CompactionRecord
+import std.time.DateTime
 import atelier.context.{resolveCompactSpec, CompactSpec, compactFrom, retainedCutIndex, lastUserIndex, isContextOverflowError, pruneToolResults, ToolResultPruneConfig, checkpointBody, globalCompactionLedger}
 import atelier.context.ContextBuilder
 import atelier.context.PromptSegmentContributor
@@ -66,6 +68,31 @@ func resolveWorkDir(se: SessionEnvironment): String {
         canonicalize(Path(".")).toString()
     } catch (e: Exception) {
         "."
+    }
+}
+
+/**
+ * 手动压缩的结果：新历史 + 覆盖量 + 未压成时的原因（宿主据此提示，无需自己比对）。
+ *
+ * [compacted] 为 false 时 [messages] 就是入参那份（历史未被改动）——调用方不必判空。
+ */
+public struct CompactionReport {
+    public let messages: ArrayList<Message>
+    public let trigger: String
+    public let compacted: Bool
+    public let tokensBefore: Int64
+    public let tokensAfter: Int64
+    public let messagesBefore: Int64
+    public let messagesAfter: Int64
+    public let reason: String
+
+    public init(messages: ArrayList<Message>, trigger: String, compacted: Bool,
+        tokensBefore: Int64, tokensAfter: Int64, messagesBefore: Int64, messagesAfter: Int64,
+        reason: String) {
+        this.messages = messages; this.trigger = trigger; this.compacted = compacted
+        this.tokensBefore = tokensBefore; this.tokensAfter = tokensAfter
+        this.messagesBefore = messagesBefore; this.messagesAfter = messagesAfter
+        this.reason = reason
     }
 }
 
@@ -166,6 +193,60 @@ public open class AgentRuntime {
     }
 
     /**
+     * 工具声明的 native 渲染。回合内与手动压缩共用同一份：手动压缩要复用主对话前缀
+     * （system + 工具 + 被压区域回放）才谈得上命中 provider 缓存。
+     */
+    private func renderNativeTools(visible: ArrayList<Tool>): ArrayList<OpenAITool> {
+        let result = ArrayList<OpenAITool>()
+        for (t in visible) {
+            result.add(OpenAITool(t.name(), t.description(), t.schema()))
+        }
+        result
+    }
+
+    /**
+     * 手动压缩（宿主入口，如 `/compact`）：**绕过阈值**，仍守保留策略与三个不变量。
+     *
+     * 与自动触发共用同一条管线（修剪 → 摘要 → 切点替换）与同一个事务括弧：
+     * 于是手动压缩同样进食谱的台账、同样走会话级互斥、同样发 `compaction_start/end` 事件。
+     * 压不动（配置算不出预算、已在飞、压无可压）时如实返回原因，不改动历史。
+     */
+    public func compactNow(sessionId: String, messages: ArrayList<Message>,
+        sessionEnv: SessionEnvironment): CompactionReport {
+        let log = getGlobalLogger([("name", "AgentRuntime")])
+        let total = this.pressureForNextRequest(messages)
+        let before = Int64(messages.size)
+        let unchanged = { reason: String => CompactionReport(messages, "manual", false, total, total,
+            before, before, reason) }
+        if (!this.compactionEnabledFor()) { return unchanged("compaction disabled") }
+        if (globalCompactionLedger.isOpen(sessionId)) {
+            return unchanged("another compaction is in flight for this session")
+        }
+        let cc = this.compactionConfig()
+        let resolution = resolveCompactSpec(cc, this.modelInfoInUse().info.contextWindow,
+            this.maxOutputTokensInUse())
+        match (resolution.spec) {
+            case None => return unchanged(resolution.reason)
+            case Some(cSpec) =>
+                // 上下文构建器复用回合内同一套（同一 system 提示词）；手动路径不跑 beforeTurn
+                // 钩子（没有回合），因此工具声明取未过滤的可见集合
+                let ctxBuilder = ContextBuilder(this.skillRegistry, sessionEnv,
+                    contributors: this.promptContributors)
+                let systemText = ctxBuilder.buildSystemText(this.config.systemPrompt, this.config.skills)
+                let tools = this.renderNativeTools(this.resolveVisibleTools())
+                let actualModel = this.pickModel(this.config.model)
+                let next = this.compactBracketed("manual", sessionId, messages, total, log,
+                    { msgs, totalBefore => this.summarizeAndCompact(msgs, cc, cSpec, totalBefore,
+                        actualModel, systemText, tools, log) })
+                let after = estimateTokens(next)
+                if (next.size >= messages.size) {
+                    return unchanged("nothing to compact (history fits the retain budget)")
+                }
+                CompactionReport(next, "manual", true, total, after, before, Int64(next.size), "")
+        }
+    }
+
+    /**
      * 带事务括弧的压缩：同一会话同时只允许一次（跨 runtime 的台账），
      * 全程 `compaction_start` / `compaction_end` 成对（消费端据此显示进度与审计）。
      *
@@ -180,15 +261,32 @@ public open class AgentRuntime {
             log.warn("compaction skipped: another compaction is in flight for this session (${sessionId})", Array<Attr>())
             return messages
         }
+        let startedAt = DateTime.now().toUnixTimeStamp().toMilliseconds()
+        this.journalCompaction(CompactionRecord(compactionId, sessionId, trigger, startedAt, 0,
+            tokensBefore, 0, Int64(messages.size), 0, "open"), log)
         this.publishCompactionStart(compactionId, trigger, tokensBefore)
         var result = messages
         try {
             result = body(messages, tokensBefore)
         } finally {
             this.publishCompactionEnd(compactionId, trigger, Int64(messages.size), result)
+            // 台账闭合：outcome=replaced 才算真改写了历史，noop = 尝试过但没替换
+            this.journalCompaction(CompactionRecord(compactionId, sessionId, trigger, startedAt,
+                DateTime.now().toUnixTimeStamp().toMilliseconds(), tokensBefore, estimateTokens(result),
+                Int64(messages.size), Int64(result.size),
+                if (result.size < messages.size) { "replaced" } else { "noop" }), log)
             globalCompactionLedger.end(sessionId)
         }
         result
+    }
+
+    // 台账落库失败不该影响压缩本身（会话可用性优先）：留痕继续
+    private func journalCompaction(record: CompactionRecord, log: Logger): Unit {
+        try {
+            this.sessionStore.appendCompaction(record)
+        } catch (e: Exception) {
+            log.warn("compaction journal write failed: ${e.toString()}", Array<Attr>())
+        }
     }
 
     // 压缩事件与其它事件同源（走事件总线）；没有总线时退化为无事件，不影响压缩本身
@@ -1083,8 +1181,8 @@ public open class AgentRuntime {
         let programmatic = this.config.toolPresentation != ToolPresentationMode.Native
 
         if (native || this.config.toolPresentation == ToolPresentationMode.Both) {
-            for (t in visible) {
-                result.add(OpenAITool(t.name(), t.description(), t.schema()))
+            for (t in this.renderNativeTools(visible)) {
+                result.add(t)
             }
         }
         if (programmatic) {
