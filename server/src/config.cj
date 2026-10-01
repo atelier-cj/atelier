@@ -1,7 +1,7 @@
 package server
 
 import atelier.agent.*
-import atelier.context.CompactionConfig
+import atelier.context.{CompactionConfig, ToolResultPruneConfig}
 import atelier.provider.*
 import atelier.tool.McpServerConfig
 import atelier.ptc.ToolPresentationMode
@@ -178,6 +178,33 @@ public class TomlServer <: Serializable<TomlServer> {
     }
 }
 
+public class TomlPrune <: Serializable<TomlPrune> {
+    public var enabled: Option<Bool> = None
+    public var thresholdChars: Option<Int64> = None
+    public var headChars: Option<Int64> = None
+    public var tailChars: Option<Int64> = None
+    public init() {}
+
+    public func serialize(): DataModel {
+        let sb = DataModelStruct()
+        match (this.enabled) { case Some(v) => sb.add(field<Bool>("enabled", v)); case None => () }
+        match (this.thresholdChars) { case Some(v) => sb.add(field<Int64>("thresholdChars", v)); case None => () }
+        match (this.headChars) { case Some(v) => sb.add(field<Int64>("headChars", v)); case None => () }
+        match (this.tailChars) { case Some(v) => sb.add(field<Int64>("tailChars", v)); case None => () }
+        sb
+    }
+
+    public static func deserialize(dm: DataModel): TomlPrune {
+        let dms = match (dm) { case s: DataModelStruct => s; case _ => return TomlPrune() }
+        let r = TomlPrune()
+        match (dms.get("enabled")) { case b: DataModelBool => r.enabled = Some(b.getValue()); case _ => () }
+        match (dms.get("thresholdChars")) { case i: DataModelInt => r.thresholdChars = Some(i.getValue()); case _ => () }
+        match (dms.get("headChars")) { case i: DataModelInt => r.headChars = Some(i.getValue()); case _ => () }
+        match (dms.get("tailChars")) { case i: DataModelInt => r.tailChars = Some(i.getValue()); case _ => () }
+        r
+    }
+}
+
 public class TomlCompaction <: Serializable<TomlCompaction> {
     public var enabled: Option<Bool> = None
     // dsh 口径：阈值 = min(W × thresholdRatio, W − maxOutputTokens − headroomTokens)，
@@ -189,6 +216,8 @@ public class TomlCompaction <: Serializable<TomlCompaction> {
     public var maxOverflowRetries: Option<Int64> = None
     public var summaryMaxTokens: Option<Int64> = None
     public var promptTemplate: Option<String> = None
+    // [agent.compaction.prune]：工具结果修剪（只在压缩触发后跑，可能省掉摘要）
+    public var prune: Option<TomlPrune> = None
     public var outputSchema: DataModel = DataModelNull()
     public var summaryModel: Option<String> = None
     public init() {}
@@ -225,6 +254,10 @@ public class TomlCompaction <: Serializable<TomlCompaction> {
         }
         match (this.promptTemplate) {
             case Some(v) => sb.add(field<String>("promptTemplate", v))
+            case None => ()
+        }
+        match (this.prune) {
+            case Some(p) => sb.add(Field("prune", p.serialize()))
             case None => ()
         }
         match (this.outputSchema) {
@@ -273,6 +306,10 @@ public class TomlCompaction <: Serializable<TomlCompaction> {
         }
         match (dms.get("promptTemplate")) {
             case s: DataModelString => r.promptTemplate = Some(s.getValue())
+            case _ => ()
+        }
+        match (dms.get("prune")) {
+            case dm: DataModelStruct => r.prune = Some(TomlPrune.deserialize(dm))
             case _ => ()
         }
         match (dms.get("outputSchema")) {
@@ -597,6 +634,7 @@ public func agentConfigFrom(a: TomlAgent): AgentConfig {
             var retain = cc.retainTokens
             var overflowRetries = cc.maxOverflowRetries
             var summaryMax = cc.summaryMaxTokens
+            var prune = cc.prune
             var template = cc.promptTemplate
             var schema = cc.outputSchema
             var summaryModel = cc.summaryModel
@@ -607,6 +645,20 @@ public func agentConfigFrom(a: TomlAgent): AgentConfig {
             match (tc.retainTokens) { case Some(v) => retain = Some(v); case None => () }
             match (tc.maxOverflowRetries) { case Some(v) => overflowRetries = v; case None => () }
             match (tc.summaryMaxTokens) { case Some(v) => summaryMax = v; case None => () }
+            match (tc.prune) {
+                case Some(tp) =>
+                    let def = ToolResultPruneConfig()
+                    var pEnabled = def.enabled
+                    var pThreshold = def.thresholdChars
+                    var pHead = def.headChars
+                    var pTail = def.tailChars
+                    match (tp.enabled) { case Some(v) => pEnabled = v; case None => () }
+                    match (tp.thresholdChars) { case Some(v) => pThreshold = v; case None => () }
+                    match (tp.headChars) { case Some(v) => pHead = v; case None => () }
+                    match (tp.tailChars) { case Some(v) => pTail = v; case None => () }
+                    prune = Some(ToolResultPruneConfig(pEnabled, pThreshold, pHead, pTail))
+                case None => ()
+            }
             match (tc.promptTemplate) { case Some(v) => template = v; case None => () }
             match (tc.summaryModel) { case Some(v) => summaryModel = Some(v); case None => () }
             match (tc.outputSchema) {
@@ -615,7 +667,7 @@ public func agentConfigFrom(a: TomlAgent): AgentConfig {
                 case _ => ()
             }
             Some(CompactionConfig(enabled, ratio, headroom, retainRatio, retain, overflowRetries,
-                template, schema, summaryModel, summaryMaxTokens: summaryMax))
+                template, schema, summaryModel, summaryMaxTokens: summaryMax, prune: prune))
         case None => None
     }
     AgentConfig(

@@ -86,9 +86,16 @@ public func resolveCompactSpec(cc: CompactionConfig, contextWindow: Int64,
         "")
 }
 
+/**
+ * 默认压缩指令（结构照 dsh 的 `COMPACTION_INSTRUCTION`：固定的 Markdown 检查点骨架 +
+ * 一组硬规则；对话在前、指令在后，与 dsh「回放对话 → 末尾追加指令」的顺序一致）。
+ *
+ * 与 dsh 的两点差异，都是刻意的：
+ * - 指令用中文：本工程其余提示词与用户会话都是中文，摘要必须服务同一场对话
+ *   （dsh 的规则里写的是 "concise English engineering prose"）
+ * - 对话由 `{{conversation}}` 内联在同一个 user 消息里（dsh 是回放整段消息再追加指令）
+ */
 public let DEFAULT_PROMPT_TEMPLATE = """
-你是一个上下文压缩引擎。请将以下对话压缩成一份结构化的摘要，以便另一个 AI 能够无缝接续工作。
-
 <conversation>
 {{conversation}}
 </conversation>
@@ -99,17 +106,40 @@ public let DEFAULT_PROMPT_TEMPLATE = """
 </previous_summary>
 {{/previous_summary}}
 
-输出要求：
-1. 严格输出 JSON 格式
-2. 必须包含以下字段：
-   - goal: 用户的核心目标
-   - key_findings: 关键发现列表
-   - files_modified: 修改过的文件路径列表
-   - errors: 遇到的错误及解决方案
-   - pending_actions: 下一步待办事项
-3. 不要添加任何额外的解释或散文。
-4. 摘要的总长度请控制在 {{max_tokens}} tokens 以内。"""
+你是这个 AI 编程助手的压缩引擎。把上面这段对话压缩成一份结构化检查点，让另一个模型能在不丢失关键上下文的前提下接续工作。
 
+严格按下面的 Markdown 结构输出：每一节都要保留、顺序不变。用简短要点，不要写大段散文；某一节没有内容就写 "(none)"，不要省略该节。
+
+## Primary Request and Intent
+- [用户最初与演进后的目标；措辞本身重要时逐字保留]
+
+## Key Technical Concepts
+- [涉及的技术、框架、模式与约定]
+
+## Files and Code
+- [精确路径：为什么重要、关键改动或代码片段]
+
+## Errors and Fixes
+- [错误：如何解决的，以及相关的用户反馈]
+
+## Pending Jobs
+- [明确要求但尚未完成的工作]
+
+## Current Work
+- [写这份检查点时正在做的事]
+
+## Next Step
+- [下一个动作，直接对着最近一次要求；没有就写 "(none)"]
+
+## Critical Context
+- [决策及其理由、约束、用户偏好、未决问题、继续所需的数据]
+
+规则：
+- 用简洁的工程化表述；保留精确的文件路径、命令、报错原文、标识符、数值、函数签名与语法片段。
+- 忠实记录用户反馈与明确指令，尤其是纠正。
+- 不要提到这次摘要请求，也不要提到上下文被压缩过。
+- 只输出检查点文本：不要调用任何工具，不要做其它动作。
+- 若上面给出了 <previous_summary>（那是上一份检查点），不要原样照抄：保留仍然成立的事实、丢掉过时的，把新信息并进同一套结构。"""
 public struct CompactionConfig <: JsonSerializable & JsonDeserializable<CompactionConfig> {
     public let enabled: Bool
     /** 触发阈值占窗口的比例（dsh 默认 0.8） */
@@ -124,6 +154,8 @@ public struct CompactionConfig <: JsonSerializable & JsonDeserializable<Compacti
     public let maxOverflowRetries: Int64
     /** 摘要子调用的输出上限；0 = 跟随 [headroomTokens] */
     public let summaryMaxTokens: Int64
+    /** 工具结果修剪；None = 用默认配置（开启，8192 码点 → 头 4096 + 标记 + 尾 1024） */
+    public let prune: Option<ToolResultPruneConfig>
     public let promptTemplate: String
     public let outputSchema: Option<JsonValue>
     public let summaryModel: Option<String>
@@ -136,6 +168,7 @@ public struct CompactionConfig <: JsonSerializable & JsonDeserializable<Compacti
         this.retainTokens = None
         this.maxOverflowRetries = 1
         this.summaryMaxTokens = 0
+        this.prune = None
         this.promptTemplate = DEFAULT_PROMPT_TEMPLATE
         this.outputSchema = None
         this.summaryModel = None
@@ -144,7 +177,7 @@ public struct CompactionConfig <: JsonSerializable & JsonDeserializable<Compacti
     public init(enabled: Bool, thresholdRatio: Float64, headroomTokens: Int64,
         retainRatio: Float64, retainTokens: Option<Int64>, maxOverflowRetries: Int64,
         promptTemplate: String, outputSchema: Option<JsonValue>, summaryModel: Option<String>,
-        summaryMaxTokens!: Int64 = 0) {
+        summaryMaxTokens!: Int64 = 0, prune!: Option<ToolResultPruneConfig> = None) {
         this.enabled = enabled
         this.thresholdRatio = thresholdRatio
         this.headroomTokens = headroomTokens
@@ -152,6 +185,7 @@ public struct CompactionConfig <: JsonSerializable & JsonDeserializable<Compacti
         this.retainTokens = retainTokens
         this.maxOverflowRetries = maxOverflowRetries
         this.summaryMaxTokens = summaryMaxTokens
+        this.prune = prune
         this.promptTemplate = promptTemplate
         this.outputSchema = outputSchema
         this.summaryModel = summaryModel
@@ -166,6 +200,12 @@ public struct CompactionConfig <: JsonSerializable & JsonDeserializable<Compacti
         w.writeName("retainTokens").writeValue(this.retainTokens)
         w.writeName("maxOverflowRetries").writeValue(this.maxOverflowRetries)
         w.writeName("summaryMaxTokens").writeValue(this.summaryMaxTokens)
+        match (this.prune) {
+            case Some(p) =>
+                w.writeName("prune")
+                p.toJson(w)
+            case None => w.writeName("prune").writeNullValue()
+        }
         w.writeName("promptTemplate").writeValue(this.promptTemplate)
         w.writeName("outputSchema").writeValue(this.outputSchema)
         w.writeName("summaryModel").writeValue(this.summaryModel)
@@ -180,6 +220,7 @@ public struct CompactionConfig <: JsonSerializable & JsonDeserializable<Compacti
         var retain: Option<Int64> = None
         var overflowRetries = Int64(1)
         var summaryMax = Int64(0)
+        var prune: Option<ToolResultPruneConfig> = None
         var template = DEFAULT_PROMPT_TEMPLATE
         var schema: Option<JsonValue> = None
         var summaryModel: Option<String> = None
@@ -193,6 +234,13 @@ public struct CompactionConfig <: JsonSerializable & JsonDeserializable<Compacti
                 case "retainTokens" => retain = r.readValue<Option<Int64>>()
                 case "maxOverflowRetries" => overflowRetries = r.readValue<Int64>()
                 case "summaryMaxTokens" => summaryMax = r.readValue<Int64>()
+                case "prune" =>
+                    if (r.peek() == JsonNull) {
+                        r.skip()
+                        prune = None
+                    } else {
+                        prune = Some(ToolResultPruneConfig.fromJson(r))
+                    }
                 case "promptTemplate" => template = r.readValue<String>()
                 case "outputSchema" =>
                     if (r.peek() == JsonNull) {
@@ -207,7 +255,7 @@ public struct CompactionConfig <: JsonSerializable & JsonDeserializable<Compacti
         }
         r.endObject()
         CompactionConfig(enabled, ratio, headroom, retainRatio, retain, overflowRetries,
-            template, schema, summaryModel, summaryMaxTokens: summaryMax)
+            template, schema, summaryModel, summaryMaxTokens: summaryMax, prune: prune)
     }
 }
 
@@ -381,6 +429,164 @@ public func isContextOverflowError(errorText: String): Bool {
         if (t.contains(m)) { return true }
     }
     false
+}
+
+/**
+ * 工具结果修剪配置：把超长的工具输出换成"头 + 标记 + 尾"。
+ *
+ * 目的与摘要不同——**不发模型调用**，纯字符操作，而且可能让压力回到阈值内、
+ * 从而把摘要整个省掉。与 dsh 一致：只在压缩触发条件满足后才跑。
+ *
+ * 语义要点：只影响**发出请求的那份**消息（运行时构造请求时用修剪版），落库的历史保持原样，
+ * 所以回放/导出仍然拿得到完整输出。
+ */
+public struct ToolResultPruneConfig <: JsonSerializable & JsonDeserializable<ToolResultPruneConfig> {
+    public let enabled: Bool
+    /** 合并文本超过这么多**码点**才修剪 */
+    public let thresholdChars: Int64
+    public let headChars: Int64
+    public let tailChars: Int64
+
+    public init() {
+        this.enabled = true
+        this.thresholdChars = 8192
+        this.headChars = 4096
+        this.tailChars = 1024
+    }
+
+    public init(enabled: Bool, thresholdChars: Int64, headChars: Int64, tailChars: Int64) {
+        this.enabled = enabled
+        this.thresholdChars = thresholdChars
+        this.headChars = headChars
+        this.tailChars = tailChars
+    }
+
+    public func toJson(w: JsonWriter): Unit {
+        w.startObject()
+        w.writeName("enabled").writeValue(this.enabled)
+        w.writeName("thresholdChars").writeValue(this.thresholdChars)
+        w.writeName("headChars").writeValue(this.headChars)
+        w.writeName("tailChars").writeValue(this.tailChars)
+        w.endObject()
+    }
+
+    public static func fromJson(r: JsonReader): ToolResultPruneConfig {
+        let def = ToolResultPruneConfig()
+        var enabled = def.enabled
+        var threshold = def.thresholdChars
+        var head = def.headChars
+        var tail = def.tailChars
+        r.startObject()
+        while (r.peek() != EndObject) {
+            match (r.readName()) {
+                case "enabled" => enabled = r.readValue<Bool>()
+                case "thresholdChars" => threshold = r.readValue<Int64>()
+                case "headChars" => head = r.readValue<Int64>()
+                case "tailChars" => tail = r.readValue<Int64>()
+                case _ => r.skip()
+            }
+        }
+        r.endObject()
+        ToolResultPruneConfig(enabled, threshold, head, tail)
+    }
+}
+
+public let PRUNE_MARKER = "\n... [middle pruned] ...\n"
+
+/**
+ * 修剪一段文本：按**码点**切，不会劈开 emoji 的代理对。
+ *
+ * `head + 标记 + tail` 必须不超过 [ToolResultPruneConfig.thresholdChars]，
+ * 否则修剪反而让文本变长（配置写歪时自动收紧尾部，不报错）。
+ */
+public func pruneText(text: String, cfg: ToolResultPruneConfig): String {
+    let runes = text.toRuneArray()
+    let total = Int64(runes.size)
+    if (total <= cfg.thresholdChars) { return text }
+    let markerLen = Int64(PRUNE_MARKER.toRuneArray().size)
+    // 阈值小到连标记都放不下：宁可不动，也不能让"修剪"把文本变长
+    if (cfg.thresholdChars <= markerLen + 1) { return text }
+    // 收紧：头 + 标记 + 尾 <= 阈值（头先收，再按剩余预算收尾）
+    var head = cfg.headChars
+    if (head > cfg.thresholdChars - markerLen) { head = cfg.thresholdChars - markerLen }
+    if (head > total) { head = total }
+    let budget = cfg.thresholdChars - markerLen - head
+    var tail = cfg.tailChars
+    if (tail > budget) { tail = if (budget > 0) { budget } else { 0 } }
+    if (head + tail >= total) { return text }
+    let sb = StringBuilder()
+    var i: Int64 = 0
+    while (i < head) {
+        sb.append(runes[i])
+        i++
+    }
+    sb.append(PRUNE_MARKER)
+    var j = total - tail
+    while (j < total) {
+        sb.append(runes[j])
+        j++
+    }
+    sb.toString()
+}
+
+/**
+ * 修剪一条工具结果里的文本块：合并所有文本块、超阈值就换成"头 + 标记 + 尾"，
+ * 非文本块（图片等）保持原有顺序。返回 None = 这条不需要修剪。
+ */
+func prunedToolResult(msg: ToolResultMessage, cfg: ToolResultPruneConfig): Option<ToolResultMessage> {
+    var merged = ""
+    var textCount: Int64 = 0
+    for (b in msg.content.blocks()) {
+        match (b) {
+            case ContentBlock.TextBlock(t) =>
+                merged = merged + t
+                textCount++
+            case _ => ()
+        }
+    }
+    if (textCount == 0 || Int64(merged.toRuneArray().size) <= cfg.thresholdChars) {
+        return None
+    }
+    let pruned = pruneText(merged, cfg)
+    if (pruned == merged) { return None }
+    let blocks = ArrayList<ContentBlock>()
+    var inserted = false
+    for (b in msg.content.blocks()) {
+        match (b) {
+            case ContentBlock.TextBlock(_) =>
+                // 文本块合并成一段（插在第一个文本块的位置），其余文本块丢弃
+                if (!inserted) {
+                    blocks.add(ContentBlock.TextBlock(pruned))
+                    inserted = true
+                }
+            case _ => blocks.add(b)
+        }
+    }
+    Some(ToolResultMessage(msg.toolCallId, msg.toolName, ContentList(blocks), msg.isError, msg.timestamp))
+}
+
+/**
+ * 修剪整份消息列表里的超大工具结果（**返回新列表，原列表不动**）。
+ *
+ * 只在压缩触发条件满足后调用；低于压力阈值的对话绝不该被触碰。
+ */
+public func pruneToolResults(messages: ArrayList<Message>, cfg: ToolResultPruneConfig): (ArrayList<Message>, Int64) {
+    if (!cfg.enabled) { return (messages, 0) }
+    let out = ArrayList<Message>()
+    var prunedCount: Int64 = 0
+    for (m in messages) {
+        match (m) {
+            case tr: ToolResultMessage =>
+                match (prunedToolResult(tr, cfg)) {
+                    case Some(p) =>
+                        out.add(p)
+                        prunedCount++
+                    case None => out.add(m)
+                }
+            case _ => out.add(m)
+        }
+    }
+    (out, prunedCount)
 }
 
 // 切点配对保护：cutIndex 不拆散 ToolCall ↔ ToolResult 对。

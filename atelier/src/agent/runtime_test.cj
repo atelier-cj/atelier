@@ -299,6 +299,39 @@ func runtime_overflowRecoveryDisabled() {
     @Expect(provider.chatCalls, Int64(0))
 }
 
+// 超大工具结果：修剪后压力回到阈值内 → 省掉摘要调用；落库的历史保持原样
+@Test
+func runtime_pruneAvoidsSummaryAndKeepsStoredHistory() {
+    let provider = StubSummaryProvider("SUM")
+    let runtime = makeCompactionRuntime(
+        compactionRuntimeConfig(true, smallWindowCompaction(retainTokens: 4)), provider)
+    let sb = StringBuilder()
+    var i = 0
+    while (i < 40000) {
+        sb.append("x")
+        i++
+    }
+    let huge = sb.toString()
+    let msgs = ArrayList<Message>()
+    msgs.add(UserMessage(ContentList.ofText("跑个命令"), 0))
+    msgs.add(ToolResultMessage("c1", "bash", ContentList.ofText(huge), false, 0))
+    msgs.add(UserMessage(ContentList.ofText("继续"), 0))
+    let result = runtime.chat(msgs).result()
+
+    // 修剪够了就不摘（摘要子调用次数 0）
+    @Expect(provider.chatCalls, Int64(0))
+    // 落库/返回的历史里仍是完整输出 —— 修剪只作用于发给模型的那一份
+    var keptOriginal = false
+    for (m in result) {
+        match (m) {
+            case tr: ToolResultMessage =>
+                if (Int64(textOfMsg(tr).toRuneArray().size) >= Int64(40000)) { keptOriginal = true }
+            case _ => ()
+        }
+    }
+    @Expect(keptOriginal, true)
+}
+
 // chat 抛异常：验证子调用失败降级为占位符
 class StubFailingProvider <: Provider {
     public func name(): String { "stub-failing" }
@@ -381,7 +414,8 @@ func runtime_compactionSummaryViaLLM() {
     @Expect(provider.chatCalls, Int64(1))
     let cm = requireCompaction(result)
     @Expect(cm.summary, summaryText)
-    @Expect(cm.tokensBefore, Int64(4510))
+    // 触发点在请求前：首轮还没有 provider 用量可锚，记的是当时的本地估算
+    @Expect(cm.tokensBefore, Int64(4505))
     // 子调用请求体：仅一条用户消息（无 system/tools），不污染主对话
     match (provider.lastReq) {
         case Some(req) =>
@@ -425,7 +459,7 @@ func runtime_compactionSubCallFailureFallback() {
     @Expect(cm.summary.contains("previous tokens summarized"), true)
 }
 
-// 用量优先：provider 报告 inputTokens=500000 → 直接用用量判定（本地估算仅兜底），tokensBefore=500000
+// 用量优先：以最近一次 provider 报的用量为锚 + 其后新增消息的估算 → 判定下一次请求的压力
 @Test
 func runtime_compactionUsagePriority() {
     let provider = StubUsageSummaryProvider("{\"goal\":\"test\"}")
@@ -434,11 +468,15 @@ func runtime_compactionUsagePriority() {
         compactionRuntimeConfig(true, smallWindowCompaction(retainTokens: 4)), provider)
     let msgs = ArrayList<Message>()
     msgs.add(UserMessage(ContentList.ofText("hi"), 0))
+    // 上一轮 provider 报过 500000 输入 token：这一轮请求前就该按它判定（本地估算只是兜底）
+    msgs.add(AssistantMessage(ContentList.ofText("ok"), "", "", StopReason.EndTurn, TokenUsage(500000, 0), 0))
+    msgs.add(UserMessage(ContentList.ofText("继续"), 0))
     let result = runtime.chat(msgs).result()
     @Expect(provider.chatCalls, Int64(1))
     let cm = requireCompaction(result)
     @Expect(cm.summary, "{\"goal\":\"test\"}")
-    @Expect(cm.tokensBefore, Int64(500000))
+    // 锚 + 其后新增消息的估算（不是把整段历史重新估一遍）
+    @Expect(cm.tokensBefore > Int64(500000), true)
 }
 
 // 不触发：消息远小于阈值 → 消息原样返回（无 CompactionMessage），行为与旧版等价

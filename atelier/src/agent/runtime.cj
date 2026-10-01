@@ -7,7 +7,7 @@ import atelier.provider.*
 import atelier.skill.*
 import atelier.session.*
 import atelier.trust.*
-import atelier.context.{resolveCompactSpec, CompactSpec, compactFrom, lastUserIndex, isContextOverflowError}
+import atelier.context.{resolveCompactSpec, CompactSpec, compactFrom, lastUserIndex, isContextOverflowError, pruneToolResults, ToolResultPruneConfig}
 import atelier.context.ContextBuilder
 import atelier.context.PromptSegmentContributor
 import atelier.context.ModelContextRegistry
@@ -162,6 +162,54 @@ public open class AgentRuntime {
     // 当前压力（token）：Provider 报告的实际用量优先，本地估算兜底
     private func pressureTokens(assistantMsg: AssistantMessage, messages: ArrayList<Message>): Int64 {
         if (assistantMsg.usage.inputTokens > 0) { return assistantMsg.usage.inputTokens }
+        estimateTokens(messages)
+    }
+
+    /**
+     * 真正发给模型的那一份请求：按需把超大工具结果换成"头 + 标记 + 尾"。
+     *
+     * **只作用于这一份**（历史保持原样，回放/导出仍拿得到完整输出）；这一步必须在
+     * `currentMessages = chatReq.messages` 收编之后做，否则修剪会顺着收编流进落库历史。
+     */
+    private func wireRequest(req: ChatRequest): ChatRequest {
+        if (!this.compactionEnabledFor()) { return req }
+        let cc = this.compactionConfig()
+        let cfg = match (cc.prune) {
+            case Some(p) => p
+            case None => ToolResultPruneConfig()
+        }
+        if (!cfg.enabled) { return req }
+        let (pruned, prunedCount) = pruneToolResults(req.messages, cfg)
+        if (prunedCount == 0) { return req }
+        let log = getGlobalLogger([("name", "AgentRuntime")])
+        log.info("pruned ${prunedCount} oversized tool result(s) for this request", Array<Attr>())
+        ChatRequest(req.model, pruned, req.temperature, req.maxTokens, req.reasoningEffort,
+            req.tools, req.extra, systemPrompt: req.systemPrompt)
+    }
+
+    /**
+     * 下一次请求的压力估算：以**最近一次带用量的 assistant 消息**为锚（它反映那次请求的
+     * 提示词规模），加上其后新增消息的估算 —— 与 dsh「provider 用量锚 + 表面增量」同源。
+     * 没有锚（首轮 / provider 不报用量）时退回整体估算。
+     */
+    private func pressureForNextRequest(messages: ArrayList<Message>): Int64 {
+        var i = Int64(messages.size) - 1
+        while (i >= 0) {
+            match (messages[i]) {
+                case am: AssistantMessage =>
+                    if (am.usage.inputTokens > 0) {
+                        let tail = ArrayList<Message>()
+                        var j = i + 1
+                        while (j < Int64(messages.size)) {
+                            tail.add(messages[Int64(j)])
+                            j++
+                        }
+                        return am.usage.inputTokens + estimateTokens(tail)
+                    }
+                case _ => ()
+            }
+            i--
+        }
         estimateTokens(messages)
     }
 
@@ -423,6 +471,37 @@ public open class AgentRuntime {
                     } else {
                         baseSystemText + "\n\n" + PtcSdkRenderer.render(visible)
                     }
+                    // —— 请求派发前的上下文压力处理（dsh 的 pre-step 位置）——
+                    // 先修剪（只影响本次请求，不落库），修剪后仍在阈值之上才摘要 + 替换历史。
+                    // 放在请求前而不是回合结束后：回合结束后再压，本轮该发的请求早就发出去了。
+                    // 注意：这里算出的修剪版**只用于测量与决策**。真正发出去的请求在
+                    // wireRequest() 里再修剪一次 —— 因为下面 `currentMessages = chatReq.messages`
+                    // 会把请求的消息表收编为历史，若在这里就把修剪版写回去，修剪会落进落库历史。
+                    var measureMessages = currentMessages
+                    if (this.compactionEnabledFor()) {
+                        let cc = this.compactionConfig()
+                        let resolution = resolveCompactSpec(cc,
+                            this.modelInfoInUse().info.contextWindow, this.maxOutputTokensInUse())
+                        match (resolution.spec) {
+                            case Some(cSpec) =>
+                                let pruneCfg = match (cc.prune) {
+                                    case Some(p) => p
+                                    case None => ToolResultPruneConfig()
+                                }
+                                if (pruneCfg.enabled) {
+                                    let (pruned, _) = pruneToolResults(currentMessages, pruneCfg)
+                                    measureMessages = pruned
+                                }
+                                let total = this.pressureForNextRequest(measureMessages)
+                                if (total > cSpec.thresholdTokens) {
+                                    currentMessages = this.summarizeAndCompact(currentMessages,
+                                        cc, cSpec, total, actualModel, log)
+                                }
+                            // 配置算不出预算（窗口未知 / 留不出余量 / 保留不小于阈值）：
+                            // 留痕一次并跳过**主动**压缩 —— 配置坏了不该让会话不可用
+                            case None => this.warnCompactionSpecOnce(resolution.reason, log)
+                        }
+                    }
                     var chatReq = ctxBuilder.buildChatRequest(actualModel, systemText, currentMessages,
                         Float64(this.config.temperature), this.maxOutputTokensInUse(),
                         this.config.thinkingLevel, tools)
@@ -466,7 +545,7 @@ public open class AgentRuntime {
                         try {
                             // provider 通常在**发起请求时**就抛（HTTP 4xx 拿不到流），
                             // 所以这一步也必须在 try 内，否则溢出恢复接不到
-                            let chatStream = this.provider.chatStreaming(chatReq)
+                            let chatStream = this.provider.chatStreaming(this.wireRequest(chatReq))
                             var aborted = false
                             while (!aborted) {
                                 if (cancelFlag.load()) {
@@ -815,23 +894,6 @@ public open class AgentRuntime {
                                 this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
                                 finished = true
                                 break
-                            }
-                            if (this.compactionEnabledFor()) {
-                                let cc = this.compactionConfig()
-                                let resolution = resolveCompactSpec(cc,
-                                    this.modelInfoInUse().info.contextWindow, this.maxOutputTokensInUse())
-                                match (resolution.spec) {
-                                    case Some(cSpec) =>
-                                        // 用量优先：Provider 报告的实际用量 > 0 时优先，本地估算兜底
-                                        let total = this.pressureTokens(assistantMsg, currentMessages)
-                                        if (total > cSpec.thresholdTokens) {
-                                            currentMessages = this.summarizeAndCompact(currentMessages,
-                                                cc, cSpec, total, actualModel, log)
-                                        }
-                                    // 配置算不出预算（窗口未知 / 留不出余量 / 保留不小于阈值）：
-                                    // 留痕一次并跳过**主动**压缩 —— 配置坏了不该让会话不可用
-                                    case None => this.warnCompactionSpecOnce(resolution.reason, log)
-                                }
                             }
                             this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
                             finished = true

@@ -167,16 +167,26 @@ func modelRegistry_defaultWindowIsConfigurable() {
 func compactionConfig_defaultTemplateRenders() {
     let cfg = CompactionConfig()
     let out = renderCompactionPrompt(cfg, "对话内容", None, 16384)
-    @Expect(out.contains("对话内容"), true)
-    @Expect(out.contains("16384"), true)
-    @Expect(out.contains("previous_summary"), false)
+    // 对话在前、指令在后（与 dsh 的顺序一致）
+    @Expect(out.contains("<conversation>\n对话内容\n</conversation>"), true)
+    // dsh 的检查点骨架：每节都在，一节不能少
+    for (section in ["## Primary Request and Intent", "## Key Technical Concepts", "## Files and Code",
+        "## Errors and Fixes", "## Pending Jobs", "## Current Work", "## Next Step", "## Critical Context"]) {
+        @Expect(out.contains(section), true)
+    }
+    // 空节写 "(none)"、不照抄上一份检查点这两条硬规则要在
+    @Expect(out.contains("(none)"), true)
+    @Expect(out.contains("上一份检查点"), true)
+    // 没有历史摘要时不渲染 previous_summary 段（规则文本里提到该标签是另一回事：
+    // 渲染出来的段一定以换行紧跟标签）
+    @Expect(out.contains("<previous_summary>\n"), false)
 }
 
 @Test
 func compactionConfig_previousSummaryConditional() {
     let cfg = CompactionConfig()
     let out = renderCompactionPrompt(cfg, "对话内容", Some("历史摘要"), 16384)
-    @Expect(out.contains("历史摘要"), true)
+    @Expect(out.contains("<previous_summary>\n历史摘要\n</previous_summary>"), true)
 }
 
 @Test
@@ -403,4 +413,102 @@ func lastUserIndex_noneWhenNoUserMessage() {
     let msgs = ArrayList<Message>()
     msgs.add(AssistantMessage(ContentList.ofText("a1"), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0))
     @Expect(lastUserIndex(msgs), -1)
+}
+
+// ---------- 工具结果修剪 ----------
+
+func repeatText(unit: String, times: Int64): String {
+    let sb = StringBuilder()
+    var i = 0
+    while (i < times) {
+        sb.append(unit)
+        i++
+    }
+    sb.toString()
+}
+
+@Test
+func pruneText_belowThresholdUntouched() {
+    let cfg = ToolResultPruneConfig()
+    let small = repeatText("abc", 10)   // 30 码点 < 8192
+    @Expect(pruneText(small, cfg), small)
+}
+
+@Test
+func pruneText_keepsHeadAndTailWithMarker() {
+    let cfg = ToolResultPruneConfig(true, 100, 40, 20)
+    let text = "H" + repeatText("m", 200) + "T"
+    let out = pruneText(text, cfg)
+    @Expect(out.contains(PRUNE_MARKER), true)
+    @Expect(out.startsWith("H" + repeatText("m", 39)), true)
+    @Expect(out.endsWith("T"), true)
+    // 修剪必须让文本变短
+    @Expect(Int64(out.toRuneArray().size) < Int64(text.toRuneArray().size), true)
+}
+
+@Test
+func pruneText_neverGrowsEvenWithBadConfig() {
+    // 头 + 标记 + 尾 > 阈值：自动收紧尾部，绝不比原文更短不了
+    let cfg = ToolResultPruneConfig(true, 50, 40, 40)
+    let text = repeatText("x", 200)
+    let out = pruneText(text, cfg)
+    @Expect(Int64(out.toRuneArray().size) <= 50, true)
+    @Expect(Int64(out.toRuneArray().size) < Int64(text.toRuneArray().size), true)
+}
+
+@Test
+func pruneText_countsCodePointsNotBytes() {
+    // 每个 emoji 都是多字节但只算一个码点：按码点切不会劈开它们
+    let cfg = ToolResultPruneConfig(true, 40, 4, 3)
+    let text = repeatText("🙂", 60)   // 60 码点 > 阈值 40
+    let out = pruneText(text, cfg)
+    var emojiCount: Int64 = 0
+    for (r in out.toRuneArray()) {
+        if (r == Rune(UInt32(0x1F642))) { emojiCount++ }
+    }
+    @Expect(emojiCount, 7)   // head 4 + tail 3，中间是标记
+}
+
+@Test
+func pruneToolResults_onlyOversizedTextBlocks() {
+    let cfg = ToolResultPruneConfig(true, 100, 40, 20)
+    let msgs = ArrayList<Message>()
+    msgs.add(UserMessage(ContentList.ofText("问"), 0))
+    msgs.add(ToolResultMessage("c1", "bash", ContentList.ofText(repeatText("y", 500)), false, 0))
+    msgs.add(ToolResultMessage("c2", "read_file", ContentList.ofText("短结果"), false, 0))
+
+    let (out, count) = pruneToolResults(msgs, cfg)
+    @Expect(count, Int64(1))
+    @Expect(out.size, 3)
+    // 原列表不动（只有发给模型的请求用修剪版，落库的历史保持原样）
+    match (msgs[1]) {
+        case tr: ToolResultMessage =>
+            @Expect(Int64(textOfMsg(tr).toRuneArray().size), Int64(500))
+        case _ => @Fail("expected tool result")
+    }
+    // 修剪版变短且带标记
+    match (out[1]) {
+        case tr: ToolResultMessage =>
+            @Expect(textOfMsg(tr).contains(PRUNE_MARKER), true)
+            @Expect(Int64(textOfMsg(tr).toRuneArray().size) < Int64(500), true)
+        case _ => @Fail("expected tool result")
+    }
+    // 小结果原样
+    match (out[2]) {
+        case tr: ToolResultMessage => @Expect(textOfMsg(tr), "短结果")
+        case _ => @Fail("expected small tool result")
+    }
+}
+
+@Test
+func pruneToolResults_disabledIsNoOp() {
+    let cfg = ToolResultPruneConfig(false, 100, 40, 20)
+    let msgs = ArrayList<Message>()
+    msgs.add(ToolResultMessage("c1", "bash", ContentList.ofText(repeatText("y", 500)), false, 0))
+    let (out, count) = pruneToolResults(msgs, cfg)
+    @Expect(count, Int64(0))
+    match (out[0]) {
+        case tr: ToolResultMessage => @Expect(Int64(textOfMsg(tr).toRuneArray().size), Int64(500))
+        case _ => @Fail("expected untouched tool result")
+    }
 }

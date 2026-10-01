@@ -103,6 +103,12 @@ compactionEnabled = true           # 开关（可选，默认 true）
 # retainTokens = 20000             # 绝对保留预算（与 retainRatio 互斥，给了就以它为准）
 # maxOverflowRetries = 1           # provider 报超窗后的最大恢复重试次数（0 = 关闭恢复）
 # summaryMaxTokens = 0             # 摘要子调用输出上限；0 = 跟随 headroomTokens
+
+# [agent.compaction.prune]         # 工具结果修剪（可选；不配 = 开启，阈值 8192 码点）
+# enabled = true
+# thresholdChars = 8192            # 合并文本超过这么多**码点**才修剪
+# headChars = 4096                 # 保留的开头码点数
+# tailChars = 1024                 # 保留的末尾码点数
 # summaryModel = "deepseek-chat"   # 摘要模型，缺省复用主模型
 # promptTemplate = "压缩以下对话：\n{{conversation}}"
 # outputSchema = { required = ["goal"], types = { goal = "string" } }
@@ -111,9 +117,16 @@ compactionEnabled = true           # 开关（可选，默认 true）
 - **三个不变量**：`W − O > 0`、`− B > 0`、`retain < threshold`。任一不成立就**不压**：
   日志留一条警告（每个原因一次），而**溢出恢复仍然可用** —— 配置坏了不该让会话不可用。
   小窗口部署要么调大窗口，要么把 `headroomTokens` 收小（默认 64k 是为大窗口模型留的余量）。
+- **触发点在请求派发前**：每回合发请求前量一次压力（provider 报的用量为锚 + 其后新增消息的估算），
+  越过阈值才处理 —— 回合结束后再压的话，本轮该发的请求早就发出去了。
+- **先修剪、后摘要**：先按 `[agent.compaction.prune]` 把超长工具结果换成"头 + 标记 + 尾"
+  （**不发模型调用**，只作用于发给模型的那一份，落库历史保持完整），修剪后回到阈值内就
+  **省掉摘要调用**；仍在阈值之上才做摘要 + 替换。
 - **溢出恢复**：provider 明确报"超上下文窗口"（`maximum context length` / `prompt is too long` 等）
   时，绕过阈值压掉最大的一段头部（只保最后一条用户消息起的内容，不拆散工具调用对），
   再用新历史重试同一请求，次数受 `maxOverflowRetries` 限制。
+- 默认摘要指令是 dsh 同款的 Markdown 检查点骨架（八个固定小节 + "空节写 (none)"/"不照抄上一份"
+  等硬规则），对话在前、指令在后；`promptTemplate` 可整段替换
 - 压缩摘要通过**独立子调用**生成（无 system/tools，不影响主对话缓存命中）
 - `promptTemplate` 支持 mustache 变量：`{{conversation}}` / `{{previous_summary}}` / `{{max_tokens}}` / `{{#previous_summary}}` 条件块
 - `outputSchema` 极简校验（required 必填 + types 类型断言），校验失败自动降级为占位摘要

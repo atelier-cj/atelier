@@ -1090,6 +1090,7 @@ public interface Hook {
 | 压缩触发阈值 | `min(W × 0.8, W − O − headroom)` | `[agent.compaction] thresholdRatio` / `headroomTokens` |
 | 压缩保留近期历史 | 消息预算的 16% | `retainRatio` / `retainTokens` |
 | 溢出恢复重试 | 1 次 | `maxOverflowRetries`（0 = 关闭） |
+| 工具结果修剪 | 8192 码点 → 头 4096 + 标记 + 尾 1024 | `[agent.compaction.prune]` |
 | 上下文窗口（未知模型） | 兜底 8192 并警告 | `[[provider.model]]` / `withModelContext(provider, model, n)` / `withDefaultContextWindow`（0 = 禁用压缩） |
 | 并发工具执行 | 根据 `ExecutionMode` | 串行/并行 |
 | 最大工具结果字符 | 2000（摘要场景） | 硬编码 |
