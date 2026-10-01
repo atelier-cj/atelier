@@ -67,6 +67,10 @@ let spec = HarnessSpec.default()
 let h = Harness.open(spec)
 ```
 
+> 上下文窗口两条路等价：配置文件里写 `[[model]]`（模型级）或 `[[agent]] contextWindow`
+> （本 agent 覆盖）；代码里就是上面的 `withModelContext` 与 `AgentConfig.contextWindow`。
+> 单个 agent 优先用后者 —— 它跟着配置走（进注册表、导出、子 agent 都在）。
+
 需要会话 id、事件流、取消、子 Agent 这些细粒度能力时，从**同一个装配束**下钻到运行时
 （没有第二套配置）：
 

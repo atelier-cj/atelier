@@ -85,15 +85,18 @@ public struct AgentConfigDTO <: JsonDeserializable<AgentConfigDTO> {
     public let maxTurns: Int64
     public let temperature: Float64
     public let mcpCooldownTurns: Int64
+    // 本 agent 的上下文窗口（token）；不传 = 用 [[model]] / 内置表 / 兜底
+    public let contextWindow: Option<Int64>
 
     public init(name: String, description: Option<String>, systemPrompt: String,
         model: String, provider: Option<String>, tools: ArrayList<String>,
         skills: ArrayList<String>, maxTurns: Int64, temperature: Float64,
-        mcpCooldownTurns: Int64) {
+        mcpCooldownTurns: Int64, contextWindow!: Option<Int64> = None) {
         this.name = name; this.description = description; this.systemPrompt = systemPrompt
         this.model = model; this.provider = provider; this.tools = tools
         this.skills = skills; this.maxTurns = maxTurns; this.temperature = temperature
         this.mcpCooldownTurns = mcpCooldownTurns
+        this.contextWindow = contextWindow
     }
 
     public static func fromJson(r: JsonReader): AgentConfigDTO {
@@ -101,6 +104,7 @@ public struct AgentConfigDTO <: JsonDeserializable<AgentConfigDTO> {
         var model = ""; var prov: Option<String> = None
         var tools = ArrayList<String>(); var skills = ArrayList<String>()
         var mt = Int64(20); var temp = Float64(0.7); var cooldown = Int64(0)
+        var ctxWindow: Option<Int64> = None
         r.startObject()
         while (r.peek() != EndObject) {
             match (r.readName()) {
@@ -114,11 +118,13 @@ public struct AgentConfigDTO <: JsonDeserializable<AgentConfigDTO> {
                 case "maxTurns" => mt = r.readValue<Int64>()
                 case "temperature" => temp = r.readValue<Float64>()
                 case "mcpCooldownTurns" => cooldown = r.readValue<Int64>()
+                case "contextWindow" => ctxWindow = r.readValue<Option<Int64>>()
                 case _ => r.skip()
             }
         }
         r.endObject()
-        AgentConfigDTO(name, desc, sp, model, prov, tools, skills, mt, temp, cooldown)
+        AgentConfigDTO(name, desc, sp, model, prov, tools, skills, mt, temp, cooldown,
+            contextWindow: ctxWindow)
     }
 }
 

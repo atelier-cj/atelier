@@ -200,7 +200,13 @@ public class HarnessSpec {
         HarnessSpec(this, models: m)
     }
 
-    /** 声明某个模型的上下文窗口（覆盖内置表；副本语义，不动共享表） */
+    /**
+     * 声明某个模型的上下文窗口（覆盖内置表；副本语义，不动共享表）。
+     *
+     * 这是**配置文件里 `[[model]]` 的代码对应物**（TOML 加载就是调它写进表里的）。
+     * 单个 agent 的窗口请优先写在 `AgentConfig.contextWindow` —— 它跟着配置走
+     * （进注册表、导出、子 agent 都在）；这张表用于「一个模型被多个 agent 共用」。
+     */
     public func withModelContext(model: String, contextWindow: Int64): HarnessSpec {
         HarnessSpec(this, models: this.models.merged(model, contextWindow))
     }
