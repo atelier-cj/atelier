@@ -6,6 +6,7 @@ import atelier.agent.*
 import atelier.provider.*
 import atelier.provider.EchoProvider
 import atelier.a2a.A2aBridge
+import atelier.config.*
 import a2a.*
 
 // atelier a2a [agent] [port]：以 A2A v1 Agent（HTTP 服务端）对外提供服务。
@@ -13,7 +14,8 @@ import a2a.*
 // 一个 contextId = 一段会话，会话映射与会话数据同目录（跨进程可续聊）。
 // workspace：工具工作目录（A2A 请求本身不带 cwd）。
 public func runA2a(agentNameArg: String, spec: HarnessSpec, sessionDir: String,
-    port: UInt16, workspace: String, host!: String = "127.0.0.1"): Unit {
+    port: UInt16, workspace: String, host!: String = "127.0.0.1",
+    a2aCfg!: TomlA2a = TomlA2a()): Unit {
     // agent 启动时选择：参数优先，未注册则回退 default（不存在则补建），与 acp 同规则
     let agentReg = spec.agents
     let agentName: String
@@ -59,8 +61,33 @@ public func runA2a(agentNameArg: String, spec: HarnessSpec, sessionDir: String,
     }
     let bridge = A2aBridge(spec, cfg, provider, mappingFile, workspace, agentName: agentName)
     let baseUrl = "http://${host}:${port}"
-    let server = A2aServer(bridge.agentCard(baseUrl, "0.1.12"), bridge,
-        options: ServerOptions.of(streaming: true, pushNotifications: false))
+    let card = bridge.agentCard(baseUrl, "0.1.12")
+    var options = ServerOptions.of(streaming: true, pushNotifications: false)
+
+    // 入站认证：[a2a].auth = true 时启用「Bearer 或 API Key」双支持。
+    // 声明要认证却没配 token 时直接拒绝启动 —— 否则会起一个 401 掉所有请求的服务，
+    // 这种现象从日志上极难定位。
+    if (a2aCfg.auth) {
+        let tokens = resolveA2aTokens(a2aCfg)
+        if (tokens.size == 0) {
+            eprintln("[atelier-a2a] auth enabled but no token: set [a2a].token in .atelier.toml " +
+                "or the ATELIER_A2A_TOKEN environment variable")
+            // 非 0 退出：启动失败必须让 systemd/容器编排看得见，否则会被当成正常退出。
+            exit(1)
+        }
+        let apiKeyHeader = resolveA2aApiKeyHeader(a2aCfg)
+        card.enableBearerAndApiKeyAuth(apiKeyHeader: apiKeyHeader)
+        options.authenticator = Some(StaticTokenAuthenticator(tokens, apiKeyHeader: apiKeyHeader))
+        options.apiKeyHeader = apiKeyHeader
+        try {
+            let err = getStdErr()
+            err.write(("[atelier-a2a] auth enabled: Bearer or " + apiKeyHeader +
+                " (" + tokens.size.toString() + " token)\n").toArray())
+            err.flush()
+        } catch (_) { () }
+    }
+
+    let server = A2aServer(card, bridge, options: options)
     try {
         let err = getStdErr()
         err.write(("[atelier-a2a] agent='" + agentName + "' ready: " + baseUrl +

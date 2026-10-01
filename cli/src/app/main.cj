@@ -125,7 +125,7 @@ main(): Int64 {
                 case Some(v) => v
                 case None => "."
             }
-            runA2a(a2aAgentName, spec, sessionDir, a2aPort, a2aWorkspace)
+            runA2a(a2aAgentName, spec, sessionDir, a2aPort, a2aWorkspace, a2aCfg: config.a2a)
 
         // 交互入口只有一个 TUI；"repl" 是历史命令名（早期另有行式 REPL，已移除）
         case "repl" | "tui" =>

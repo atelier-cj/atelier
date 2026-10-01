@@ -98,9 +98,52 @@ A2A 没有 ACP elicitation 那样的同步反向调用，因此走**任务级续
 - 任务状态在进程内（a2a-cj 的 `InMemoryTaskStore`），进程重启后 `tasks/get` 不再可见；
   会话映射与任务索引是持久化的，重启后同 `contextId` 的续聊仍可继续；
 - 同一 `contextId` 的任务串行执行：会话历史是单一序列，并发 run 会交错写入；
-- 服务端未做鉴权（无 `securitySchemes`）。
+- 服务端鉴权见「入站认证」：默认匿名，可开启 Bearer / API Key 静态 token；静态 token
+  无 scope 与过期语义，任务级鉴权（按调用方过滤 `ListTasks`、`AUTH_REQUIRED`）未做。
 
 
+## 入站认证
+
+默认是**匿名**形态（`[a2a].auth` 缺省 `false`），仅限本机/内网使用。开启后除公共
+Agent Card 外，所有请求都要带凭据。
+
+```toml
+# ~/.atelier.toml
+[a2a]
+auth = true
+token = "…"            # 留空则回退环境变量 ATELIER_A2A_TOKEN
+apiKeyHeader = ""      # 留空用默认 X-API-Key
+```
+
+```bash
+# 环境变量兜底（与模型名读 OPENAI_MODEL 同一惯例）
+export ATELIER_A2A_TOKEN=…
+cli.app a2a default 8931
+```
+
+两种凭据**任选其一**（对应卡片里两条 OR 安全要求）：
+
+```bash
+curl -H 'Authorization: Bearer <token>' …
+curl -H 'X-API-Key: <token>' …
+```
+
+行为约定：
+
+| 情形 | 结果 |
+|---|---|
+| `/.well-known/agent-card.json` | 匿名可读 —— 客户端必须先拿到卡片才知道该带哪种凭据 |
+| 其它端点缺凭据 / 凭据错误 | `401` + `WWW-Authenticate: Bearer realm="a2a", ApiKey header="X-API-Key"` |
+| `auth = true` 但 TOML 与 env 都没有 token | **拒绝启动并以退出码 1 结束**（否则会起一个 401 掉所有请求的服务，日志上极难定位） |
+
+token 是**不透明串，不要求 JWT**：A2A 不签发凭据，认证始终是带外的，协议只声明用哪种
+scheme。token 校验走恒定时间比较，避免时序侧信道。
+
+> ⚠️ 两个边界：① 当前监听是**明文 HTTP**，凭据会在信道上裸奔，生产必须前置 TLS 反代或
+> 限制在回环/内网；② 静态 token 无法表达 scope 与过期，且「任务级鉴权」（`AUTH_REQUIRED`
+> 状态、按调用方过滤 `ListTasks`）尚未实现 —— 认证只解决「能不能进」，还没解决「能看什么」。
+
+<!-- 协议一致性验证 -->
 ## 协议一致性验证
 
 本实现的服务端方向用官方一致性套件

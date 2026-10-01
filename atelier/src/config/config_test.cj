@@ -692,3 +692,57 @@ baseURL = "https://proxy.internal/v1"
 }
 
 
+
+
+// ===================== A2A 认证配置 =====================
+
+@Test
+public func tomlA2a_roundTripsThroughDataModel() {
+    let cfg = TomlA2a()
+    cfg.auth = true
+    cfg.token = "tok-1"
+    cfg.apiKeyHeader = "X-Custom-Key"
+
+    let back = TomlA2a.deserialize(cfg.serialize())
+    @Expect(back.auth, true)
+    @Expect(back.token, "tok-1")
+    @Expect(back.apiKeyHeader, "X-Custom-Key")
+}
+
+@Test
+public func tomlA2a_defaultsAreAnonymous() {
+    let cfg = TomlA2a()
+    @Expect(cfg.auth, false)
+    @Expect(cfg.token, "")
+    // 未配置时 [a2a] 段缺省即匿名形态
+    let config = TomlConfig()
+    @Expect(config.a2a.auth, false)
+}
+
+@Test
+public func resolveA2aTokens_prefersConfiguredToken() {
+    let cfg = TomlA2a()
+    cfg.auth = true
+    cfg.token = "tok-from-toml"
+
+    let m = resolveA2aTokens(cfg)
+    @Expect(m.size, 1)
+    @Expect(m.get("tok-from-toml"), Some("client"))
+}
+
+@Test
+public func resolveA2aTokens_singlePrincipalName() {
+    // 单 token 形态下 principal 固定为 "client"
+    let cfg = TomlA2a()
+    cfg.token = "abc"
+    let m = resolveA2aTokens(cfg)
+    @Expect(m.get("abc"), Some("client"))
+}
+
+@Test
+public func resolveA2aApiKeyHeader_fallsBackToDefault() {
+    let cfg = TomlA2a()
+    @Expect(resolveA2aApiKeyHeader(cfg), "X-API-Key")
+    cfg.apiKeyHeader = "X-My-Key"
+    @Expect(resolveA2aApiKeyHeader(cfg), "X-My-Key")
+}

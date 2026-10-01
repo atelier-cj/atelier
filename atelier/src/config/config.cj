@@ -57,12 +57,47 @@ public struct ServerConfig {
     }
 }
 
+/**
+ * `[a2a]` 段：A2A v1 Agent 服务端的入站认证。
+ *
+ * 默认 `auth = false` 为匿名形态，仅限本机/内网。开启后除公共 Agent Card
+ * （必须匿名可读，否则客户端拿不到 scheme 声明）外，所有请求都要带凭据：
+ * `Authorization: Bearer <token>` 或 `<apiKeyHeader>: <token>` 任一即可。
+ *
+ * token 是不透明串，不要求 JWT —— A2A 不签发凭据，认证始终是带外的。
+ */
+public class TomlA2a <: Serializable<TomlA2a> {
+    public var auth: Bool = false
+    /** 单 token（principal 固定为 "client"）；留空时回退环境变量 ATELIER_A2A_TOKEN。 */
+    public var token: String = ""
+    /** API Key 的头名；留空用默认 X-API-Key。 */
+    public var apiKeyHeader: String = ""
+    public init() {}
+
+    public func serialize(): DataModel {
+        DataModelStruct()
+            .add(field<Bool>("auth", this.auth))
+            .add(field<String>("token", this.token))
+            .add(field<String>("apiKeyHeader", this.apiKeyHeader))
+    }
+
+    public static func deserialize(dm: DataModel): TomlA2a {
+        let dms = match (dm) { case s: DataModelStruct => s; case _ => return TomlA2a() }
+        let r = TomlA2a()
+        match (dms.get("auth")) { case b: DataModelBool => r.auth = b.getValue(); case _ => () }
+        match (dms.get("token")) { case s: DataModelString => r.token = s.getValue(); case _ => () }
+        match (dms.get("apiKeyHeader")) { case s: DataModelString => r.apiKeyHeader = s.getValue(); case _ => () }
+        r
+    }
+}
+
 public class TomlConfig <: Serializable<TomlConfig> {
     public var agent: ArrayList<TomlAgent> = ArrayList()
     public var provider: ArrayList<TomlProvider> = ArrayList()
     public var server: TomlServer = TomlServer()
     public var logging: TomlLogging = TomlLogging()
     public var mcpServer: ArrayList<TomlMcpServer> = ArrayList()
+    public var a2a: TomlA2a = TomlA2a()
     public init() {}
 
     public func serialize(): DataModel {
@@ -72,6 +107,7 @@ public class TomlConfig <: Serializable<TomlConfig> {
             .add(field<TomlServer>("server", this.server))
             .add(field<TomlLogging>("logging", this.logging))
             .add(field<ArrayList<TomlMcpServer>>("mcpServer", this.mcpServer))
+            .add(field<TomlA2a>("a2a", this.a2a))
     }
 
     public static func deserialize(dm: DataModel): TomlConfig {
@@ -104,6 +140,10 @@ public class TomlConfig <: Serializable<TomlConfig> {
                 for (elem in seq.getItems()) {
                     r.mcpServer.add(TomlMcpServer.deserialize(elem))
                 }
+            case _ => ()
+        }
+        match (dms.get("a2a")) {
+            case dm: DataModelStruct => r.a2a = TomlA2a.deserialize(dm)
             case _ => ()
         }
         r
@@ -614,6 +654,28 @@ public func resolveModel(cfgModel: String): String {
     if (cfgModel != "") { cfgModel }
     else if (fromEnv != "") { fromEnv }
     else { "gpt-4o" }
+}
+
+/**
+ * A2A 访问 token 表：TOML 优先、环境变量兜底（`ATELIER_A2A_TOKEN`），
+ * 与模型名的 `OPENAI_MODEL` 兜底同一惯例。返回 token → principal 映射。
+ */
+public func resolveA2aTokens(cfg: TomlA2a): HashMap<String, String> {
+    let out = HashMap<String, String>()
+    if (cfg.token != "") {
+        out.add(cfg.token, "client")
+        return out
+    }
+    let fromEnv = getEnv("ATELIER_A2A_TOKEN", "")
+    if (fromEnv != "") {
+        out.add(fromEnv, "client")
+    }
+    out
+}
+
+/** API Key 头名：配置留空时用 a2a 包声明的默认值。 */
+public func resolveA2aApiKeyHeader(cfg: TomlA2a): String {
+    if (cfg.apiKeyHeader != "") { cfg.apiKeyHeader } else { "X-API-Key" }
 }
 
 func getEnv(key: String, def: String): String {
