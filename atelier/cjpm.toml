@@ -25,9 +25,8 @@ repository = "https://atomgit.com/ystyle/atelier"
 "ystyle::xisp" = "0.4.1"
 # TOML 配置装载（Agent/Provider 配置模型；下游宿主也用这套）
 "tomlcj" = "1.0.0"
-# A2A v1.0 协议层（a2a-cj 尚未发版，开发期用 path 依赖；发版前换回版本号）
-# 路径相对本 cjpm.toml 所在目录（worktree 的 atelier/ 成员目录）：四级上溯 = /home/ystyle/Projects/Cangjie
-"a2a" = { path = "../../../../a2a-cj" }
+# A2A v1.0 协议层（a2a-cj，中心仓 0.1.0）
+"a2a" = "0.1.0"
 
 [profile.test]
 filter = "-ProviderIntegrationTest.*"
