@@ -692,3 +692,90 @@ baseURL = "https://proxy.internal/v1"
 }
 
 
+
+
+// ===================== A2A 认证配置 =====================
+
+@Test
+public func tomlA2a_roundTripsThroughDataModel() {
+    let cfg = TomlA2a()
+    cfg.auth = true
+    cfg.token = "tok-1"
+    cfg.apiKeyHeader = "X-Custom-Key"
+
+    let back = TomlA2a.deserialize(cfg.serialize())
+    @Expect(back.auth, true)
+    @Expect(back.token, "tok-1")
+    @Expect(back.apiKeyHeader, "X-Custom-Key")
+}
+
+@Test
+public func tomlA2a_defaultsAreAnonymous() {
+    let cfg = TomlA2a()
+    @Expect(cfg.auth, false)
+    @Expect(cfg.token, "")
+    // 未配置时 [a2a] 段缺省即匿名形态
+    let config = TomlConfig()
+    @Expect(config.a2a.auth, false)
+}
+
+@Test
+public func resolveA2aTokens_prefersConfiguredToken() {
+    let cfg = TomlA2a()
+    cfg.auth = true
+    cfg.token = "tok-from-toml"
+
+    let m = resolveA2aTokens(cfg)
+    @Expect(m.size, 1)
+    @Expect(m.get("tok-from-toml"), Some("client"))
+}
+
+@Test
+public func resolveA2aTokens_singlePrincipalName() {
+    // 单 token 形态下 principal 固定为 "client"
+    let cfg = TomlA2a()
+    cfg.token = "abc"
+    let m = resolveA2aTokens(cfg)
+    @Expect(m.get("abc"), Some("client"))
+}
+
+@Test
+public func resolveA2aApiKeyHeader_fallsBackToDefault() {
+    let cfg = TomlA2a()
+    @Expect(resolveA2aApiKeyHeader(cfg), "X-API-Key")
+    cfg.apiKeyHeader = "X-My-Key"
+    @Expect(resolveA2aApiKeyHeader(cfg), "X-My-Key")
+}
+
+
+@Test
+public func tomlA2a_carriesListenAndPublicUrl() {
+    let cfg = TomlA2a()
+    cfg.listen = "0.0.0.0"
+    cfg.publicUrl = "https://agent.example.com"
+    let back = TomlA2a.deserialize(cfg.serialize())
+    @Expect(back.listen, "0.0.0.0")
+    @Expect(back.publicUrl, "https://agent.example.com")
+}
+
+@Test
+public func resolveA2aListen_prefersTomlThenFallback() {
+    let cfg = TomlA2a()
+    // 未配置：用调用方兜底（默认 127.0.0.1）
+    @Expect(resolveA2aListen(cfg, "127.0.0.1"), "127.0.0.1")
+    // LB 在别的容器/主机时需要 0.0.0.0
+    cfg.listen = "0.0.0.0"
+    @Expect(resolveA2aListen(cfg, "127.0.0.1"), "0.0.0.0")
+}
+
+@Test
+public func resolveA2aPublicUrl_trimsTrailingSlashOnly() {
+    let cfg = TomlA2a()
+    // 未配置对外地址：按监听地址兜底
+    @Expect(resolveA2aPublicUrl(cfg, "http://127.0.0.1:8931"), "http://127.0.0.1:8931")
+    // 尾斜杠会导致拼出 "//message:send"
+    cfg.publicUrl = "https://agent.example.com/"
+    @Expect(resolveA2aPublicUrl(cfg, "http://127.0.0.1:8931"), "https://agent.example.com")
+    cfg.publicUrl = "  https://a.example.com/base//  "
+    @Expect(resolveA2aPublicUrl(cfg, "x"), "https://a.example.com/base")
+}

@@ -106,7 +106,25 @@ main(): Int64 {
     match (cmd) {
         case "serve" =>
             let port = if (args.size > 2) { args[2] } else { serverCfg.port.toString() }
-            serve(handler, serverCfg.host, port)
+            // [a2a].mountToServer：把 A2A 与既有服务挂到同一个 HTTP 端口。
+            // 装配失败（例如声明了认证却没配 token）时退回纯 HTTP 服务，
+            // 不因为可选能力而阻断既有服务。
+            if (config.a2a.mountToServer) {
+                let a2aWorkspace = match (getVariable("PWD")) {
+                    case Some(v) => v
+                    case None => "."
+                }
+                match (assembleA2a(spec, sessionDir, a2aWorkspace, "", config.a2a,
+                                   parseA2aPort(port, 8931), host: serverCfg.host,
+                                   exitOnFailure: false)) {
+                    case Some(a) => serveWithA2a(handler, serverCfg.host, port, a)
+                    case None =>
+                        eprintln("[atelier] a2a mount skipped (assembly failed)")
+                        serve(handler, serverCfg.host, port)
+                }
+            } else {
+                serve(handler, serverCfg.host, port)
+            }
 
         case "acp" =>
             // ACP v1 Agent（stdio 服务端）：被 Zed/opencode 等 ACP Client 拉起；
@@ -115,6 +133,17 @@ main(): Int64 {
             let acpAgentName = if (args.size > 2) { args[2] } else { "" }
             let acpSessionDirOverride = if (args.size > 3) { args[3] } else { "" }
             runAcp(acpAgentName, spec, sessionDir, acpSessionDirOverride)
+
+        case "a2a" =>
+            // A2A v1 Agent（HTTP 服务端）：Agent Card 发现 + JSON-RPC 绑定 + SSE 流式；
+            // 第二参数 agent，第三参数端口（缺省 8931）；工作目录取当前目录
+            let a2aAgentName = if (args.size > 2) { args[2] } else { "" }
+            let a2aPort: UInt16 = if (args.size > 3) { parseA2aPort(args[3], 8931) } else { 8931 }
+            let a2aWorkspace = match (getVariable("PWD")) {
+                case Some(v) => v
+                case None => "."
+            }
+            runA2a(a2aAgentName, spec, sessionDir, a2aPort, a2aWorkspace, a2aCfg: config.a2a)
 
         // 交互入口只有一个 TUI；"repl" 是历史命令名（早期另有行式 REPL，已移除）
         case "repl" | "tui" =>
@@ -193,6 +222,7 @@ main(): Int64 {
             println("Usage:")
             println("  cli.app serve [port]          Start HTTP server")
             println("  cli.app acp [agent]           Serve as ACP v1 agent over stdio (agent picked at startup)")
+            println("  cli.app a2a [agent] [port]    Serve as A2A v1 agent over HTTP (Agent Card + SSE, default port 8931)")
             println("  cli.app tui [agent] [sid]     Start interactive TUI (alias: repl; resume session if sid given)")
             println("  cli.app run [agent] <prompt>  Run single prompt")
             println("")

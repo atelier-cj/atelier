@@ -17,6 +17,8 @@ server = "0.1.0"
 "jsonvalue" = "1.1.1"
 # 与核心库保持同一来源：核心库同样依赖 xisp 0.4.1（已发中心仓）
 "ystyle::xisp" = "0.4.1"
+# A2A v1 协议层（a2a-cj，中心仓 0.1.0）
+"a2a" = "0.1.0"
 "cjterm_stream" = "0.1.0"
 "pulldown4cj" = "0.1.0"
 

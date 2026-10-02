@@ -57,12 +57,71 @@ public struct ServerConfig {
     }
 }
 
+/**
+ * `[a2a]` 段：A2A v1 Agent 服务端的入站认证。
+ *
+ * 默认 `auth = false` 为匿名形态，仅限本机/内网。开启后除公共 Agent Card
+ * （必须匿名可读，否则客户端拿不到 scheme 声明）外，所有请求都要带凭据：
+ * `Authorization: Bearer <token>` 或 `<apiKeyHeader>: <token>` 任一即可。
+ *
+ * token 是不透明串，不要求 JWT —— A2A 不签发凭据，认证始终是带外的。
+ */
+public class TomlA2a <: Serializable<TomlA2a> {
+    public var auth: Bool = false
+    /** 单 token（principal 固定为 "client"）；留空时回退环境变量 ATELIER_A2A_TOKEN。 */
+    public var token: String = ""
+    /** API Key 的头名；留空用默认 X-API-Key。 */
+    public var apiKeyHeader: String = ""
+    /** 后端监听地址；留空用默认 127.0.0.1。LB 在别的容器/主机时需改成 0.0.0.0。 */
+    public var listen: String = ""
+    /**
+     * 对外可访问的基地址，写进 Agent Card 的 supportedInterfaces[].url。
+     *
+     * TLS 通常由 LB / 反向代理终止，此时后端是 http 而对外是 https —— 卡片必须发对外地址，
+     * 否则客户端拿到的是内网回环地址，根本连不上（规范也要求生产环境该字段为 absolute HTTPS）。
+     * 留空时回退环境变量 ATELIER_A2A_PUBLIC_URL，再留空则按监听地址拼 http://。
+     */
+    public var publicUrl: String = ""
+    /**
+     * 是否把 A2A 挂进 `atelier serve` 的 HTTP 服务（与 agent API / AG-UI 共用端口）。
+     *
+     * 默认 false：A2A 由 `atelier a2a` 独立起端口。共用端口时无需路径前缀 ——
+     * A2A 的路径族（`/`、`/tasks*`、`/message:*`、`/.well-known/agent-card.json`）
+     * 与既有服务（`/agent`、`/session`、`/ag-ui`、`/health`）没有交集。
+     */
+    public var mountToServer: Bool = false
+    public init() {}
+
+    public func serialize(): DataModel {
+        DataModelStruct()
+            .add(field<Bool>("auth", this.auth))
+            .add(field<String>("token", this.token))
+            .add(field<String>("apiKeyHeader", this.apiKeyHeader))
+            .add(field<String>("listen", this.listen))
+            .add(field<String>("publicUrl", this.publicUrl))
+            .add(field<Bool>("mountToServer", this.mountToServer))
+    }
+
+    public static func deserialize(dm: DataModel): TomlA2a {
+        let dms = match (dm) { case s: DataModelStruct => s; case _ => return TomlA2a() }
+        let r = TomlA2a()
+        match (dms.get("auth")) { case b: DataModelBool => r.auth = b.getValue(); case _ => () }
+        match (dms.get("token")) { case s: DataModelString => r.token = s.getValue(); case _ => () }
+        match (dms.get("apiKeyHeader")) { case s: DataModelString => r.apiKeyHeader = s.getValue(); case _ => () }
+        match (dms.get("listen")) { case s: DataModelString => r.listen = s.getValue(); case _ => () }
+        match (dms.get("publicUrl")) { case s: DataModelString => r.publicUrl = s.getValue(); case _ => () }
+        match (dms.get("mountToServer")) { case b: DataModelBool => r.mountToServer = b.getValue(); case _ => () }
+        r
+    }
+}
+
 public class TomlConfig <: Serializable<TomlConfig> {
     public var agent: ArrayList<TomlAgent> = ArrayList()
     public var provider: ArrayList<TomlProvider> = ArrayList()
     public var server: TomlServer = TomlServer()
     public var logging: TomlLogging = TomlLogging()
     public var mcpServer: ArrayList<TomlMcpServer> = ArrayList()
+    public var a2a: TomlA2a = TomlA2a()
     public init() {}
 
     public func serialize(): DataModel {
@@ -72,6 +131,7 @@ public class TomlConfig <: Serializable<TomlConfig> {
             .add(field<TomlServer>("server", this.server))
             .add(field<TomlLogging>("logging", this.logging))
             .add(field<ArrayList<TomlMcpServer>>("mcpServer", this.mcpServer))
+            .add(field<TomlA2a>("a2a", this.a2a))
     }
 
     public static func deserialize(dm: DataModel): TomlConfig {
@@ -104,6 +164,10 @@ public class TomlConfig <: Serializable<TomlConfig> {
                 for (elem in seq.getItems()) {
                     r.mcpServer.add(TomlMcpServer.deserialize(elem))
                 }
+            case _ => ()
+        }
+        match (dms.get("a2a")) {
+            case dm: DataModelStruct => r.a2a = TomlA2a.deserialize(dm)
             case _ => ()
         }
         r
@@ -614,6 +678,61 @@ public func resolveModel(cfgModel: String): String {
     if (cfgModel != "") { cfgModel }
     else if (fromEnv != "") { fromEnv }
     else { "gpt-4o" }
+}
+
+/**
+ * A2A 访问 token 表：TOML 优先、环境变量兜底（`ATELIER_A2A_TOKEN`），
+ * 与模型名的 `OPENAI_MODEL` 兜底同一惯例。返回 token → principal 映射。
+ */
+public func resolveA2aTokens(cfg: TomlA2a): HashMap<String, String> {
+    let out = HashMap<String, String>()
+    if (cfg.token != "") {
+        out.add(cfg.token, "client")
+        return out
+    }
+    let fromEnv = getEnv("ATELIER_A2A_TOKEN", "")
+    if (fromEnv != "") {
+        out.add(fromEnv, "client")
+    }
+    out
+}
+
+/** API Key 头名：配置留空时用 a2a 包声明的默认值。 */
+public func resolveA2aApiKeyHeader(cfg: TomlA2a): String {
+    if (cfg.apiKeyHeader != "") { cfg.apiKeyHeader } else { "X-API-Key" }
+}
+
+/**
+ * 后端监听地址：TOML → 环境变量 ATELIER_A2A_LISTEN → 调用方兜底。
+ * LB 与后端不同容器/主机时需要 0.0.0.0。
+ */
+public func resolveA2aListen(cfg: TomlA2a, fallback: String): String {
+    if (cfg.listen != "") { return cfg.listen }
+    let fromEnv = getEnv("ATELIER_A2A_LISTEN", "")
+    if (fromEnv != "") { return fromEnv }
+    fallback
+}
+
+/**
+ * 写进 Agent Card 的对外基地址：TOML → 环境变量 ATELIER_A2A_PUBLIC_URL → 按监听地址兜底。
+ *
+ * LB 终止 TLS 时这里必须填对外地址（如 https://agent.example.com），否则卡片发的是
+ * 内网回环地址，客户端连不上。
+ */
+public func resolveA2aPublicUrl(cfg: TomlA2a, fallback: String): String {
+    if (cfg.publicUrl != "") { return trimTrailingSlash(cfg.publicUrl) }
+    let fromEnv = getEnv("ATELIER_A2A_PUBLIC_URL", "")
+    if (fromEnv != "") { return trimTrailingSlash(fromEnv) }
+    trimTrailingSlash(fallback)
+}
+
+// 基地址末尾的 "/" 会让拼接出的路径出现双斜杠（"/base//message:send"）。
+func trimTrailingSlash(v: String): String {
+    var out = v.trimAscii()
+    while (out.size > 0 && out.endsWith("/")) {
+        out = out[0..out.size - 1]
+    }
+    out
 }
 
 func getEnv(key: String, def: String): String {

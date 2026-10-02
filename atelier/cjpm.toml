@@ -25,6 +25,8 @@ repository = "https://atomgit.com/ystyle/atelier"
 "ystyle::xisp" = "0.4.1"
 # TOML 配置装载（Agent/Provider 配置模型；下游宿主也用这套）
 "tomlcj" = "1.0.0"
+# A2A v1.0 协议层（a2a-cj，中心仓 0.1.0）
+"a2a" = "0.1.0"
 
 [profile.test]
 filter = "-ProviderIntegrationTest.*"
