@@ -72,6 +72,16 @@ public class TomlA2a <: Serializable<TomlA2a> {
     public var token: String = ""
     /** API Key 的头名；留空用默认 X-API-Key。 */
     public var apiKeyHeader: String = ""
+    /** 后端监听地址；留空用默认 127.0.0.1。LB 在别的容器/主机时需改成 0.0.0.0。 */
+    public var listen: String = ""
+    /**
+     * 对外可访问的基地址，写进 Agent Card 的 supportedInterfaces[].url。
+     *
+     * TLS 通常由 LB / 反向代理终止，此时后端是 http 而对外是 https —— 卡片必须发对外地址，
+     * 否则客户端拿到的是内网回环地址，根本连不上（规范也要求生产环境该字段为 absolute HTTPS）。
+     * 留空时回退环境变量 ATELIER_A2A_PUBLIC_URL，再留空则按监听地址拼 http://。
+     */
+    public var publicUrl: String = ""
     public init() {}
 
     public func serialize(): DataModel {
@@ -79,6 +89,8 @@ public class TomlA2a <: Serializable<TomlA2a> {
             .add(field<Bool>("auth", this.auth))
             .add(field<String>("token", this.token))
             .add(field<String>("apiKeyHeader", this.apiKeyHeader))
+            .add(field<String>("listen", this.listen))
+            .add(field<String>("publicUrl", this.publicUrl))
     }
 
     public static func deserialize(dm: DataModel): TomlA2a {
@@ -87,6 +99,8 @@ public class TomlA2a <: Serializable<TomlA2a> {
         match (dms.get("auth")) { case b: DataModelBool => r.auth = b.getValue(); case _ => () }
         match (dms.get("token")) { case s: DataModelString => r.token = s.getValue(); case _ => () }
         match (dms.get("apiKeyHeader")) { case s: DataModelString => r.apiKeyHeader = s.getValue(); case _ => () }
+        match (dms.get("listen")) { case s: DataModelString => r.listen = s.getValue(); case _ => () }
+        match (dms.get("publicUrl")) { case s: DataModelString => r.publicUrl = s.getValue(); case _ => () }
         r
     }
 }
@@ -676,6 +690,39 @@ public func resolveA2aTokens(cfg: TomlA2a): HashMap<String, String> {
 /** API Key 头名：配置留空时用 a2a 包声明的默认值。 */
 public func resolveA2aApiKeyHeader(cfg: TomlA2a): String {
     if (cfg.apiKeyHeader != "") { cfg.apiKeyHeader } else { "X-API-Key" }
+}
+
+/**
+ * 后端监听地址：TOML → 环境变量 ATELIER_A2A_LISTEN → 调用方兜底。
+ * LB 与后端不同容器/主机时需要 0.0.0.0。
+ */
+public func resolveA2aListen(cfg: TomlA2a, fallback: String): String {
+    if (cfg.listen != "") { return cfg.listen }
+    let fromEnv = getEnv("ATELIER_A2A_LISTEN", "")
+    if (fromEnv != "") { return fromEnv }
+    fallback
+}
+
+/**
+ * 写进 Agent Card 的对外基地址：TOML → 环境变量 ATELIER_A2A_PUBLIC_URL → 按监听地址兜底。
+ *
+ * LB 终止 TLS 时这里必须填对外地址（如 https://agent.example.com），否则卡片发的是
+ * 内网回环地址，客户端连不上。
+ */
+public func resolveA2aPublicUrl(cfg: TomlA2a, fallback: String): String {
+    if (cfg.publicUrl != "") { return trimTrailingSlash(cfg.publicUrl) }
+    let fromEnv = getEnv("ATELIER_A2A_PUBLIC_URL", "")
+    if (fromEnv != "") { return trimTrailingSlash(fromEnv) }
+    trimTrailingSlash(fallback)
+}
+
+// 基地址末尾的 "/" 会让拼接出的路径出现双斜杠（"/base//message:send"）。
+func trimTrailingSlash(v: String): String {
+    var out = v.trimAscii()
+    while (out.size > 0 && out.endsWith("/")) {
+        out = out[0..out.size - 1]
+    }
+    out
 }
 
 func getEnv(key: String, def: String): String {

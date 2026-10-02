@@ -144,6 +144,46 @@ scheme。token 校验走恒定时间比较，避免时序侧信道。
 > 状态、按调用方过滤 `ListTasks`）尚未实现 —— 认证只解决「能不能进」，还没解决「能看什么」。
 
 <!-- 协议一致性验证 -->
+## 部署在 LB / 反向代理后面
+
+TLS 交给 LB 或反向代理终止、后端只监听内网，这是推荐形态（证书轮换、密码套件、
+可观测性都收敛在一层，应用不必自己管 TLS）。
+
+```toml
+[a2a]
+listen = "127.0.0.1"                      # 后端只监听回环；LB 在别的容器/主机时用 0.0.0.0
+publicUrl = "https://agent.example.com"   # 卡片发布给客户端的地址
+```
+
+环境变量可覆盖：`ATELIER_A2A_LISTEN`、`ATELIER_A2A_PUBLIC_URL`。
+
+**`publicUrl` 不是可选项。** Agent Card 的 `supportedInterfaces[].url` 是客户端**真正去连**的
+地址（规范要求生产环境为 absolute HTTPS）。留空时它按监听地址拼成 `http://127.0.0.1:8931`，
+客户端拿到后连的是它自己的回环 —— 必然失败。
+
+nginx 示例：
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:8931;
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_read_timeout 3600s;   # SSE 是长连接，别被默认 60s 掐断
+}
+```
+
+**SSE 别被缓冲**：nginx 默认缓冲响应，流式事件会被攒着不发（表现为客户端长时间收不到
+事件）。服务端已为每个 SSE 响应带上 `X-Accel-Buffering: no`，nginx 会据此对该响应关闭
+缓冲；若你的代理不认这个头，再显式加 `proxy_buffering off;`。
+
+其它要点：
+
+- 健康检查可直接探 `/.well-known/agent-card.json`（开启认证后它仍匿名可读）；
+- LB → 后端这一段是明文（回环/内网）；跨不可信网络时用 mTLS 或网络隔离；
+- 将来做按调用方限流/鉴权时，`X-Forwarded-For` 的信任边界要明确（只允许 LB 设置它）。
+
 ## 协议一致性验证
 
 本实现的服务端方向用官方一致性套件

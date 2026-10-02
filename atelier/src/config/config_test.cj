@@ -746,3 +746,36 @@ public func resolveA2aApiKeyHeader_fallsBackToDefault() {
     cfg.apiKeyHeader = "X-My-Key"
     @Expect(resolveA2aApiKeyHeader(cfg), "X-My-Key")
 }
+
+
+@Test
+public func tomlA2a_carriesListenAndPublicUrl() {
+    let cfg = TomlA2a()
+    cfg.listen = "0.0.0.0"
+    cfg.publicUrl = "https://agent.example.com"
+    let back = TomlA2a.deserialize(cfg.serialize())
+    @Expect(back.listen, "0.0.0.0")
+    @Expect(back.publicUrl, "https://agent.example.com")
+}
+
+@Test
+public func resolveA2aListen_prefersTomlThenFallback() {
+    let cfg = TomlA2a()
+    // 未配置：用调用方兜底（默认 127.0.0.1）
+    @Expect(resolveA2aListen(cfg, "127.0.0.1"), "127.0.0.1")
+    // LB 在别的容器/主机时需要 0.0.0.0
+    cfg.listen = "0.0.0.0"
+    @Expect(resolveA2aListen(cfg, "127.0.0.1"), "0.0.0.0")
+}
+
+@Test
+public func resolveA2aPublicUrl_trimsTrailingSlashOnly() {
+    let cfg = TomlA2a()
+    // 未配置对外地址：按监听地址兜底
+    @Expect(resolveA2aPublicUrl(cfg, "http://127.0.0.1:8931"), "http://127.0.0.1:8931")
+    // 尾斜杠会导致拼出 "//message:send"
+    cfg.publicUrl = "https://agent.example.com/"
+    @Expect(resolveA2aPublicUrl(cfg, "http://127.0.0.1:8931"), "https://agent.example.com")
+    cfg.publicUrl = "  https://a.example.com/base//  "
+    @Expect(resolveA2aPublicUrl(cfg, "x"), "https://a.example.com/base")
+}

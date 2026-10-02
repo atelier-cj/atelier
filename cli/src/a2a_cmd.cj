@@ -60,7 +60,10 @@ public func runA2a(agentNameArg: String, spec: HarnessSpec, sessionDir: String,
         "a2a-sessions.json"
     }
     let bridge = A2aBridge(spec, cfg, provider, mappingFile, workspace, agentName: agentName)
-    let baseUrl = "http://${host}:${port}"
+    // 监听地址与对外地址是两个概念：TLS 通常由 LB/反向代理终止，后端只监听内网，
+    // 而卡片必须发布客户端真正连得到的地址（否则发出去的是内网回环地址）。
+    let listen = resolveA2aListen(a2aCfg, host)
+    let baseUrl = resolveA2aPublicUrl(a2aCfg, "http://${listen}:${port}")
     let card = bridge.agentCard(baseUrl, "0.1.12")
     var options = ServerOptions.of(streaming: true, pushNotifications: false)
 
@@ -90,11 +93,12 @@ public func runA2a(agentNameArg: String, spec: HarnessSpec, sessionDir: String,
     let server = A2aServer(card, bridge, options: options)
     try {
         let err = getStdErr()
-        err.write(("[atelier-a2a] agent='" + agentName + "' ready: " + baseUrl +
+        err.write(("[atelier-a2a] agent='" + agentName + "' ready: listening on " + listen +
+            ":" + port.toString() + ", advertising " + baseUrl +
             " (card: " + baseUrl + AgentCardWellKnownPath + ")\n").toArray())
         err.flush()
     } catch (_) { () }
-    server.serve(host, port)
+    server.serve(listen, port)
 }
 
 // 命令行端口解析：非法输入回落到默认端口（命令行用法错误不该让服务静默起在别处）
