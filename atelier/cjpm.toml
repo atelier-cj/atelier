@@ -23,6 +23,8 @@ repository = "https://atomgit.com/ystyle/atelier"
 "acp" = "0.2.6"
 # PTC 程序执行引擎（中断检查点 / 纯函数子集 / 严格解析由 xisp 0.4.1 提供）
 "ystyle::xisp" = "0.5.0"
+# 编译期读取 cjpm.toml 的版本号（产品版本由 cjpm ws 物化到本成员）
+"cjpminfo" = "1.2.1"
 # TOML 配置装载（Agent/Provider 配置模型；下游宿主也用这套）
 "tomlcj" = "1.0.0"
 # A2A v1.0 协议层（a2a-cj，中心仓 0.1.0）

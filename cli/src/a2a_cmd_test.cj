@@ -1,5 +1,7 @@
 package cli
 
+import atelier.a2a.AtelierVersion
+
 // 命令行端口解析：合法值原样，非法/越界回落到缺省端口
 @Test
 func a2aCmd_parsePort() {
@@ -18,8 +20,8 @@ func a2aCmd_parsePort() {
 @Test
 func atelierA2aVersion_comesFromManifestNotSource() {
     // 非兜底值 —— 只有宏真的读到了清单才会成立
-    @Expect(AtelierA2aVersion != "0.0.0", true)
-    @Expect(AtelierA2aVersion.size > 0, true)
+    @Expect(AtelierVersion != "0.0.0", true)
+    @Expect(AtelierVersion.size > 0, true)
     // 形如 x.y.z
-    @Expect(AtelierA2aVersion.contains("."), true)
+    @Expect(AtelierVersion.contains("."), true)
 }

@@ -6,21 +6,15 @@ import std.fs.{Directory, Path, exists}
 import atelier.agent.*
 import atelier.provider.*
 import atelier.provider.EchoProvider
-import atelier.a2a.A2aBridge
+import atelier.a2a.{A2aBridge, AtelierVersion}
 import server.{AtelierHttpHandler, MountedDistributor}
 import stdx.net.http.ServerBuilder
 import atelier.config.*
 import a2a.*
-import cjpminfo.*
 
 // atelier a2a [agent] [port]：以 A2A v1 Agent（HTTP 服务端）对外提供服务。
 // Agent Card 由 agent 配置 + 技能注册表生成，声明 JSON-RPC 绑定与流式能力；
 // 一个 contextId = 一段会话，会话映射与会话数据同目录（跨进程可续聊）。
-// 产品版本：写进 Agent Card 的 version 字段。
-// 编译期由 cjpminfo 从「编译该源码的包清单」读取（即 cli/cjpm.toml 的 package.version），
-// 因此 cjpm ws bump/sync 物化版本时自动跟进，不需要在源码里手工同步常量。
-public let AtelierA2aVersion: String = @ModuleVer("0.0.0")
-
 // workspace：工具工作目录（A2A 请求本身不带 cwd）。
 /** A2A 服务装配结果（不启动监听），供独立启动与「挂进 serve」两条路径共用。 */
 public class A2aAssembly {
@@ -108,7 +102,7 @@ public func assembleA2a(spec: HarnessSpec, sessionDir: String, workspace: String
     // 声明后客户端可用 CreateTaskPushNotificationConfig 或消息内联配置登记 webhook，
     // 长任务的状态变化会主动推送，不必挂在流上等。
     let bindings = ArrayList<String>([BindingJsonRpc, BindingHttpJson])
-    let card = bridge.agentCard(baseUrl, AtelierA2aVersion,
+    let card = bridge.agentCard(baseUrl, AtelierVersion,
         bindings: bindings, streaming: true, pushNotifications: true)
     var options = ServerOptions.of(streaming: true, pushNotifications: true)
 

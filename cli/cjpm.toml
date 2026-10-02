@@ -21,8 +21,6 @@ server = "0.1.0"
 "ystyle::xisp_terminal" = "0.5.0"
 # A2A v1 协议层（a2a-cj，中心仓 0.1.0）
 "a2a" = "0.1.0"
-# 编译期读取 cjpm.toml 元数据（版本号等），避免源码里手工维护版本常量
-"cjpminfo" = "1.2.1"
 "cjterm_stream" = "0.1.0"
 "pulldown4cj" = "0.1.0"
 
