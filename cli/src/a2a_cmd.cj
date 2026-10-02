@@ -18,7 +18,7 @@ import a2a.*
 // 产品版本：写进 Agent Card 的 version 字段。
 // 与 workspace.toml 的 [workspace.package].version 同步 —— 发版时一并更新（两者不一致会让
 // 卡片对外报出与实际产物不符的版本）。
-public const AtelierA2aVersion: String = "0.1.12"
+public const AtelierA2aVersion: String = "0.1.13"
 
 // workspace：工具工作目录（A2A 请求本身不带 cwd）。
 /** A2A 服务装配结果（不启动监听），供独立启动与「挂进 serve」两条路径共用。 */
