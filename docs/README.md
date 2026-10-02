@@ -41,8 +41,9 @@
 | 文档 | 说明 |
 |------|------|
 | [HTTP API](http-api.md) | 全部端点 + curl 示例 |
-| [CLI 参考](cli.md) | serve / tui / run / acp 子命令 + 斜杠命令 |
+| [CLI 参考](cli.md) | serve / tui / run / acp / a2a 子命令 + 斜杠命令 |
 | [ACP 接入](acp.md) | ACP v1 Agent 侧：能力矩阵、elicitation 提问、接入示例、Session Config Options |
+| [A2A 接入](a2a.md) | A2A v1 双向：服务端能力矩阵、概念映射、流式产物语义、远端子 Agent、部署 |
 
 ## 架构
 

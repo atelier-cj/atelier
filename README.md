@@ -8,6 +8,10 @@ Atelier 是一个纯仓颉实现的 Agent Harness —— 把模型变成 Agent �
 
 - **开箱即用**：库 + HTTP 服务 + CLI 三种形态
 - **ACP 兼容**：`atelier acp` 以 ACP v1 Agent 身份被 Zed/opencode 等宿主拉起（stdio）
+- **A2A 双向**：`atelier a2a` 把 Agent 暴露为 A2A v1 Agent —— JSON-RPC 与 HTTP+JSON 双绑定、
+  SSE 流式、推送通知、Bearer/API Key 认证、按调用方隔离任务可见性；也可用
+  `[a2a].mountToServer` 挂进 `serve`，与既有 HTTP 服务共用一个端口。反向则把**远端** A2A Agent
+  接入子 Agent 体系（`remote_a2a_subagent`），父侧 `subagent_*` 工具无需改动即可驱动它
 - **运行时动态**：Agent 在运行时通过 TOML 或代码定义，无需编译
 - **多模型**：OpenAI / Anthropic / Ollama 三种 Provider，覆盖绝大多数模型
 - **MCP 工具**：通过 `ystyle::mcp` 接入任意 MCP 服务器（stdio/Streamable HTTP）
@@ -176,8 +180,9 @@ command = "npx @playwright/mcp"
 | [信任闸门](docs/trust.md) | 权限控制 |
 | [Skill](docs/skills.md) | 声明式技能注入 |
 | [HTTP API](docs/http-api.md) | 端点参考 + curl 示例 |
-| [CLI 参考](docs/cli.md) | serve/tui/run/acp |
+| [CLI 参考](docs/cli.md) | serve/tui/run/acp/a2a |
 | [ACP 接入](docs/acp.md) | ACP v1 Agent 侧：能力矩阵、接入示例、config options |
+| [A2A 接入](docs/a2a.md) | A2A v1 双向：能力矩阵、概念映射、远端子 Agent、部署（LB/认证/共用端口） |
 | [架构设计](docs/design.md) | 总体设计文档 |
 
 ## 开发

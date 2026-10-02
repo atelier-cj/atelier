@@ -300,3 +300,19 @@ let config = AgentConfig.default()
 ```
 
 所有字段使用代码默认值，适用于快速测试。
+
+## `[a2a]` 段
+
+A2A v1 服务端配置（`atelier a2a`，或 `mountToServer` 挂进 `serve` 时生效）。
+
+```toml
+[a2a]
+auth = true                                   # 开启 Bearer / API Key 认证
+token = "..."                                 # 静态 token（也可用 ATELIER_A2A_TOKEN）
+apiKeyHeader = "X-API-Key"
+listen = "127.0.0.1"                          # 后端监听；LB 在别的容器时用 0.0.0.0
+publicUrl = "https://agent.example.com"       # 卡片发布的对外地址（LB 终止 TLS 时必填）
+mountToServer = false                         # 挂进 serve，与既有 HTTP 服务共用端口
+```
+
+字段说明与部署要点见《[A2A 接入](a2a.md)》；CLI 用法见《[CLI 参考](cli.md)》。

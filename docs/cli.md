@@ -12,6 +12,7 @@ atelier <command> [args...]
 | `tui [agent] [sid]` | 交互式 TUI（历史命令名 `repl` 等价） |
 | `run [agent] <prompt>` | 单次执行 |
 | `acp [agent]` | 作为 ACP v1 Agent 跑在 stdio 上（见 [acp.md](acp.md)） |
+| `a2a [agent] [port]` | 作为 A2A v1 Agent 提供 HTTP 服务（见 [a2a.md](a2a.md)） |
 
 ## serve
 
@@ -147,6 +148,38 @@ name = "default"
 model = "gpt-4o"
 tools = ["read_file", "write_file", "edit_file", "bash", "grep", "glob", "todo"]
 ```
+
+## a2a
+
+以 A2A v1 Agent 身份提供 HTTP 服务。默认独立监听一个端口；也可用
+`[a2a].mountToServer = true` 挂进 `serve`，与既有 HTTP 服务共用端口。
+
+```bash
+atelier a2a                  # 默认 agent + 默认端口
+atelier a2a default 8931     # 指定 agent 与端口
+```
+
+启动后对外暴露：
+
+| 路径 | 说明 |
+|------|------|
+| `/.well-known/agent-card.json` | Agent Card（匿名可读，客户端据此选绑定与凭据类型） |
+| `POST /` | JSON-RPC 绑定 |
+| `POST /message:send`、`GET /tasks/{id}` 等 | HTTP+JSON 绑定 |
+
+`[a2a]` 配置段：
+
+| 键 | 默认 | 说明 |
+|------|------|------|
+| `auth` | `false` | 开启 Bearer / API Key 认证 |
+| `token` | — | 静态 token（回退环境变量 `ATELIER_A2A_TOKEN`） |
+| `apiKeyHeader` | `X-API-Key` | API Key 头名 |
+| `listen` | `127.0.0.1` | 监听地址；LB 在别的容器/主机时用 `0.0.0.0` |
+| `publicUrl` | 按 `listen` 拼 | 写进卡片的**对外**地址；由 LB 终止 TLS 时必填 |
+| `mountToServer` | `false` | 挂进 `serve` 共用端口 |
+
+详细说明（能力矩阵、概念映射、远端子 Agent、LB 部署与 SSE 注意事项）见
+《[A2A 接入](a2a.md)》。
 
 ## 配置文件
 
