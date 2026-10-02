@@ -69,9 +69,11 @@ public class A2aBridge <: A2aExecutor {
     // 由 atelier 配置生成 Agent Card（宿主起服务时用）
     public func agentCard(baseUrl: String, version: String,
         bindings!: ArrayList<String> = ArrayList<String>([BindingJsonRpc]),
-        streaming!: Bool = true): AgentCard {
+        streaming!: Bool = true,
+        pushNotifications!: Bool = false): AgentCard {
         agentCardFromConfig(this.baseConfig, this.spec, baseUrl, version,
-            name: this.agentName, bindings: bindings, streaming: streaming)
+            name: this.agentName, bindings: bindings, streaming: streaming,
+            pushNotifications: pushNotifications)
     }
 
     // 会话映射管理器（宿主做 tasks/list、会话清理时用）
@@ -297,7 +299,8 @@ func errorMessage(ctx: RequestContext, detail: String): Message {
 public func agentCardFromConfig(cfg: AgentConfig, spec: HarnessSpec, baseUrl: String,
     version: String, name!: String = "",
     bindings!: ArrayList<String> = ArrayList<String>([BindingJsonRpc]),
-    streaming!: Bool = true): AgentCard {
+    streaming!: Bool = true,
+    pushNotifications!: Bool = false): AgentCard {
     // 卡片 name 是必填非空字段：配置没写名字时用启动时选定的 agent 名兜底
     let cardName = if (cfg.name != "") { cfg.name } else if (name != "") { name } else { "atelier" }
     let skills = ArrayList<AgentSkill>()
@@ -319,5 +322,6 @@ public func agentCardFromConfig(cfg: AgentConfig, spec: HarnessSpec, baseUrl: St
         case None => "atelier agent '${cardName}'"
     }
     buildAgentCard(cardName, description, version, baseUrl,
-        bindings: bindings, streaming: streaming, skills: skills)
+        bindings: bindings, streaming: streaming, pushNotifications: pushNotifications,
+        skills: skills)
 }

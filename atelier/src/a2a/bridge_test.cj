@@ -304,3 +304,36 @@ func a2aBridge_agentCardFallsBackToAgentName() {
     let bare = agentCardFromConfig(cfg, spec, "http://x", "1.0.0")
     @Expect(bare.name, "atelier")
 }
+
+
+// 能力声明必须与 ServerOptions 一致：默认不开推送，显式开启才声明 ——
+// 卡片是对外承诺，「声明了做不到」比不声明更糟。
+@Test
+func a2aBridge_agentCardPushNotificationIsOptIn() {
+    let spec = a2aTestSpec(ArrayList<String>())
+    let cfg = a2aTestConfig(ArrayList<String>())
+
+    let off = agentCardFromConfig(cfg, spec, "http://127.0.0.1:9999", "0.1.12")
+    @Expect(off.capabilities.pushNotifications, false)
+
+    let on = agentCardFromConfig(cfg, spec, "http://127.0.0.1:9999", "0.1.12",
+        pushNotifications: true)
+    @Expect(on.capabilities.pushNotifications, true)
+}
+
+// 多绑定：supportedInterfaces 的声明顺序 = 客户端的选择偏好顺序。
+// 两种绑定共用一个地址（同端口按绑定分流），客户端换绑定不必换 url。
+@Test
+func a2aBridge_agentCardDeclaresBothBindingsInOrder() {
+    let spec = a2aTestSpec(ArrayList<String>())
+    let cfg = a2aTestConfig(ArrayList<String>())
+    let bindings = ArrayList<String>([BindingJsonRpc, BindingHttpJson])
+
+    let card = agentCardFromConfig(cfg, spec, "http://127.0.0.1:9999", "0.1.12",
+        bindings: bindings, pushNotifications: true)
+
+    @Expect(card.supportedInterfaces.size, 2)
+    @Expect(card.supportedInterfaces[0].protocolBinding, BindingJsonRpc)
+    @Expect(card.supportedInterfaces[1].protocolBinding, BindingHttpJson)
+    @Expect(card.supportedInterfaces[1].url, "http://127.0.0.1:9999")
+}

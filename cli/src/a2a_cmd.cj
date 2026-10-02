@@ -15,6 +15,11 @@ import a2a.*
 // atelier a2a [agent] [port]：以 A2A v1 Agent（HTTP 服务端）对外提供服务。
 // Agent Card 由 agent 配置 + 技能注册表生成，声明 JSON-RPC 绑定与流式能力；
 // 一个 contextId = 一段会话，会话映射与会话数据同目录（跨进程可续聊）。
+// 产品版本：写进 Agent Card 的 version 字段。
+// 与 workspace.toml 的 [workspace.package].version 同步 —— 发版时一并更新（两者不一致会让
+// 卡片对外报出与实际产物不符的版本）。
+public const AtelierA2aVersion: String = "0.1.12"
+
 // workspace：工具工作目录（A2A 请求本身不带 cwd）。
 /** A2A 服务装配结果（不启动监听），供独立启动与「挂进 serve」两条路径共用。 */
 public class A2aAssembly {
@@ -97,8 +102,14 @@ public func assembleA2a(spec: HarnessSpec, sessionDir: String, workspace: String
     // 而卡片必须发布客户端真正连得到的地址（否则发出去的是内网回环地址）。
     let listen = resolveA2aListen(a2aCfg, host)
     let baseUrl = resolveA2aPublicUrl(a2aCfg, "http://${listen}:${port}")
-    let card = bridge.agentCard(baseUrl, "0.1.12")
-    var options = ServerOptions.of(streaming: true, pushNotifications: false)
+    // 两种绑定都声明：客户端按 supportedInterfaces 的偏好顺序自选（JSON-RPC 在前）。
+    // pushNotifications 一并打开 —— 协议层已实现投递（裸 StreamResponse + 鉴权头 + 重试），
+    // 声明后客户端可用 CreateTaskPushNotificationConfig 或消息内联配置登记 webhook，
+    // 长任务的状态变化会主动推送，不必挂在流上等。
+    let bindings = ArrayList<String>([BindingJsonRpc, BindingHttpJson])
+    let card = bridge.agentCard(baseUrl, AtelierA2aVersion,
+        bindings: bindings, streaming: true, pushNotifications: true)
+    var options = ServerOptions.of(streaming: true, pushNotifications: true)
 
     // 入站认证：[a2a].auth = true 时启用「Bearer 或 API Key」双支持。
     // 声明要认证却没配 token 时拒绝启动 —— 否则会起一个 401 掉所有请求的服务，
