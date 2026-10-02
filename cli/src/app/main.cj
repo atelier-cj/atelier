@@ -106,7 +106,25 @@ main(): Int64 {
     match (cmd) {
         case "serve" =>
             let port = if (args.size > 2) { args[2] } else { serverCfg.port.toString() }
-            serve(handler, serverCfg.host, port)
+            // [a2a].mountToServer：把 A2A 与既有服务挂到同一个 HTTP 端口。
+            // 装配失败（例如声明了认证却没配 token）时退回纯 HTTP 服务，
+            // 不因为可选能力而阻断既有服务。
+            if (config.a2a.mountToServer) {
+                let a2aWorkspace = match (getVariable("PWD")) {
+                    case Some(v) => v
+                    case None => "."
+                }
+                match (assembleA2a(spec, sessionDir, a2aWorkspace, "", config.a2a,
+                                   parseA2aPort(port, 8931), host: serverCfg.host,
+                                   exitOnFailure: false)) {
+                    case Some(a) => serveWithA2a(handler, serverCfg.host, port, a)
+                    case None =>
+                        eprintln("[atelier] a2a mount skipped (assembly failed)")
+                        serve(handler, serverCfg.host, port)
+                }
+            } else {
+                serve(handler, serverCfg.host, port)
+            }
 
         case "acp" =>
             // ACP v1 Agent（stdio 服务端）：被 Zed/opencode 等 ACP Client 拉起；

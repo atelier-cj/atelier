@@ -82,6 +82,14 @@ public class TomlA2a <: Serializable<TomlA2a> {
      * 留空时回退环境变量 ATELIER_A2A_PUBLIC_URL，再留空则按监听地址拼 http://。
      */
     public var publicUrl: String = ""
+    /**
+     * 是否把 A2A 挂进 `atelier serve` 的 HTTP 服务（与 agent API / AG-UI 共用端口）。
+     *
+     * 默认 false：A2A 由 `atelier a2a` 独立起端口。共用端口时无需路径前缀 ——
+     * A2A 的路径族（`/`、`/tasks*`、`/message:*`、`/.well-known/agent-card.json`）
+     * 与既有服务（`/agent`、`/session`、`/ag-ui`、`/health`）没有交集。
+     */
+    public var mountToServer: Bool = false
     public init() {}
 
     public func serialize(): DataModel {
@@ -91,6 +99,7 @@ public class TomlA2a <: Serializable<TomlA2a> {
             .add(field<String>("apiKeyHeader", this.apiKeyHeader))
             .add(field<String>("listen", this.listen))
             .add(field<String>("publicUrl", this.publicUrl))
+            .add(field<Bool>("mountToServer", this.mountToServer))
     }
 
     public static func deserialize(dm: DataModel): TomlA2a {
@@ -101,6 +110,7 @@ public class TomlA2a <: Serializable<TomlA2a> {
         match (dms.get("apiKeyHeader")) { case s: DataModelString => r.apiKeyHeader = s.getValue(); case _ => () }
         match (dms.get("listen")) { case s: DataModelString => r.listen = s.getValue(); case _ => () }
         match (dms.get("publicUrl")) { case s: DataModelString => r.publicUrl = s.getValue(); case _ => () }
+        match (dms.get("mountToServer")) { case b: DataModelBool => r.mountToServer = b.getValue(); case _ => () }
         r
     }
 }

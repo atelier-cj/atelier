@@ -184,6 +184,38 @@ location / {
 - LB → 后端这一段是明文（回环/内网）；跨不可信网络时用 mTLS 或网络隔离；
 - 将来做按调用方限流/鉴权时，`X-Forwarded-For` 的信任边界要明确（只允许 LB 设置它）。
 
+## 与 server 成员共用端口
+
+默认 `atelier a2a` 独立起一个端口。若要让 A2A 与 agent API / AG-UI 共用一个端口：
+
+```toml
+[a2a]
+mountToServer = true
+```
+
+```bash
+cli.app serve 8931     # 一个端口同时提供既有服务与 A2A
+```
+
+**不需要路径前缀**：A2A 的路径族（`/`、`/tasks*`、`/message:*`、`/.well-known/agent-card.json`、
+`/extendedAgentCard`）与既有服务（`/agent`、`/session`、`/ag-ui`、`/health`）没有交集。
+
+路由规则（`server.MountedDistributor`）：
+
+1. **精确注册的既有路由优先** —— 挂载服务不会抢走既有路径；
+2. 未命中精确表时，按路径族转交 A2A；
+3. 都未命中 → 404。
+
+两个容易踩的点：
+
+- **根路径 `/` 按精确处理，不做前缀匹配。** `/` 是所有路径的前缀，若按前缀用，挂载服务会吃掉
+  每一个未注册路径 —— 包括将来新加的路由，而且症状是「新路由静默落到 A2A 的 404」。
+- **带参路径靠 `/tasks/` 前缀命中**（`/tasks/{id}`、`/tasks/{id}:cancel`）。stdx 的
+  `register` 是精确匹配，表达不了这类路径，这正是需要组合分发器的原因。
+
+装配失败（例如声明了认证却没配 token）时，`serve` **退回纯 HTTP 服务**并留日志，
+不因为可选能力而阻断既有服务。
+
 ## 协议一致性验证
 
 本实现的服务端方向用官方一致性套件
