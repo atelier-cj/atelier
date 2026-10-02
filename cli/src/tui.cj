@@ -1,6 +1,6 @@
 package cli
 
-import ystyle::xisp.terminal.*
+import ystyle::xisp_terminal.*
 import cjterm_stream.*
 import opencj::ulid.nextId
 import std.core.Duration

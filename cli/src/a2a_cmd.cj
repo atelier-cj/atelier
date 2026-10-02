@@ -11,14 +11,15 @@ import server.{AtelierHttpHandler, MountedDistributor}
 import stdx.net.http.ServerBuilder
 import atelier.config.*
 import a2a.*
+import cjpminfo.*
 
 // atelier a2a [agent] [port]：以 A2A v1 Agent（HTTP 服务端）对外提供服务。
 // Agent Card 由 agent 配置 + 技能注册表生成，声明 JSON-RPC 绑定与流式能力；
 // 一个 contextId = 一段会话，会话映射与会话数据同目录（跨进程可续聊）。
 // 产品版本：写进 Agent Card 的 version 字段。
-// 与 workspace.toml 的 [workspace.package].version 同步 —— 发版时一并更新（两者不一致会让
-// 卡片对外报出与实际产物不符的版本）。
-public const AtelierA2aVersion: String = "0.1.13"
+// 编译期由 cjpminfo 从「编译该源码的包清单」读取（即 cli/cjpm.toml 的 package.version），
+// 因此 cjpm ws bump/sync 物化版本时自动跟进，不需要在源码里手工同步常量。
+public let AtelierA2aVersion: String = @ModuleVer("0.0.0")
 
 // workspace：工具工作目录（A2A 请求本身不带 cwd）。
 /** A2A 服务装配结果（不启动监听），供独立启动与「挂进 serve」两条路径共用。 */

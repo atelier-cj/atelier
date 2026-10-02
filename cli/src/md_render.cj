@@ -1,7 +1,7 @@
 package cli
 
 import pulldown4cj.*
-import ystyle::xisp.terminal.runeDisplayWidth
+import ystyle::xisp_terminal.runeDisplayWidth
 import std.collection.*
 
 // ═══════ Markdown → ANSI 终端渲染（pulldown4cj 事件流）═══════════

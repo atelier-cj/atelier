@@ -14,7 +14,7 @@ import atelier.interaction.*
 import jsonvalue.*
 import atelier.ptc.{JsonBridge, RunXispTool}
 import atelier.event.EventStream
-import ystyle::xisp.terminal.*
+import ystyle::xisp_terminal.*
 
 func plainMsg(text: String): Message { UserMessage(ContentList.ofText(text), 0) }
 

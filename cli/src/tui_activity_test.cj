@@ -12,7 +12,7 @@ import atelier.session.*
 import atelier.trust.*
 import atelier.skill.*
 import atelier.event.EventStream
-import ystyle::xisp.terminal.*
+import ystyle::xisp_terminal.*
 
 /**
  * 回合进行中的实时活动：
