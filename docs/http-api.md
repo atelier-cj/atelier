@@ -310,3 +310,10 @@ curl -X POST http://localhost:8080/trust \
   -H "Content-Type: application/json" \
   -d '{"action":"reset","path":"/home/user/project"}'
 ```
+
+## 与 A2A 的关系
+
+本文档描述的是 atelier **自有**的 HTTP API（`/agent/*`、`/session/*`、`/ag-ui/*` 等）。
+若要以标准协议对外暴露，用 A2A（`atelier a2a`，或 `[a2a].mountToServer` 挂进同一端口）——
+A2A 的路径族（`/`、`/tasks*`、`/message:*`、`/.well-known/agent-card.json`）与本文件的端点
+没有交集，可以共存。见《[A2A 接入](a2a.md)》。

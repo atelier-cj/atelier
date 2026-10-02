@@ -727,6 +727,22 @@ atelier/
 
 ---
 
+### A2A 模块（`src/a2a/`）
+
+把 Agent Runtime 暴露为 A2A v1 Agent，并把远端 A2A Agent 接回子 Agent 体系。
+
+| 文件 | 职责 |
+|------|------|
+| `session_map.cj` | `contextId` ↔ atelier 会话的映射（跨进程可续聊） |
+| `translator.cj` | AgentEvent → A2A 事件（状态/产物/消息）翻译 |
+| `util.cj` | 内容与文本提取辅助 |
+| `bridge.cj` | `A2aBridge`：实现 `A2aExecutor`，串起会话、翻译与运行循环 |
+
+反向接入在 `src/agent/remote_a2a_subagent.cj`：一个 `RemoteSubAgentHandle` 实现，
+让父 Agent 用既有的 `subagent_*` 工具驱动远端 A2A Agent（协议细节不外溢到工具层）。
+
+协议层依赖 `a2a` 包（a2a-cj），不在本仓实现协议本身。
+
 ## 七、配置管理
 
 ### 7.1 Agent 配置（可序列化）
@@ -1203,6 +1219,14 @@ public interface Hook {
 | 包管理器（安装/卸载 Skills/Tools） | 未做 | Skills/Tools 安装分发场景出现 |
 
 ---
+
+### Phase 6：A2A 接入（v1，已完成）
+
+- [x] 服务端适配层 `src/a2a/`（session_map / translator / util / bridge）
+- [x] CLI `cli.app a2a [agent] [port]` + `[a2a]` 配置段（认证 / 监听与对外地址 / 挂载）
+- [x] 反向：`RemoteSubAgentHandle` 把远端 A2A Agent 接入子 Agent 体系
+- [x] 认证（Bearer / API Key）与任务级可见性隔离
+- [x] 官方 TCK 一致性验证
 
 ## 十二、技术选型
 

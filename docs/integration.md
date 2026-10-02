@@ -555,3 +555,24 @@ let runtime = AgentRuntime(spec, cfg)
 | `askFn` | `Option<AskFn>` | 提问通道：`(UserRequest) -> UserAnswer`（审批/选择/表单）。不传 = 无交互通道，提问按取消处理 |
 
 ---
+
+## A2A 服务端形态
+
+除库 / HTTP 挂载 / 独立服务 / CLI / Docker 之外，还可用 A2A 协议对外：
+
+```bash
+atelier a2a default 8931        # 独立端口，作为 A2A v1 Agent 提供服务
+```
+
+或挂进既有 HTTP 服务共用端口：
+
+```toml
+[a2a]
+mountToServer = true
+```
+
+```bash
+atelier serve 8080              # 同一端口同时提供 agent API 与 A2A
+```
+
+能力矩阵、认证与 LB 部署（TLS 终止、SSE 缓冲）见《[A2A 接入](a2a.md)》。

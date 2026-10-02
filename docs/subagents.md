@@ -159,3 +159,19 @@ waitReply 父回复回流子上下文、超时路径、respond 状态分派（�
 父端 send_message 更名与两上下文同名覆盖、subagent_reply 即时应答、父回合完整编排
 （start→watch 收 done）、跨进程 respond=follow-up 追问、空闲回收（超时回收/来信重置/默认关）、
 `/subagent start --remote` 参数解析（本地/远程/缺参/多词 prompt）、信任隔离。
+
+## 远端子 Agent（A2A）
+
+`RemoteSubAgentHandle` 让子 Agent 跑在**另一个进程或另一台机器**上：本地句柄通过 A2A
+协议驱动远端 Agent，父侧仍用同一套 `subagent_*` 工具（`send_message` 的双向语义、提问与
+汇报都保留）。
+
+```cangjie
+// 远端 Agent 以 A2A 服务暴露（对端可以是任何 A2A 实现，不限于 atelier）
+let remote = RemoteSubAgentHandle("http://127.0.0.1:8931", agentName: "default")
+```
+
+对端需要提供 Agent Card（`/.well-known/agent-card.json`）；本端按卡片声明的绑定与能力
+选择通路（JSON-RPC 优先，其次 HTTP+JSON），流式事件翻译回本地事件流。
+
+细节与部署注意事项见《[A2A 接入](a2a.md)》。
