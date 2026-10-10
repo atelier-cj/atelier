@@ -340,6 +340,44 @@ func translator_suspendEndsWithInterruptOutcome() {
     @Expect(tr.pendingInterrupts().size, 1)
 }
 
+// 串联：挂起请求里带着提问（核心层带出来的）→ 中断必须带上映射后的答复契约。
+// 前半段（提问随 ExternalRequest 走到这里）由核心侧用例覆盖，这里盯的是
+// 「翻译器没有把 request 漏掉」——两层各自对、中间掉链子，前端一样拿不到 schema。
+@Test
+func translator_suspendWithQuestionCarriesSchemaThrough() {
+    let tr = newTranslator()
+    tr.translate(TurnStartEvent())
+    let fields = ArrayList<UserField>()
+    fields.add(UserField("city", "城市", UserFieldType.Text, required: true))
+    let req = formRequest("int-q", "要哪个城市？", fields)
+    let reqs = ArrayList<ExternalRequest>()
+    reqs.add(ExternalRequest("int-q", "input_required", "要哪个城市？", request: Some(req)))
+    // 与真实序列一致：回合先收尾（TurnEnd），再挂起（Suspend），最后 AgentEnd
+    let msg = asstMsg("要哪个城市？", StopReason.EndTurn)
+    tr.translate(MessageStartEvent(msg))
+    tr.translate(MessageEndEvent(msg))
+    tr.translate(SuspendEvent(reqs))
+    tr.translate(TurnEndEvent(msg, ArrayList<ToolResultMessage>()))
+    let out = tr.translate(AgentEndEvent(ArrayList<Message>()))
+    @Expect(kinds(out), "RUN_FINISHED")
+
+    match (out[0]) {
+        case e: RunFinishedEvent =>
+            @Expect(e.interrupts.size, 1)
+            @Expect(e.interrupts[0].reason, "input_required")
+            match (e.interrupts[0].responseSchema) {
+                case Some(v) =>
+                    @Expect(schemaFieldText(v,
+                        ArrayList<String>(["properties", "values", "properties", "city", "type"])),
+                        "\"string\"")
+                    @Expect(schemaFieldText(v,
+                        ArrayList<String>(["properties", "values", "required"])), "[\"city\"]")
+                case None => @Fail("带提问的挂起必须产出 responseSchema")
+            }
+        case _ => @Fail("应当是 RUN_FINISHED")
+    }
+}
+
 // 没挂起时仍是 success 结果（旧客户端行为不变）
 @Test
 func translator_noSuspendKeepsSuccessOutcome() {
