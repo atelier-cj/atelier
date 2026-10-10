@@ -523,7 +523,7 @@ curl -X POST http://localhost:8080/agent/run \
 | 思维链 | `REASONING_START` → `REASONING_MESSAGE_START/CONTENT/END` → `REASONING_END`（独立消息 id） |
 | 工具调用 | `TOOL_CALL_START` + `TOOL_CALL_ARGS`（全量参数）+ `TOOL_CALL_END`；执行完 `TOOL_CALL_RESULT` |
 | 工具进度 / 上下文压缩 | `CUSTOM`（`tool_progress` / `compaction`） |
-| 提问（审批/选择/表单） | `RUN_FINISHED{outcome=interrupt}`（`reason` 随提问类型：`confirmation` / `input_required` / `tool_call`）→ 客户端在下一次 `RunAgentInput.resume[]` 里带答复 |
+| 提问（审批/选择/表单） | `RUN_FINISHED{outcome=interrupt}`（`reason` 随提问类型：`confirmation` / `input_required` / `tool_call`，并带 `responseSchema` 答复契约）→ 客户端在下一次 `RunAgentInput.resume[]` 里带答复 |
 | 前端工具 | `TOOL_CALL_*` → `CUSTOM`（`client_tool_request`）→ **挂起** |
 | 正常结束 / provider 失败 | `RUN_FINISHED`（`outcome=success` + `result.stopReason/turns`）/ `RUN_ERROR` |
 | 挂起（等外部结果） | `MESSAGES_SNAPSHOT`（恢复所需状态）→ `RUN_FINISHED`（`outcome.type="interrupt"`） |
@@ -546,6 +546,12 @@ curl -X POST http://localhost:8080/agent/run \
 未决中断登记在服务端内存（单进程服务）；跨重启无法关联时按协议回 `RUN_ERROR`。
 信任闸门与 `ask_user` 的提问走同一条结构化通道（`AskFn`）：宿主可以**同 run 内等待**（TUI、
 ACP），也可以返回 `Pending` 让本次 run 以中断收尾（AG-UI），答复在下一次输入里带回来。
+
+中断带 `responseSchema`（AG-UI 1.0 的答复契约，由 `UserRequest` 映射，见
+`agUiResponseSchema`）：审批 → `{approved:boolean}`；选择 → `{selected:string|string[]}`
+且枚举即选项 id；表单 → `{values:{<字段名>:<按类型的值>}}` 且 `required` 取自字段声明。
+外部执行工具类挂起**不带** schema —— 那种中断的答复是工具结果本身，形状由工具定义。
+没有契约时前端只知道「要输入」，字段名与类型只能靠猜；挂了 schema 才能在提交前自校验。
 
 ##### 会话持久化与工具调用
 

@@ -180,6 +180,10 @@ curl -N -X POST http://localhost:8080/ag-ui/agent \
 发起下一次 run，并在 `resume[]` 里带 `{interruptId,status,payload}`（要覆盖**全部**未决中断）。
 服务端按 `interruptId` 对上恢复内容、补发 `TOOL_CALL_RESULT`，**不重放**已完成的调用。
 
+提问类中断还带 `responseSchema`（AG-UI 1.0 的答复契约）：审批 `{approved:boolean}`、
+选择 `{selected:...}`（枚举即选项 id）、表单 `{values:{...}}`。前端据此建 UI 并在提交前
+自校验；外部执行工具的中断不带 schema（答复是工具结果本身）。
+
 事件序列与 `CUSTOM` 扩展（`tool_progress` / `compaction` / `client_tool_request`）见
 [架构设计](design.md) 的「AG-UI 端点」节；端到端验收脚本：`scripts/agui-probe.mjs`（零依赖，可直接进 CI）。
 

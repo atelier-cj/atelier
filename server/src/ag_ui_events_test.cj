@@ -215,6 +215,15 @@ func events_interruptOmitsEmptyToolCallId() {
     @Expect(fieldOf(body, "threadId"), "t1")
 }
 
+// 没有答复契约时整段省略：不发一个空对象，免得前端以为「有 schema 但啥也不要求」
+@Test
+func events_interruptOmitsAbsentResponseSchema() {
+    let ints = ArrayList<AgUiInterrupt>()
+    ints.add(AgUiInterrupt("int-c1", "tool_call", "客户端需执行工具", "c1"))
+    let body = frameBody(RunFinishedEvent("t1", "r1", "tool_use", 1, interrupts: ints))
+    @Expect(body.contains("responseSchema"), false)
+}
+
 // 消息快照：中断边界上交给客户端重建上下文所需的一切
 @Test
 func events_messagesSnapshotShape() {

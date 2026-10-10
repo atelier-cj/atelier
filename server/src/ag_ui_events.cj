@@ -50,13 +50,21 @@ public class RunStartedEvent <: AgUiEvent {
 
 // 中断：run 暂停，等客户端在下一次 run 的 resume 里给结果。
 // id 是跨 run 关联键；tool_call 类必须带 toolCallId（与 ToolCall* 序列绑定）。
+//
+// responseSchema 是答复契约（AG-UI 1.0：客户端据此建表单）：没有它，前端只知道
+// 「要一段输入」，字段名/类型/必填全靠猜。schema 由提问（UserRequest）映射而来，
+// 见 agUiResponseSchema。
 public class AgUiInterrupt <: JsonSerializable {
     public let id: String
     public let reason: String
     public let message: String
     public let toolCallId: String
-    public init(id: String, reason: String, message: String, toolCallId: String) {
-        this.id = id; this.reason = reason; this.message = message; this.toolCallId = toolCallId
+    // 答复的期望形状（JSON Schema）；无契约时为 None，序列化时整段省略
+    public let responseSchema: Option<JsonValue>
+    public init(id: String, reason: String, message: String, toolCallId: String,
+        responseSchema!: Option<JsonValue> = None) {
+        this.id = id; this.reason = reason; this.message = message
+        this.toolCallId = toolCallId; this.responseSchema = responseSchema
     }
     public func toJson(w: JsonWriter): Unit {
         w.startObject()
@@ -64,6 +72,10 @@ public class AgUiInterrupt <: JsonSerializable {
         w.writeName("reason").writeValue(this.reason)
         if (this.message != "") { w.writeName("message").writeValue(this.message) }
         if (this.toolCallId != "") { w.writeName("toolCallId").writeValue(this.toolCallId) }
+        match (this.responseSchema) {
+            case Some(v) => w.writeName("responseSchema").writeValue(v)
+            case None => ()
+        }
         w.endObject()
     }
 }
