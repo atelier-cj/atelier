@@ -149,11 +149,24 @@ public class ExternalRequest {
     public let message: String
     /** reason=tool_call 时绑定到的工具调用 id，否则为空 */
     public let toolCallId: String
+    /**
+     * 触发挂起的原始提问（审批 / 选择 / 表单）。
+     *
+     * 挂起的是「一个待回答的问题」，而不是一句提示语：候选、字段、类型、必填都在
+     * `UserRequest` 里。协议适配层据此生成答复契约（如 AG-UI 的 `responseSchema`），
+     * 不然前端只拿到一句 message，只能靠猜该收什么。
+     *
+     * 核心层不认识任何具体协议的 schema 表达，只把提问原样带出来。
+     * `tool_call` 类挂起（前端执行工具）没有提问，为 None。
+     */
+    public let request: Option<UserRequest>
 
-    public init(id: String, reason: String, message: String, toolCallId!: String = "") {
+    public init(id: String, reason: String, message: String, toolCallId!: String = "",
+        request!: Option<UserRequest> = None) {
         this.id = id
         this.reason = reason
         this.message = message
         this.toolCallId = toolCallId
+        this.request = request
     }
 }

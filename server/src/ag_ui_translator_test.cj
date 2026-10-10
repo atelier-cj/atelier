@@ -5,6 +5,8 @@ import jsonvalue.*
 import atelier.message.*
 import atelier.agent.*
 import atelier.tool.ExternalRequest
+import atelier.interaction.{UserField, UserFieldType, UserOption, approvalRequest, choiceRequest, formRequest}
+import atelier.util.toJsonString
 
 // 翻译器：AgentEvent → AG-UI 事件序列。这里锁的是「生命周期必须自洽」——
 // 开了的消息要关、工具三次事件要成组、RUN_ERROR 之后不能再来 RUN_FINISHED，
@@ -338,6 +340,44 @@ func translator_suspendEndsWithInterruptOutcome() {
     @Expect(tr.pendingInterrupts().size, 1)
 }
 
+// 串联：挂起请求里带着提问（核心层带出来的）→ 中断必须带上映射后的答复契约。
+// 前半段（提问随 ExternalRequest 走到这里）由核心侧用例覆盖，这里盯的是
+// 「翻译器没有把 request 漏掉」——两层各自对、中间掉链子，前端一样拿不到 schema。
+@Test
+func translator_suspendWithQuestionCarriesSchemaThrough() {
+    let tr = newTranslator()
+    tr.translate(TurnStartEvent())
+    let fields = ArrayList<UserField>()
+    fields.add(UserField("city", "城市", UserFieldType.Text, required: true))
+    let req = formRequest("int-q", "要哪个城市？", fields)
+    let reqs = ArrayList<ExternalRequest>()
+    reqs.add(ExternalRequest("int-q", "input_required", "要哪个城市？", request: Some(req)))
+    // 与真实序列一致：回合先收尾（TurnEnd），再挂起（Suspend），最后 AgentEnd
+    let msg = asstMsg("要哪个城市？", StopReason.EndTurn)
+    tr.translate(MessageStartEvent(msg))
+    tr.translate(MessageEndEvent(msg))
+    tr.translate(SuspendEvent(reqs))
+    tr.translate(TurnEndEvent(msg, ArrayList<ToolResultMessage>()))
+    let out = tr.translate(AgentEndEvent(ArrayList<Message>()))
+    @Expect(kinds(out), "RUN_FINISHED")
+
+    match (out[0]) {
+        case e: RunFinishedEvent =>
+            @Expect(e.interrupts.size, 1)
+            @Expect(e.interrupts[0].reason, "input_required")
+            match (e.interrupts[0].responseSchema) {
+                case Some(v) =>
+                    @Expect(schemaFieldText(v,
+                        ArrayList<String>(["properties", "values", "properties", "city", "type"])),
+                        "\"string\"")
+                    @Expect(schemaFieldText(v,
+                        ArrayList<String>(["properties", "values", "required"])), "[\"city\"]")
+                case None => @Fail("带提问的挂起必须产出 responseSchema")
+            }
+        case _ => @Fail("应当是 RUN_FINISHED")
+    }
+}
+
 // 没挂起时仍是 success 结果（旧客户端行为不变）
 @Test
 func translator_noSuspendKeepsSuccessOutcome() {
@@ -348,4 +388,98 @@ func translator_noSuspendKeepsSuccessOutcome() {
         case _ => @Fail("应当是 RUN_FINISHED")
     }
     @Expect(tr.pendingInterrupts().size, 0)
+}
+
+// ── 提问 → 答复契约（responseSchema）──────────────────────────────────────────
+// 前端要靠它建表单：没有契约时只能猜该收什么字段。这些用例锁形状，
+// 因为映射一旦漂移，前端就在提交时被服务端拒掉（或更糟：猜错字段名静默丢数据）。
+
+func schemaFieldText(schema: JsonValue, path: ArrayList<String>): String {
+    var cur = schema
+    for (key in path) {
+        match (cur) {
+            case JsonValue.Map(m) =>
+                match (m.get(key)) {
+                    case Some(v) => cur = v
+                    case None => return "<missing:${key}>"
+                }
+            case _ => return "<not-an-object:${key}>"
+        }
+    }
+    toJsonString(cur)
+}
+
+// 审批：结论是 approved 布尔，选项 id 不外泄（拒绝由 approved:false 表达）
+@Test
+func translator_approvalInterruptCarriesBoolSchema() {
+    let req = approvalRequest("int-g", "bash", JsonValue.String("{}"), "要执行吗？", toolCallId: "c1")
+    let schema = agUiResponseSchema(Some(req))
+    match (schema) {
+        case Some(v) =>
+            @Expect(schemaFieldText(v, ArrayList<String>(["type"])), "\"object\"")
+            @Expect(schemaFieldText(v, ArrayList<String>(["properties", "approved", "type"])), "\"boolean\"")
+            @Expect(schemaFieldText(v, ArrayList<String>(["required"])), "[\"approved\"]")
+        case None => @Fail("审批中断必须带答复契约")
+    }
+}
+
+// 选择：选项 id 是封闭集合，客户端据此渲染候选并挡越界值
+@Test
+func translator_choiceInterruptEnumeratesOptionIds() {
+    let opts = ArrayList<UserOption>([UserOption("dev", "开发"), UserOption("ops", "运维")])
+    let req = choiceRequest("int-q", "选一个", opts)
+    let schema = agUiResponseSchema(Some(req))
+    match (schema) {
+        case Some(v) =>
+            @Expect(schemaFieldText(v, ArrayList<String>(["properties", "selected", "type"])), "\"string\"")
+            @Expect(schemaFieldText(v, ArrayList<String>(["properties", "selected", "enum"])),
+                "[\"dev\",\"ops\"]")
+        case None => @Fail("选择中断必须带答复契约")
+    }
+}
+
+// 多选：值是数组，枚举落在 items 上（数组本身挂 enum 是非法的）
+@Test
+func translator_multiChoiceInterruptPutsEnumOnItems() {
+    let opts = ArrayList<UserOption>([UserOption("a", "A"), UserOption("b", "B")])
+    let req = choiceRequest("int-q", "多选", opts, multi: true)
+    let schema = agUiResponseSchema(Some(req))
+    match (schema) {
+        case Some(v) =>
+            @Expect(schemaFieldText(v, ArrayList<String>(["properties", "selected", "type"])), "\"array\"")
+            @Expect(schemaFieldText(v, ArrayList<String>(["properties", "selected", "items", "enum"])),
+                "[\"a\",\"b\"]")
+        case None => @Fail("多选中断必须带答复契约")
+    }
+}
+
+// 表单：字段名/类型/必填逐项落到 values 下，与 resumeAnswerOf 读 values 的分支对齐
+@Test
+func translator_formInterruptDescribesFields() {
+    let fields = ArrayList<UserField>()
+    fields.add(UserField("city", "城市", UserFieldType.Text, required: true))
+    fields.add(UserField("days", "天数", UserFieldType.Number))
+    let req = formRequest("int-f", "填一下", fields)
+    let schema = agUiResponseSchema(Some(req))
+    match (schema) {
+        case Some(v) =>
+            @Expect(schemaFieldText(v, ArrayList<String>(["properties", "values", "type"])), "\"object\"")
+            @Expect(schemaFieldText(v,
+                ArrayList<String>(["properties", "values", "properties", "city", "type"])), "\"string\"")
+            @Expect(schemaFieldText(v,
+                ArrayList<String>(["properties", "values", "properties", "days", "type"])), "\"number\"")
+            // 只有必填项进 required：可选字段不能逼前端填
+            @Expect(schemaFieldText(v, ArrayList<String>(["properties", "values", "required"])), "[\"city\"]")
+        case None => @Fail("表单中断必须带答复契约")
+    }
+}
+
+// 前端执行工具：答复是工具结果本身，形状由工具定义，协议层不编造契约
+@Test
+func translator_toolCallInterruptHasNoResponseSchema() {
+    let schema = agUiResponseSchema(None)
+    match (schema) {
+        case None => ()
+        case Some(_) => @Fail("外部执行工具的中断不应带 schema")
+    }
 }

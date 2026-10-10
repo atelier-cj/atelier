@@ -857,9 +857,11 @@ public open class AgentRuntime {
                                             case TrustDecision.NeedsApproval =>
                                                 // 审批走结构化提问：菜单由 approvalRequest 统一构造，
                                                 // 结论只认选项 id（不再比对 "y"/"yes"/"a" 这类魔法字符串）
+                                                // 参数原样带上：审批的全部意义是让人看清「要执行什么」，
+                                                // 只给工具名等于让人盲签（钩子改写前的原始参数）
                                                 let gateReq = approvalRequest(
                                                     "ask:${sessionId}:${turnCount}:${tc.id}:approval",
-                                                    tc.name, JsonValue.Map(HashMap<String, JsonValue>()),
+                                                    tc.name, tc.args,
                                                     "Tool '" + tc.name + "' needs your approval.",
                                                     toolCallId: tc.id)
                                                 let gateAns = this.askHost(gateReq, resumedAnswers)
@@ -867,9 +869,12 @@ public open class AgentRuntime {
                                                 // 所以此刻挂起等于"什么都没发生"，重放不会重复副作用）
                                                 match (gateAns.status) {
                                                     case UserAnswerStatus.Pending =>
+                                                        // 带上原始提问：协议适配层据此生成答复契约
+                                                        // （AG-UI 的 responseSchema），只有 message 的话
+                                                        // 前端只能猜表单该收什么字段
                                                         pendingAsks.add(ExternalRequest(gateReq.id,
                                                             "confirmation", gateReq.message,
-                                                            toolCallId: tc.id))
+                                                            toolCallId: tc.id, request: Some(gateReq)))
                                                     case _ => ()
                                                 }
                                                 // 答复一律过校验：不合格按拒绝处理（不静默接受）

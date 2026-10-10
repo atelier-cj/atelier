@@ -1106,6 +1106,17 @@ class SequentialSlowTool <: Tool {
     public func executionMode(): ToolExecutionMode { ToolExecutionMode.Sequential }
 }
 
+// 带参数的 Sequential 工具：审批请求应当把这次调用的参数原样带给宿主
+class SequentialArgsTool <: Tool {
+    public func name(): String { "seq_args_tool" }
+    public func description(): String { "sequential tool with args" }
+    public func schema(): JsonValue { JsonValue.Map(HashMap<String, JsonValue>()) }
+    public func execute(ctx: ToolContext, args: JsonValue): ToolResult {
+        ToolResult("args tool done", None, false, false)
+    }
+    public func executionMode(): ToolExecutionMode { ToolExecutionMode.Sequential }
+}
+
 // 首回合 ToolUse 调 seq_slow_tool，后续回合 EndTurn（防无限工具循环）
 class SeqToolTurnProvider <: Provider {
     public var streamCalls: Int64 = 0
@@ -1133,11 +1144,44 @@ class SeqToolTurnProvider <: Provider {
     }
 }
 
+// 首回合带着真实参数调用 seq_args_tool（审批请求要能带回这些参数）
+class SeqToolArgsProvider <: Provider {
+    public var streamCalls: Int64 = 0
+    public func name(): String { "stub-seq-args" }
+    public func chat(req: ChatRequest): ChatResponse {
+        ChatResponse(AssistantMessage(ContentList.ofText("ok"), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0))
+    }
+    public func chatStreaming(req: ChatRequest): EventStream<ChatDelta, AssistantMessage> {
+        this.streamCalls++
+        let stream = EventStream<ChatDelta, AssistantMessage>()
+        spawn {
+            if (this.streamCalls == Int64(1)) {
+                let args = HashMap<String, JsonValue>()
+                args.add("path", JsonValue.String("a.cj"))
+                args.add("content", JsonValue.String("hello"))
+                let blocks = ArrayList<ContentBlock>()
+                blocks.add(ContentBlock.ToolCall(ToolCallBlock("call_a", "seq_args_tool", JsonValue.Map(args))))
+                let msg = AssistantMessage(ContentList(blocks), "", "", StopReason.ToolUse, TokenUsage(0, 0), 0)
+                stream.emit(ChatDelta("", "", Some(msg.stopReason)))
+                stream.setResult(msg)
+            } else {
+                let msg = AssistantMessage(ContentList.ofText("final"), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0)
+                stream.emit(ChatDelta("", "", Some(msg.stopReason)))
+                stream.setResult(msg)
+            }
+        }
+        stream
+    }
+}
+
 // 宿主提问通道的探针：记录被问到的请求（lambda 不能捕获可变局部变量，用对象承载）
 class ApprovalRecorder {
     public var asked: Int64 = 0
     public var lastToolName: String = ""
     public var lastToolCallId: String = ""
+    // 被批准那一次调用的参数：审批 UI 的全部意义就是让人看清「要执行什么」，
+    // 只给工具名等于让人盲签
+    public var lastArgs: Option<JsonValue> = None
     public init() {}
 }
 
@@ -1162,11 +1206,42 @@ func makeApprovalRuntime(provider: Provider, decision: String, rec: ApprovalReco
         rec.asked = rec.asked + 1
         rec.lastToolName = req.toolName
         rec.lastToolCallId = req.toolCallId
+        rec.lastArgs = req.args
         approvalAnswerOf(req, decision)
     }
     testRuntime(compactionRuntimeConfig(false, None), provider,
         toolReg, store, trustMgr, skillReg, agentReg, providerReg,
         ArrayList<Hook>(), McpManager(), ask: Some(askFn))
+}
+
+// 取 JSON 对象的字符串字段（审批参数的断言用）
+func jsonFieldText(v: JsonValue, name: String): String {
+    match (v) {
+        case JsonValue.Map(m) =>
+            match (m.get(name)) {
+                case Some(JsonValue.String(s)) => s
+                case _ => ""
+            }
+        case _ => ""
+    }
+}
+
+// 与 makeApprovalRuntime 同构，但用的是「首回合带参数调用」的 provider 与对应工具
+func makeArgsApprovalRuntime(provider: Provider, decision: String, rec: ApprovalRecorder): AgentRuntime {
+    let toolReg = ToolRegistry()
+    toolReg.register(SequentialArgsTool())
+    let providerReg = ProviderRegistry()
+    providerReg.register("default", provider)
+    let askFn: AskFn = { req: UserRequest =>
+        rec.asked = rec.asked + 1
+        rec.lastToolName = req.toolName
+        rec.lastToolCallId = req.toolCallId
+        rec.lastArgs = req.args
+        approvalAnswerOf(req, decision)
+    }
+    testRuntime(compactionRuntimeConfig(false, None), provider,
+        toolReg, MemorySessionStore(), TrustManager(), SkillRegistry(), AgentRegistry(),
+        providerReg, ArrayList<Hook>(), McpManager(), ask: Some(askFn))
 }
 
 func approvalRunResult(runtime: AgentRuntime): ArrayList<Message> {
@@ -1204,6 +1279,25 @@ func runtime_approval_allowOnceRunsTool() {
     // 审批要能对上「是哪一次调用」：宿主据此把它与具体 tool_call 关联
     @Expect(rec.lastToolCallId, "call_a")
     @Expect(resultHasText(result, "approved run done"), true)
+}
+
+// 审批请求必须带上**这次调用要执行什么**：只给工具名，审批 UI 只能显示
+// 「Tool 'bash' needs your approval」——信任闸门的意义是让人看清再放行，
+// 看不到参数就等于盲签。
+@Test
+func runtime_approvalRequestCarriesToolArgs() {
+    let rec = ApprovalRecorder()
+    let runtime = makeArgsApprovalRuntime(SeqToolArgsProvider(), "allow_once", rec)
+    let _ = approvalRunResult(runtime)
+
+    @Expect(rec.asked, 1)
+    match (rec.lastArgs) {
+        case Some(v) =>
+            // 参数原样带到宿主：宿主据此渲染「要执行的命令/要写的文件」
+            @Expect(jsonFieldText(v, "path"), "a.cj")
+            @Expect(jsonFieldText(v, "content"), "hello")
+        case None => @Fail("审批请求必须携带被批准调用的参数")
+    }
 }
 
 // deny → 工具不执行，结果消息带拒绝说明
@@ -1433,4 +1527,70 @@ func runtime_shortCircuitIsVisibleInMessages() {
     let result = runtime.chat(msgs).result()
 
     @Assert(anyAssistantTextContains(result, "short-circuited"))
+}
+
+// 挂起型宿主：askFn 恒返回 Pending（AG-UI 这类「本次 run 收尾、答复下次带回」的宿主）
+func makePendingApprovalRuntime(provider: Provider, rec: ApprovalRecorder): AgentRuntime {
+    let toolReg = ToolRegistry()
+    toolReg.register(SequentialArgsTool())
+    let providerReg = ProviderRegistry()
+    providerReg.register("default", provider)
+    let askFn: AskFn = { req: UserRequest =>
+        rec.asked = rec.asked + 1
+        rec.lastToolName = req.toolName
+        rec.lastToolCallId = req.toolCallId
+        rec.lastArgs = req.args
+        UserAnswer(req.id, UserAnswerStatus.Pending)
+    }
+    testRuntime(compactionRuntimeConfig(false, None), provider,
+        toolReg, MemorySessionStore(), TrustManager(), SkillRegistry(), AgentRegistry(),
+        providerReg, ArrayList<Hook>(), McpManager(), ask: Some(askFn))
+}
+
+// 挂起时必须把**原始提问**带出来，而不只是一句提示语：
+// 协议适配层（AgUiTranslator）靠它生成答复契约 responseSchema。只带 message 的话，
+// 前端知道「要输入」，但字段名/类型/必填全靠猜——建不出正确的表单。
+// 这条盯的是「提问 → 挂起事件」的接线：类型齐了但中途丢掉，前端一样是瞎的。
+@Test
+func runtime_suspendCarriesOriginalRequest() {
+    let rec = ApprovalRecorder()
+    let runtime = makePendingApprovalRuntime(SeqToolArgsProvider(), rec)
+    let msgs = ArrayList<Message>()
+    msgs.add(UserMessage(ContentList.ofText("go"), 0))
+    let stream = runtime.chat(msgs)
+
+    var seen: Option<ExternalRequest> = None
+    var done = false
+    while (!done) {
+        match (stream.receive(Duration.second)) {
+            case Some(ev) =>
+                match (ev) {
+                    case se: SuspendEvent =>
+                        if (se.requests.size > 0) { seen = Some(se.requests[0]) }
+                    case _ => ()
+                }
+            case None => if (stream.isClosed()) { done = true }
+        }
+    }
+    let _ = stream.result()
+
+    match (seen) {
+        case Some(req) =>
+            // 挂起请求要能对上具体工具调用（前端据此把答复与 tool_call 关联）
+            @Expect(req.reason, "confirmation")
+            @Expect(req.toolCallId, "call_a")
+            // 关键：原始提问在，且带着审批所需的候选与参数
+            match (req.request) {
+                case Some(ur) =>
+                    @Expect(ur.kindName(), "approval")
+                    @Expect(ur.options.size, 3)
+                    @Expect(ur.toolName, "seq_args_tool")
+                    match (ur.args) {
+                        case Some(v) => @Expect(jsonFieldText(v, "path"), "a.cj")
+                        case None => @Fail("提问里应当带着被审批的参数")
+                    }
+                case None => @Fail("挂起请求必须携带原始提问（否则前端建不出答复契约）")
+            }
+        case None => @Fail("应当收到 SuspendEvent")
+    }
 }

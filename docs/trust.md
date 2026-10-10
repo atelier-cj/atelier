@@ -65,6 +65,10 @@ enum TrustDecision {
 批处理没有提问通道，提问按「取消」处理（等同拒绝），用 `ATELIER_TRUST_DIR` 预授权。
 宿主给的答复一律过 `validateAnswer`：非法选项按拒绝处理并留痕。
 
+提问里带着 `toolName` 与**这一次调用的参数**（`UserRequest.args`）：审批 UI 要显示「批准的是
+什么」，只给工具名等于让人盲签。挂起时这份提问随 `ExternalRequest.request` 一起交给协议层，
+AG-UI 据此把它映射成中断里的 `responseSchema`。
+
 ## 交互命令（TUI）
 
 ```bash

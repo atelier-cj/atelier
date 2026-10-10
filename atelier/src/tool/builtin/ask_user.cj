@@ -62,8 +62,10 @@ public class AskUserTool <: Tool {
                 "User did not answer in time.", None, true, false)
             case UserAnswerStatus.Pending => return ToolResult("", None, false, false,
                 // 挂起：本次调用没有结果，等宿主在后续输入里带回（与前端工具同一条路径）
+                // 原始提问一并带出：候选/字段/类型是答复契约的一部分，
+                // 丢了前端就只剩一句提示语，收什么形状只能靠猜
                 external: Some(ExternalRequest(req.id, "input_required", req.message,
-                    toolCallId: ctx.toolCallId)))
+                    toolCallId: ctx.toolCallId, request: Some(req))))
             case UserAnswerStatus.Answered => ()
         }
 
