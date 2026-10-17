@@ -75,3 +75,16 @@ internal enum ToolAdmission {
     /** 宿主要求先确认：整批挂起，等答复后重放 */
     | Suspend(ExternalRequest)
 }
+
+/**
+ * 工具批次的收尾结论：**继续下一轮**，还是**本次 run 挂起**。
+ *
+ * 两种走向都结束当前回合（`TurnEndEvent` 已发），区别只在挂起时还要发
+ * `SuspendEvent` 并把历史停在 `assistant(tool_calls)`，等调用方下次带回结果。
+ */
+internal enum ToolBatchOutcome {
+    /** 本批执行完毕（含被跳过/拦截的），继续下一轮 */
+    | ContinueRun
+    /** 有调用在等外部结果：本次 run 到此为止 */
+    | Suspended
+}

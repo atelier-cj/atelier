@@ -781,6 +781,115 @@ public open class AgentRuntime <: AgentLoop {
     }
 
     /**
+     * 执行工具批次并回写结果。
+     *
+     * **本方法的核心不变量**：每个 `toolCall` 必须恰好得到一条 `ToolResultMessage`。
+     * 否则历史里就是 `assistant(tool_calls=N)` 对不上结果，下一次请求被 provider 判 400
+     * （不可重试），整个回合作废。
+     *
+     * 这条不变量由四个来源共同保证，此前散在 87 行的循环体里、靠注释提醒：
+     *   ① 被 hook/信任闸门跳过的 → 从 `skipResults` 取原因
+     *   ② 整批执行抛异常 → 每个 call 各补一条错误结果
+     *   ③ 执行器少给结果 → 补显式失败（不静默跳过）
+     *   ④ 工具要等外部结果 → **不写**结果（写了等于伪造），整批挂起
+     *
+     * 抽成方法后，①②③ 可以单独断言；④ 由返回值表达。
+     */
+    private func executeToolBatch(scope: RunScope, assistantMsg: AssistantMessage,
+        toolCalls: ArrayList<ToolCallBlock>, batch: ArrayList<(String, ToolContext, JsonValue)>,
+        skipResults: HashMap<Int64, String>, runCallIds: ArrayList<String>,
+        runNames: ArrayList<String>, pendingAsks: ArrayList<ExternalRequest>,
+        stream: EventStream<AgentEvent, ArrayList<Message>>,
+        hookState: HookState, log: Logger): ToolBatchOutcome {
+                    let minIntervalMs = Int64(this.config.minToolInterval)
+                    if (minIntervalMs > 0) {
+                        let elapsed = (MonoTime.now() - scope.lastToolTime).toMilliseconds()
+                        if (elapsed < minIntervalMs) {
+                            sleep(Duration.millisecond * (minIntervalMs - elapsed))
+                        }
+                    }
+                    if (pendingAsks.size > 0) {
+                        // 整批一起挂起：一次把本批所有待确认项交给宿主，
+                        // 恢复后同一批一次做完（而不是逐个挂起、逐个恢复）
+                        this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
+                        this.emit(stream, SuspendEvent(pendingAsks))
+                        return ToolBatchOutcome.Suspended
+                    }
+                    // 工具执行开始事件（供流式消费方展示工具进度；被跳过/拦截的工具不发）
+                    for (k in 0..runCallIds.size) {
+                        this.emit(stream, ToolExecutionStartEvent(runCallIds[Int64(k)], runNames[Int64(k)]))
+                    }
+                    let results = try {
+                        this.toolExecutor.executeBatch(batch)
+                    } catch (e: Exception) {
+                        // 同 provider 错误：异常 message 常为空（FS/Socket 类），只打 message 等于没打
+                        log.error("tool execute error: ${e.toString()}", Array<Attr>())
+                        // 整批失败也必须**每个 call 各回一条**结果：只回一条（且 id 为空）
+                        // 会让历史里 assistant(tool_calls=N) 对不上结果，下一次请求被 provider 判 400
+                        for (i in 0..toolCalls.size) {
+                            let tc = toolCalls[Int64(i)]
+                            let text = match (skipResults.get(Int64(i))) {
+                                case Some(msg) => msg
+                                case None => "[Tool error: ${e.message}]"
+                            }
+                            scope.messages.add(ToolResultMessage(tc.id, tc.name,
+                                ContentList.ofText(text), true, 0))
+                        }
+                        this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
+                        return ToolBatchOutcome.Suspended
+                    }
+                    var resIdx: Int64 = 0
+                    // 需要外部给结果的调用：本次 run 挂起（不写结果消息，历史停在
+                    // assistant(tool_calls)），由调用方在下一次 run 带回结果
+                    let pendingExternal = ArrayList<ExternalRequest>()
+                    for (i in 0..toolCalls.size) {
+                        let tc = toolCalls[Int64(i)]
+                        match (skipResults.get(Int64(i))) {
+                            case Some(msg) =>
+                                let tr = ToolResultMessage(tc.id, tc.name, ContentList.ofText(msg), false, 0)
+                                scope.messages.add(tr)
+                            case None =>
+                                if (resIdx < results.size) {
+                                    let r = results[Int64(resIdx)]
+                                    match (r.external) {
+                                        case Some(req) =>
+                                            // 挂起：不产生结果消息（写了就等于伪造结果）
+                                            log.info("tool ${tc.name} awaits external result: ${req.id}", Array<Attr>())
+                                            pendingExternal.add(req)
+                                            resIdx++
+                                            continue
+                                        case None => ()
+                                    }
+                                    log.info("tool ${tc.name} done: err=${r.isError}", Array<Attr>())
+                                    this.mcpManager.markUsedTool(tc.name)
+                                    // 工具执行结束事件（与开始事件一一对应）
+                                    this.emit(stream, ToolExecutionEndEvent(tc.id, r.text, r.isError))
+                                    let tr = ToolResultMessage(tc.id, tc.name, ContentList.ofText(r.text), r.isError, 0)
+                                    scope.messages.add(tr)
+                                    callAfterToolHooks(hookState, scope.turnCount, tc, tr)
+                                    resIdx++
+                                } else {
+                                    // 执行器少给了结果：静默跳过会让这条 call 永远没有配对结果，
+                                    // 下一次请求直接被判 400 —— 宁可回一条显式失败
+                                    log.error("tool executor returned ${results.size} result(s) for ${batch.size} call(s); '${tc.name}' has no result", Array<Attr>())
+                                    scope.messages.add(ToolResultMessage(tc.id, tc.name,
+                                        ContentList.ofText("[Tool error: no result returned by executor]"), true, 0))
+                                }
+                        }
+                    }
+                    scope.toolCallCount += toolCalls.size
+                    scope.lastToolTime = MonoTime.now()
+                    this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
+                    if (pendingExternal.size > 0) {
+                        // 中止本次 run：历史已落在 assistant(tool_calls)，
+                        // 下一次 run 带结果即可继续（见 SuspendEvent 注释）
+                        this.emit(stream, SuspendEvent(pendingExternal))
+                        return ToolBatchOutcome.Suspended
+                    }
+                    ToolBatchOutcome.ContinueRun
+    }
+
+    /**
      * 单个工具调用的准入判定：**放行 / 跳过 / 挂起**。
      *
      * 抽出来的理由：原先是三段几乎相同的 if/else（自动放行 / 允许一次 / 总是允许），
@@ -1130,92 +1239,14 @@ public open class AgentRuntime <: AgentLoop {
                                 }
                                 idx++
                             }
-                            let minIntervalMs = Int64(this.config.minToolInterval)
-                            if (minIntervalMs > 0) {
-                                let elapsed = (MonoTime.now() - scope.lastToolTime).toMilliseconds()
-                                if (elapsed < minIntervalMs) {
-                                    sleep(Duration.millisecond * (minIntervalMs - elapsed))
-                                }
-                            }
-                            if (pendingAsks.size > 0) {
-                                // 整批一起挂起：一次把本批所有待确认项交给宿主，
-                                // 恢复后同一批一次做完（而不是逐个挂起、逐个恢复）
-                                this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
-                                this.emit(stream, SuspendEvent(pendingAsks))
-                                scope.finished = true
-                                continue
-                            }
-                            // 工具执行开始事件（供流式消费方展示工具进度；被跳过/拦截的工具不发）
-                            for (k in 0..runCallIds.size) {
-                                this.emit(stream, ToolExecutionStartEvent(runCallIds[Int64(k)], runNames[Int64(k)]))
-                            }
-                            let results = try {
-                                this.toolExecutor.executeBatch(batch)
-                            } catch (e: Exception) {
-                                // 同 provider 错误：异常 message 常为空（FS/Socket 类），只打 message 等于没打
-                                log.error("tool execute error: ${e.toString()}", Array<Attr>())
-                                // 整批失败也必须**每个 call 各回一条**结果：只回一条（且 id 为空）
-                                // 会让历史里 assistant(tool_calls=N) 对不上结果，下一次请求被 provider 判 400
-                                for (i in 0..toolCalls.size) {
-                                    let tc = toolCalls[Int64(i)]
-                                    let text = match (skipResults.get(Int64(i))) {
-                                        case Some(msg) => msg
-                                        case None => "[Tool error: ${e.message}]"
-                                    }
-                                    scope.messages.add(ToolResultMessage(tc.id, tc.name,
-                                        ContentList.ofText(text), true, 0))
-                                }
-                                this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
-                                continue
-                            }
-                            var resIdx: Int64 = 0
-                            // 需要外部给结果的调用：本次 run 挂起（不写结果消息，历史停在
-                            // assistant(tool_calls)），由调用方在下一次 run 带回结果
-                            let pendingExternal = ArrayList<ExternalRequest>()
-                            for (i in 0..toolCalls.size) {
-                                let tc = toolCalls[Int64(i)]
-                                match (skipResults.get(Int64(i))) {
-                                    case Some(msg) =>
-                                        let tr = ToolResultMessage(tc.id, tc.name, ContentList.ofText(msg), false, 0)
-                                        scope.messages.add(tr)
-                                    case None =>
-                                        if (resIdx < results.size) {
-                                            let r = results[Int64(resIdx)]
-                                            match (r.external) {
-                                                case Some(req) =>
-                                                    // 挂起：不产生结果消息（写了就等于伪造结果）
-                                                    log.info("tool ${tc.name} awaits external result: ${req.id}", Array<Attr>())
-                                                    pendingExternal.add(req)
-                                                    resIdx++
-                                                    continue
-                                                case None => ()
-                                            }
-                                            log.info("tool ${tc.name} done: err=${r.isError}", Array<Attr>())
-                                            this.mcpManager.markUsedTool(tc.name)
-                                            // 工具执行结束事件（与开始事件一一对应）
-                                            this.emit(stream, ToolExecutionEndEvent(tc.id, r.text, r.isError))
-                                            let tr = ToolResultMessage(tc.id, tc.name, ContentList.ofText(r.text), r.isError, 0)
-                                            scope.messages.add(tr)
-                                            callAfterToolHooks(hookState, scope.turnCount, tc, tr)
-                                            resIdx++
-                                        } else {
-                                            // 执行器少给了结果：静默跳过会让这条 call 永远没有配对结果，
-                                            // 下一次请求直接被判 400 —— 宁可回一条显式失败
-                                            log.error("tool executor returned ${results.size} result(s) for ${batch.size} call(s); '${tc.name}' has no result", Array<Attr>())
-                                            scope.messages.add(ToolResultMessage(tc.id, tc.name,
-                                                ContentList.ofText("[Tool error: no result returned by executor]"), true, 0))
-                                        }
-                                }
-                            }
-                            scope.toolCallCount += toolCalls.size
-                            scope.lastToolTime = MonoTime.now()
-                            this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
-                            if (pendingExternal.size > 0) {
-                                // 中止本次 run：历史已落在 assistant(tool_calls)，
-                                // 下一次 run 带结果即可继续（见 SuspendEvent 注释）
-                                this.emit(stream, SuspendEvent(pendingExternal))
-                                scope.finished = true
-                                continue
+                            let outcome = this.executeToolBatch(scope, assistantMsg, toolCalls,
+                                batch, skipResults, runCallIds, runNames, pendingAsks,
+                                stream, hookState, log)
+                            match (outcome) {
+                                case ToolBatchOutcome.Suspended =>
+                                    scope.finished = true
+                                    continue
+                                case ToolBatchOutcome.ContinueRun => ()
                             }
 
                         case _ =>
