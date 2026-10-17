@@ -687,3 +687,72 @@ func promptSegments_stablePrefixIsReproducible() {
     @Expect(a[0..cutA], b[0..cutB])
 }
 
+// ==================== Compactor：接口与两个实现 ====================
+
+func bigHistory(n: Int64): ArrayList<Message> {
+    let sb = StringBuilder()
+    var i: Int64 = 0
+    while (i < 18000) { sb.append("x"); i++ }
+    let msgs = ArrayList<Message>()
+    msgs.add(UserMessage(ContentList.ofText(sb.toString()), 0))
+    return msgs
+}
+
+// NoopCompactor：永不压 —— 证明"换一个实现真的能关掉压缩"
+@Test
+func compactor_noopNeverCompacts() {
+    let c = NoopCompactor()
+    let msgs = bigHistory(18000)
+    match (c.shouldCompact(msgs, CompactRoute("m", 8192, 4096))) {
+        case Skip(r) => @Expect(r.contains("noop"), true)
+        case Proceed(_) => @Fail("noop must never proceed")
+    }
+}
+
+// 默认实现：小窗口 + 超长历史 → 判定 Proceed 且切点在保留预算之外
+@Test
+func compactor_basicProceedsOnPressure() {
+    let cc = CompactionConfig(true, 0.8, 1024, 0.16, Some(Int64(2000)), 1,
+        DEFAULT_PROMPT_TEMPLATE, None, None)
+    let msgs = bigHistory(18000)
+    let route = CompactRoute("m", 8192, 4096)
+    match (BasicCompactor().shouldCompactWith(msgs, route, cc)) {
+        case Skip(r) => @Fail("expected Proceed, got Skip: " + r)
+        case Proceed(p) =>
+            @Expect(p.retainTokens, Int64(2000))
+            @Expect(p.trigger, "pressure")
+    }
+}
+
+// 窗口未知 → Skip（且原因要能说明为什么），不是静默不压
+@Test
+func compactor_windowUnknownSkipsWithReason() {
+    let cc = CompactionConfig(true, 0.8, 1024, 0.16, Some(Int64(2000)), 1,
+        DEFAULT_PROMPT_TEMPLATE, None, None)
+    let msgs = bigHistory(18000)
+    match (BasicCompactor().shouldCompactWith(msgs, CompactRoute("m", 0, 4096), cc)) {
+        case Skip(r) => @Expect(r.contains("window unknown"), true)
+        case Proceed(_) => @Fail("unknown window must not compact")
+    }
+}
+
+// 未达阈值 → Skip，且原因带 "under threshold"（运行时据此不刷日志）
+@Test
+func compactor_underThresholdSkipsQuietly() {
+    let cc = CompactionConfig(true, 0.8, 1024, 0.16, Some(Int64(2000)), 1,
+        DEFAULT_PROMPT_TEMPLATE, None, None)
+    let msgs = ArrayList<Message>()
+    msgs.add(UserMessage(ContentList.ofText("short"), 0))
+    match (BasicCompactor().shouldCompactWith(msgs, CompactRoute("m", 8192, 4096), cc)) {
+        case Skip(r) => @Expect(r.startsWith("under threshold"), true)
+        case Proceed(_) => @Fail("short history must not compact")
+    }
+}
+
+// pruneForRequest：默认不启用时原样返回
+@Test
+func compactor_pruneDisabledReturnsInput() {
+    let msgs = bigHistory(18000)
+    let out = BasicCompactor().pruneForRequest(msgs, ToolResultPruneConfig())
+    @Expect(out.size, msgs.size)
+}
