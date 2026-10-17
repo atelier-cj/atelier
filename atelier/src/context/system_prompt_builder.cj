@@ -6,11 +6,38 @@ import atelier.tool.McpManager
 import std.collection.*
 import std.fs.*
 
+/**
+ * 提示段的**缓存稳定性**：决定它被排在系统提示的哪一段。
+ *
+ * 为什么需要这个标记：provider 的**前缀缓存**按「缓存前缀单元完整匹配」计费
+ * （DeepSeek 官方口径），命中与未命中单价差一个数量级。系统提示里只要混进
+ * 每次都变的内容（时间戳、面板状态、记忆概览），它**之后的所有内容**都会退化为未命中。
+ * 所以稳定内容必须全部排在前面，动态内容一律后置。
+ *
+ * 判据：**「同一宿主、同一 agent，连续多次 run 之间是否逐字相同」**
+ * —— 相同 → `Stable`；每次可能不同 → `Dynamic`。
+ */
+public enum SegmentStability {
+    | Stable
+    | Dynamic
+}
+
 // 宿主自定义系统提示段贡献者（扩展点：租户/合规/项目元数据/审计声明等）。
 // 追加在 [Session Context] 之后、MCP/Skill 目录段之前；返回 "" 表示无内容跳过。
 // 段文本自带标题格式（如 "[Tenant Rules]")——库不约束。
+//
+// 段按 [stability] 排序：所有 `Stable` 段在前，`Dynamic` 段在后（各自保持注入顺序）。
+// 默认 `Stable`：既有实现无需改动即保持原有相对次序与语义。
 public interface PromptSegmentContributor {
     func render(env: SessionEnvironment): String
+
+    /**
+     * 本段的缓存稳定性，默认 [SegmentStability.Stable]。
+     *
+     * 若实现返回的内容**每次 run 都可能不同**（时间戳、实时指标、面板渲染、
+     * 记忆摘要……），**必须**覆写为 `Dynamic`，否则它会把后面所有内容的缓存前缀打掉。
+     */
+    func stability(): SegmentStability { SegmentStability.Stable }
 }
 
 public class SystemPromptBuilder {
@@ -59,12 +86,18 @@ public class SystemPromptBuilder {
             }
             sb.append("\n")
         }
+        // 先稳定后动态：动态段一旦插在中间，它之后的所有内容都会退化为缓存未命中。
+        // 两遍渲染而不是一趟排序——保持同类段之间的注入顺序（稳定排序）。
         for (c in contributors) {
-            let seg = c.render(env)
-            if (seg != "") {
-                sb.append(seg)
-                if (!seg.endsWith("\n")) { sb.append("\n") }
-                sb.append("\n")
+            match (c.stability()) {
+                case SegmentStability.Stable => appendSegment(sb, c.render(env))
+                case _ => ()
+            }
+        }
+        for (c in contributors) {
+            match (c.stability()) {
+                case SegmentStability.Dynamic => appendSegment(sb, c.render(env))
+                case _ => ()
             }
         }
         sb.toString()
@@ -145,4 +178,12 @@ func readFileText(p: Path): String {
     let raw = Array<Byte>(all.size, repeat: 0)
     for (i in 0..all.size) { raw[i] = all[i] }
     String.fromUtf8(raw)
+}
+
+// 追加一段贡献：空串跳过，末尾缺换行则补齐，并留一个空行分隔（既有格式不变）
+func appendSegment(sb: StringBuilder, seg: String): Unit {
+    if (seg == "") { return }
+    sb.append(seg)
+    if (!seg.endsWith("\n")) { sb.append("\n") }
+    sb.append("\n")
 }
