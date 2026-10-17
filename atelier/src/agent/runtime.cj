@@ -1171,38 +1171,23 @@ public open class AgentRuntime <: AgentLoop {
                                         ContentList.ofText(unansweredToolCallNote(tc.name)), true, 0))
                                 }
                             }
-                            // 输出撞到 provider 的 token 上限（StopReason.Length）只说明「这一条没写完」，
-                            // 不代表任务结束：同一回合内追加一条续跑消息再请求一次，而不是把半截结果交给宿主。
-                            // 预算按回合计（maxLengthContinuations = 0 时保持旧的「截断即结束」行为）。
-                            // 仓颉的枚举没有内置 == ：用模式匹配取出「是否被截断」
-                            let truncated = match (assistantMsg.stopReason) {
-                                case StopReason.Length => true
-                                case _ => false
-                            }
-                            if (truncated && lengthContinuations < Int64(this.config.maxLengthContinuations)) {
-                                lengthContinuations++
-                                log.warn("response truncated by token limit, continue in same turn (${lengthContinuations}/${this.config.maxLengthContinuations})", Array<Attr>())
-                                currentMessages.add(UserMessage(ContentList.ofText(lengthContinuationPrompt()), 0))
-                                resumingSameTurn = true
-                                continue
-                            }
-                            if (truncated) {
-                                log.warn("response truncated and continuation budget exhausted (${this.config.maxLengthContinuations}), end turn", Array<Attr>())
-                            }
-                            // 收尾前自验：模型在「没有工具调用」的回合里宣布完成时，先要求它对着任务
-                            // 要求实操核对（读产物 / 跑验证 / 复核约束），确认后再允许收尾。
-                            // 只在真正做过事（toolCallCount > 0）且是正常回合结束时触发；
-                            // 预算是整个 run 的总次数，0 = 关闭。
-                            let announcedDone = match (assistantMsg.stopReason) {
-                                case StopReason.EndTurn => true
-                                case _ => false
-                            }
-                            if (announcedDone && toolCallCount > 0
-                                && verifyPasses < Int64(this.config.maxVerifyPasses)) {
-                                verifyPasses++
-                                log.warn("agent announced completion, run verify pass (${verifyPasses}/${this.config.maxVerifyPasses})", Array<Attr>())
-                                currentMessages.add(UserMessage(ContentList.ofText(verifyBeforeFinishPrompt()), 0))
-                                continue
+                            // 回合收尾的三种走向交给纯函数判定（可单测，见 turn_policy.cj）：
+                            // 截断续跑 / 收尾前自验 / 正常收尾。这里只负责按判定执行副作用。
+                            match (decideTurnVerdict(assistantMsg.stopReason, lengthContinuations,
+                                Int64(this.config.maxLengthContinuations), toolCallCount,
+                                verifyPasses, Int64(this.config.maxVerifyPasses))) {
+                                case TurnVerdict.ContinueAfterTruncation =>
+                                    lengthContinuations++
+                                    log.warn("response truncated by token limit, continue in same turn (${lengthContinuations}/${this.config.maxLengthContinuations})", Array<Attr>())
+                                    currentMessages.add(UserMessage(ContentList.ofText(lengthContinuationPrompt()), 0))
+                                    resumingSameTurn = true
+                                    continue
+                                case TurnVerdict.VerifyBeforeFinish =>
+                                    verifyPasses++
+                                    log.warn("agent announced completion, run verify pass (${verifyPasses}/${this.config.maxVerifyPasses})", Array<Attr>())
+                                    currentMessages.add(UserMessage(ContentList.ofText(verifyBeforeFinishPrompt()), 0))
+                                    continue
+                                case TurnVerdict.End => ()
                             }
                             log.info("turn finished", Array<Attr>())
                             let turnUpdate = runAfterTurnHooks(hookState, turnCount)
