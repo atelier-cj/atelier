@@ -77,7 +77,7 @@ dsh-compaction-tool-result-pruner → 工具结果修剪
 
 **即：`Agent` 接口只管身份（`readonly id: SessionId`），行为约束在 `AgentHandle`（`status`/`cancel`/`send`/`whenIdle`），真正的循环是 `loop` 这个可替换实现。**
 
-**atelier 现状**：`AgentRuntime`（1455 行）是**具体类**，主循环在 `private func chatWithEnv`，
+**atelier 现状**：`AgentRuntime`（约 1579 行）是**具体类**，主循环在 `private func chatWithEnv`，
 `HarnessSpec` 无 `loop` 字段 —— 详见 §2.4。
 
 ### 1.3 压缩（缺失，本设计要补）
@@ -90,18 +90,18 @@ dsh-compaction-tool-result-pruner → 工具结果修剪
 | 位置 | 内容 |
 |---|---|
 | `atelier/src/context/compaction.cj`（727 行） | `CompactSpec` / `resolveCompactSpec` / `CompactionLedger` / 修剪 / 摘要 |
-| `atelier/src/agent/runtime.cj`（1455 行）**里的调用逻辑** | 请求前压力检测、溢出恢复、括弧事件、台账写入、`retry` 路径 |
+| `atelier/src/agent/runtime.cj`（约 1579 行）**里的调用逻辑** | 请求前压力检测、溢出恢复、括弧事件、台账写入、`retry` 路径 |
 
 **所以压缩现在既不是接口，也没独立成包。**
 
 ### 1.4 四类可替换点的小结
 
-| 能力 | 现状 | 本设计要做的 |
+| 能力 | 现状（v3，2026-10-17 核） | 本设计要做的 |
 |---|---|---|
 | **存储**（`SessionStore`） | ✅ 接口 + 两个实现 | 不动 |
-| **信任判定**（`TrustGate`） | ⚠️ 自由函数、策略焊死 | **提为函数类型**（A-1，✅ 已完成） |
-| **压缩**（`Compactor`） | ❌ 非接口、未独立成包 | **提为 interface + 默认实现独立**（档 B） |
-| **循环**（`AgentLoop`） | ❌ 具体类、10 处硬编码 | **提为 interface + 工厂**（档 C） |
+| **信任判定**（`TrustGate`） | ✅ **已提为函数类型**（A-1 完成） | 无 |
+| **压缩**（`Compactor`） | ✅ **已提为 interface**（`BasicCompactor` / `NoopCompactor`） | 剩 B-2：默认实现独立成包（当前与接口同包不同文件） |
+| **循环**（`AgentLoop`） | ✅ **已提为 interface + 工厂**，硬编码构造点已全部改走 `createLoop` | 剩 C-2：主循环内部再拆（已完成 2 步） |
 
 ---
 
@@ -155,7 +155,7 @@ dsh-compaction-tool-result-pruner → 工具结果修剪
 | 事实 | 位置 |
 |---|---|
 | `AgentRuntime` 是 `open class`，**4 个入口是 `open`** | `runtime.cj:99,534,543,557,562` |
-| **但 1455 行的主循环在 `private func chatWithEnv(sessionId, ...)`** | `runtime.cj:585` |
+| **但 537 行的主循环在 `private func chatWithEnv(sessionId, ...)`** | `runtime.cj:585` |
 | 那 4 个 `open` 方法**全是转发壳** | 覆盖它们等于丢掉整个 agent 能力 |
 | **10 处**硬编码 `AgentRuntime(...)` 构造** | `server/handler.cj`×3、`cli/tui.cj`×2、`cli/app/main.cj`、`server/ag_ui_handler.cj`、`agent/agent_tool.cj`、`agent/session_loop.cj`、`agent/harness.cj` |
 | `HarnessSpec` **没有 runtime/loop 字段** | `harness.cj:32-56`（**13 个字段**，无 factory） |
@@ -297,8 +297,8 @@ export type AgentStatus = 'idle' | 'running';
 
 | # | 做什么 | 现状问题 | 验收 | 状态 |
 |---|---|---|---|---|
-| **A-1** | 信任判定提为可注入闸门 | `shouldAllowFor` 是自由函数、策略焊在函数体 | `type TrustGate = (Tool, String, String) -> TrustDecision` + `pathTrustGate` 工厂 + `HarnessSpec.withTrustGate`；旧函数保留兼容包装 | ✅ **已完成**（2026-10-17，912 用例绿） |
-| **A-2** | **提示段稳定性标记**（原 A-3） | 所有 `PromptSegmentContributor` 一律当稳定段排在前面；动态段（时间戳、面板渲染）会打掉缓存前缀 | `PromptSegmentContributor.stability(): SegmentStability`（默认 `Stable`）；`ContextBuilder` 按稳定性排序 | 待做（小） |
+| **A-1** | 信任判定提为可注入闸门 | `shouldAllowFor` 是自由函数、策略焊在函数体 | `type TrustGate = (Tool, String, String) -> TrustDecision` + `pathTrustGate` 工厂 + `HarnessSpec.withTrustGate`；旧函数保留兼容包装 | ✅ **已完成**（2026-10-17） |
+| **A-2** | **提示段稳定性标记**（原 A-3） | 所有 `PromptSegmentContributor` 一律当稳定段排在前面；动态段（时间戳、面板渲染）会打掉缓存前缀 | `PromptSegmentContributor.stability(): SegmentStability`（默认 `Stable`）；`ContextBuilder` 按稳定性排序 | ✅ **已完成** |
 | **A-3** | 补 `HarnessSpec` 派生（原 A-4） | 新增字段要有对应 `with*` | `withTrustGate` 已加；后续新增接口逐个补 | 随各档进行 |
 
 **关于 `ContextBuilder` / `SystemPromptBuilder` 要不要接口化**（原待决 1）：**不做**。核实结论见 §7 已决第 1 条。
@@ -311,11 +311,11 @@ export type AgentStatus = 'idle' | 'running';
 
 | # | 做什么 | 拆解 |
 |---|---|---|
-| **B-1** | 抽 `Compactor` 接口 | 方法集：`shouldCompact` / `compact` / `report`？见 §7 待决 2 |
-| **B-2** | 默认实现独立成包 | `atelier/src/compaction/`（把 `context/compaction.cj` 727 行迁过去） |
-| **B-3** | **把主循环里的压缩调用逻辑抽出来** | `runtime.cj` 里的：请求前压力检测、溢出恢复、括弧事件、台账写入 |
-| **B-4** | 装配 | `HarnessSpec.compactor: Compactor` + `withCompactor` |
-| **B-5** | 提供"不压缩"实现 | `NoopCompactor`（证明真的可插拔；宿主自持上下文策略时用它关掉压缩） |
+| **B-1** | 抽 `Compactor` 接口 | ✅ **已完成**：`shouldCompact` / `compact` / `pruneForRequest` 三方法 + `CompactDecision` |
+| **B-2** | 默认实现独立成包 | ⚠️ **部分完成**：接口与新实现已在新文件 `context/compactor.cj`，但**未拆成独立成员包**。收益已不大，暂缓 |
+| **B-3** | **把主循环里的压缩调用逻辑抽出来** | ✅ **决策边界已抽出**（交给 `Compactor` 判定）；⚠️ 时序编排（括弧/台账/互斥）**有意留在运行时**——见 §6.2 的边界说明 |
+| **B-4** | 装配 | ✅ **已完成**：`HarnessSpec.compactor` + `withCompactor` + `resolvedCompactor()` |
+| **B-5** | 提供"不压缩"实现 | ✅ **已完成**：`NoopCompactor` |
 
 **B-3 是本档的真难点**：压缩不只在 `compaction.cj`，主循环里还有一大坨调用与事件编排。
 
@@ -323,16 +323,22 @@ export type AgentStatus = 'idle' | 'running';
 
 | # | 做什么 | 拆解 |
 |---|---|---|
-| **C-1** | 抽 `AgentLoop` 接口 | 见 §7 待决 3 的方法集草案 |
-| **C-2** | **切分 `AgentRuntime` 1455 行** | 核心循环（请求→工具→下一轮）vs 可选阶段 |
-| **C-3** | 默认实现改名 | `AgentRuntime` → `DefaultAgentLoop`（或保留 `AgentRuntime` 作为别名） |
-| **C-4** | `HarnessSpec.loop` + 工厂 | 10 处硬编码构造改走工厂 |
-| **C-5** | **`AgentStatus` 生命周期** | `idle`/`running` + 事件（解决 always-on B 组） |
-| **C-6** | 迁移 `SessionLoop` | 它现在是"加载历史→调 runtime→落库"，抽接口后要重新定位（动 acp/a2a/subagent 三处） |
-| **C-7** | **`steer` / `inject` 插话** | 按会话的 `steerQueues` + 循环顶部 drain + `[User interjection]` 标注（见 §11） |
+| **C-1** | 抽 `AgentLoop` 接口 | ✅ **已完成**：`loop_interface.cj`，9 个方法 |
+| **C-2** | **切分 `AgentRuntime` 主循环** | ⚠️ **部分完成（2 步）**：回合收尾判定、工具预算裁决已抽为纯函数；剩余候选边际收益递减，暂缓 |
+| **C-3** | 默认实现改名 | ✅ **已决策不做**：保留 `AgentRuntime`，它 `<: AgentLoop`。零改名 |
+| **C-4** | `HarnessSpec.loop` + 工厂 | ✅ **已完成**：`withLoopFactory` + `createLoop`，硬编码构造点已全部改走 |
+| **C-5** | **`AgentStatus` 生命周期** | ✅ **已完成并修缺陷**：状态推进下沉到 `chatWithEnv`（四个入口真实生效）、按会话而非 agent 名记录、异常路径经 `finally` 回 `Idle` |
+| **C-6** | 迁移 `SessionLoop` | ⬜ **未做**：当前位置（加载历史→调 runtime→收事件→落库）是合理的**宿主封装**，与 `AgentLoop` 不同层。见 §7 待决 5（决定保留为 (a)） |
+| **C-7** | **`steer` / `inject` 插话** | ✅ **已完成**（入队 + 循环顶部 drain + 标注）；⚠️ "idle 时唤醒"未做（属 A1） |
 | **C-8** | ~~`applyArchiveMarks` / `applyArchives` 保插话验证~~ | ✅ **已核实安全**：两者只处理 `ArchiveMessage`（按 index 裁剪）与 `toolName == "archive_history"` 的 `ToolResultMessage`，`UserMessage` 原样保留（§11.4 第 1 行已更新） |
 
-**C-2 与 C-6 是本档的真难点。**
+**进度小结（2026-10-17 核）**：三档的**接口层已全部就位**——`TrustGate`（函数类型）、
+`Compactor`（interface + 2 实现）、`AgentLoop`（interface + 工厂 + 状态 + 插话）。
+剩余项都不是"接口没做"，而是**实现内部再拆**（C-2 剩余）与**包结构**（B-2），
+两者收益都在递减。测试基线：**951 用例全绿**。
+
+**C-2 与 C-6 是两个未收口项，但性质不同**：C-2 是"可以继续、但没有强理由"；
+C-6 是"看过之后判定不该做"（`SessionLoop` 是宿主封装，不是循环实现）。
 
 ---
 
@@ -532,7 +538,7 @@ spec.withTrustGate({ tool, wd, sid =>
 
 | 层 | 标准 |
 |---|---|
-| **回归** | `cjpm test` **903 用例全绿**（2026-10-17 实测基线，`TOTAL: 903, PASSED: 903`） |
+| **回归** | `cjpm test` **951 用例全绿**（2026-10-17 实测基线，`TOTAL: 951, PASSED: 951, FAILED: 0`） |
 | **档 A** | lumine 能用**自己的** `SessionStore` 跑通一个会话；`TrustGate` 可换（有测试证明换了行为变） |
 | **档 B** | 存在**至少两个** `Compactor` 实现（默认 / 不压缩），装配切换有测试 |
 | **档 C** | **存在至少两个 `AgentLoop` 实现**（默认 / 测试用的假实现），10 处构造点全走工厂；`AgentStatus` 能从 `idle→running→idle` 有事件；**`steer` 在工具执行中途投递的插话，下一次模型调用可见**（测试要有断言） |
