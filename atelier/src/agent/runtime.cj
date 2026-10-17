@@ -104,6 +104,9 @@ public open class AgentRuntime {
     private let toolRegistry: ToolRegistry
     private let sessionStore: SessionStore
     private let trustManager: TrustManager
+    // 生效的信任闸门（装配期解析一次：注入的优先，否则绑定 trustManager 的默认闸门）。
+    // 语义与改动前等价，差别只在"判定从哪来"由装配束决定。
+    private let trustGate: TrustGate
     private let skillRegistry: SkillRegistry
     private let agentRegistry: AgentRegistry
     private let toolExecutor: ToolExecutor
@@ -147,6 +150,7 @@ public open class AgentRuntime {
         this.toolRegistry = spec.tools
         this.sessionStore = spec.store
         this.trustManager = spec.trust
+        this.trustGate = spec.resolvedTrustGate()
         this.skillRegistry = spec.skills
         this.agentRegistry = spec.agents
         this.toolExecutor = ToolExecutor(this.toolRegistry,
@@ -842,7 +846,7 @@ public open class AgentRuntime {
                                 let tc = toolCalls[idx]
                                 match (this.toolRegistry.get(tc.name)) {
                                     case Some(t) =>
-                                        match (shouldAllowFor(t, ctx.workDir, this.trustManager, sessionId)) {
+                                        match (this.trustGate(t, ctx.workDir, sessionId)) {
                                             case TrustDecision.Allowed =>
                                                 let (args, skipMsg) = decideToolCall(hookState, turnCount, tc)
                                                 match (args) {
@@ -1221,7 +1225,7 @@ public open class AgentRuntime {
         hookState: HookState,
         turnCount: Int64
     ): PtcAuthDecision {
-        match (shouldAllowFor(tool, ctx.workDir, this.trustManager, ctx.sessionId)) {
+        match (this.trustGate(tool, ctx.workDir, ctx.sessionId)) {
             case TrustDecision.Denied =>
                 return PtcAuthDecision.Deny("Tool not allowed: workDir is untrusted")
             case TrustDecision.NeedsApproval =>
