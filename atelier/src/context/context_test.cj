@@ -661,33 +661,29 @@ func promptSegments_emptySkipped() {
     @Expect(out.startsWith("\n\n"), false)
 }
 
-// 缓存友好的核心性质：稳定部分逐字可复现，且动态内容排在它之后
+// 缓存友好的核心性质：动态段之前的那一段前缀，在动态内容变化时逐字不变
+//
+// 这正是前缀缓存的判据：provider 按「缓存前缀单元完整匹配」计费，所以要求
+// 「同一个稳定前缀 + 变化的尾巴」——而不是「整串相同」。
 @Test
 func promptSegments_stablePrefixIsReproducible() {
-    let cs = ArrayList<PromptSegmentContributor>()
-    cs.add(StableSeg("[S]\n"))
-    cs.add(DynamicSeg("[D]\n"))
-    let first = buildWith(cs)
-    let second = buildWith(cs)
-    // 两次构建完全相同（本例动态段内容其实是常量，故整串可比）
-    @Expect(first == second, true)
-    // 且稳定段确实在动态段之前 —— 这就是"稳定前缀"成立的条件
-    @Expect(posOf(first, "[S]") < posOf(first, "[D]"), true)
-}
-
-// 动态段内容变化时，稳定段位置不变（缓存前缀不被它推动）
-@Test
-func promptSegments_dynamicContentDoesNotMoveStablePart() {
+    // 两次构建只有动态段内容不同
     let cs1 = ArrayList<PromptSegmentContributor>()
     cs1.add(StableSeg("[S]\n"))
     cs1.add(DynamicSeg("[TIME 100]\n"))
     let cs2 = ArrayList<PromptSegmentContributor>()
     cs2.add(StableSeg("[S]\n"))
     cs2.add(DynamicSeg("[TIME 200]\n"))
+
     let a = buildWith(cs1)
     let b = buildWith(cs2)
-    // 稳定段的起始位置在两次之间相同（动态内容变了，但没插到稳定段之前）
-    @Expect(posOf(a, "[S]"), posOf(b, "[S]"))
-    // 动态段本身不同 —— 证明它确实是变量部分
+    // 整串不同（动态内容变了）
     @Expect(a == b, false)
+    // 但切到动态段起点为止，前缀逐字相同 —— 这就是缓存能吃到的部分
+    let cutA = posOf(a, "[TIME")
+    let cutB = posOf(b, "[TIME")
+    @Expect(cutA > 0, true)
+    @Expect(cutA, cutB)
+    @Expect(a[0..cutA], b[0..cutB])
 }
+
