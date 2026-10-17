@@ -781,6 +781,97 @@ public open class AgentRuntime <: AgentLoop {
     }
 
     /**
+     * 单个工具调用的准入判定：**放行 / 跳过 / 挂起**。
+     *
+     * 抽出来的理由：原先是三段几乎相同的 if/else（自动放行 / 允许一次 / 总是允许），
+     * 每段都重复「调 beforeTool 钩子 → 建 batch 条目 → 记录失败原因」；
+     * 且 `validateAnswer` 被调了两次（一次只为打日志）。改一处必须记得另外两处。
+     *
+     * 判定与副作用在这里分开：本方法**只决定**，写 batch / 写信任状态由调用方做。
+     * 这样四分支（Allow / Skip / Suspend 及其子类）可以单独测。
+     *
+     * @param idx 在原始 toolCalls 中的下标（`skipResults` 的键，裁剪后仍需对上）
+     */
+    private func admitToolCall(tc: ToolCallBlock, idx: Int64, ctx: ToolContext,
+        sessionId: String, turnCount: Int64, hookState: HookState,
+        resumed: HashMap<String, UserAnswer>, log: Logger): ToolAdmission {
+        let tool = match (this.toolRegistry.get(tc.name)) {
+            case Some(t) => t
+            case None => return ToolAdmission.Skip("Tool not found: " + tc.name)
+        }
+        match (this.trustGate(tool, ctx.workDir, sessionId)) {
+            case TrustDecision.Denied =>
+                log.warn("tool ${tc.name} blocked: workDir untrusted", Array<Attr>())
+                return ToolAdmission.Skip("Tool not allowed: workDir is untrusted")
+            case TrustDecision.Allowed =>
+                return this.admitAfterHooks(tc, turnCount, hookState, log)
+            case TrustDecision.NeedsApproval =>
+                return this.admitByAsking(tc, idx, ctx, sessionId, turnCount, hookState,
+                    resumed, log)
+        }
+    }
+
+    /** 已通过信任闸门：过滤器 hooks 是否进一步拦截或改写参数 */
+    private func admitAfterHooks(tc: ToolCallBlock, turnCount: Int64,
+        hookState: HookState, log: Logger): ToolAdmission {
+        let (args, skipMsg) = decideToolCall(hookState, turnCount, tc)
+        match (args) {
+            case Some(a) => return ToolAdmission.Allow(a)
+            case None => ()
+        }
+        let reason = skipMsg ?? "Tool blocked by hook"
+        log.warn("tool ${tc.name} blocked by hook", Array<Attr>())
+        ToolAdmission.Skip(reason)
+    }
+
+    /**
+     * 需要审批：问宿主 → 校验答复 → 按结论决定。
+     *
+     * `validateAnswer` 只调一次：不合格的答复按拒绝处理（不静默接受），
+     * 并且**不写信任状态**（宁可下次再问，也不要让一次坏答复把目录永久标记为可信）。
+     */
+    private func admitByAsking(tc: ToolCallBlock, idx: Int64, ctx: ToolContext,
+        sessionId: String, turnCount: Int64, hookState: HookState,
+        resumed: HashMap<String, UserAnswer>, log: Logger): ToolAdmission {
+        // 审批走结构化提问：菜单由 approvalRequest 统一构造，结论只认选项 id
+        // 参数原样带上：审批的全部意义是让人看清「要执行什么」，只给工具名等于让人盲签
+        let gateReq = approvalRequest(
+            "ask:${sessionId}:${turnCount}:${tc.id}:approval",
+            tc.name, tc.args, "Tool '" + tc.name + "' needs your approval.",
+            toolCallId: tc.id)
+        let gateAns = this.askHost(gateReq, resumed)
+        // 宿主要求挂起：整批都不执行（结果在批量执行后才写历史，
+        // 所以此刻挂起等于"什么都没发生"，重放不会重复副作用）
+        match (gateAns.status) {
+            case UserAnswerStatus.Pending =>
+                // 带上原始提问：协议适配层据此生成答复契约（AG-UI 的 responseSchema）
+                return ToolAdmission.Suspend(ExternalRequest(gateReq.id,
+                    "confirmation", gateReq.message, toolCallId: tc.id,
+                    request: Some(gateReq)))
+            case _ => ()
+        }
+        // 答复一律过校验：不合格按拒绝处理，且不写信任状态
+        match (validateAnswer(gateReq, gateAns)) {
+            case Some(err) =>
+                log.warn("invalid approval answer (${err}); treating as deny", Array<Attr>())
+                return ToolAdmission.Skip("Tool not allowed: invalid approval answer")
+            case None => ()
+        }
+        if (gateAns.isAllowAlways()) {
+            this.trustManager.setTrust(ctx.workDir, TrustState.Trusted)
+            log.info("tool ${tc.name} always approved for ${ctx.workDir}", Array<Attr>())
+            return this.admitAfterHooks(tc, turnCount, hookState, log)
+        }
+        if (gateAns.isAllowOnce()) {
+            this.trustManager.setSessionTrust(sessionId, ctx.workDir, TrustState.Trusted)
+            log.info("tool ${tc.name} approved for session", Array<Attr>())
+            return this.admitAfterHooks(tc, turnCount, hookState, log)
+        }
+        log.warn("tool ${tc.name} denied by user", Array<Attr>())
+        ToolAdmission.Skip("Tool not allowed: user denied approval")
+    }
+
+    /**
      * 回合开场：推进回合计数 + 插话落地 + 历史归档转换。
      *
      * 三件事放一处的原因：它们有**固定的先后顺序**，而这个顺序本身是契约
@@ -1023,89 +1114,19 @@ public open class AgentRuntime <: AgentLoop {
                             var idx: Int64 = 0
                             while (idx < toolCalls.size) {
                                 let tc = toolCalls[idx]
-                                match (this.toolRegistry.get(tc.name)) {
-                                    case Some(t) =>
-                                        match (this.trustGate(t, ctx.workDir, sessionId)) {
-                                            case TrustDecision.Allowed =>
-                                                let (args, skipMsg) = decideToolCall(hookState, scope.turnCount, tc)
-                                                match (args) {
-                                                    case Some(a) =>
-                                                        batch.add((tc.name, this.callContext(ctx, tc.id), a))
-                                                        runCallIds.add(tc.id)
-                                                        runNames.add(tc.name)
-                                                    case None =>
-                                                        skipResults[idx] = skipMsg ?? "Tool blocked by hook"
-                                                        log.warn("tool ${tc.name} blocked by hook", Array<Attr>())
-                                                }
-                                            case TrustDecision.NeedsApproval =>
-                                                // 审批走结构化提问：菜单由 approvalRequest 统一构造，
-                                                // 结论只认选项 id（不再比对 "y"/"yes"/"a" 这类魔法字符串）
-                                                // 参数原样带上：审批的全部意义是让人看清「要执行什么」，
-                                                // 只给工具名等于让人盲签（钩子改写前的原始参数）
-                                                let gateReq = approvalRequest(
-                                                    "ask:${sessionId}:${scope.turnCount}:${tc.id}:approval",
-                                                    tc.name, tc.args,
-                                                    "Tool '" + tc.name + "' needs your approval.",
-                                                    toolCallId: tc.id)
-                                                let gateAns = this.askHost(gateReq, resumedAnswers)
-                                                // 宿主要求挂起：记下来，整批都不执行（结果在批量执行后才写历史，
-                                                // 所以此刻挂起等于"什么都没发生"，重放不会重复副作用）
-                                                match (gateAns.status) {
-                                                    case UserAnswerStatus.Pending =>
-                                                        // 带上原始提问：协议适配层据此生成答复契约
-                                                        // （AG-UI 的 responseSchema），只有 message 的话
-                                                        // 前端只能猜表单该收什么字段
-                                                        pendingAsks.add(ExternalRequest(gateReq.id,
-                                                            "confirmation", gateReq.message,
-                                                            toolCallId: tc.id, request: Some(gateReq)))
-                                                    case _ => ()
-                                                }
-                                                // 答复一律过校验：不合格按拒绝处理（不静默接受）
-                                                match (validateAnswer(gateReq, gateAns)) {
-                                                    case Some(err) =>
-                                                        log.warn("invalid approval answer (${err}); treating as deny", Array<Attr>())
-                                                    case None => ()
-                                                }
-                                                let gateInvalid = match (validateAnswer(gateReq, gateAns)) {
-                                                    case Some(_) => true
-                                                    case None => false
-                                                }
-                                                if (!gateInvalid && gateAns.isAllowAlways()) {
-                                                    this.trustManager.setTrust(ctx.workDir, TrustState.Trusted)
-                                                    log.info("tool ${tc.name} always approved for ${ctx.workDir}", Array<Attr>())
-                                                    let (args, skipMsg) = decideToolCall(hookState, scope.turnCount, tc)
-                                                    match (args) {
-                                                        case Some(a) =>
-                                                            batch.add((tc.name, this.callContext(ctx, tc.id), a))
-                                                            runCallIds.add(tc.id)
-                                                            runNames.add(tc.name)
-                                                        case None =>
-                                                            skipResults[idx] = skipMsg ?? "Tool blocked by hook"
-                                                            log.warn("tool ${tc.name} blocked by hook", Array<Attr>())
-                                                    }
-                                                } else if (!gateInvalid && gateAns.isAllowOnce()) {
-                                                    this.trustManager.setSessionTrust(sessionId, ctx.workDir, TrustState.Trusted)
-                                                    log.info("tool ${tc.name} approved for session", Array<Attr>())
-                                                    let (args, skipMsg) = decideToolCall(hookState, scope.turnCount, tc)
-                                                    match (args) {
-                                                        case Some(a) =>
-                                                            batch.add((tc.name, this.callContext(ctx, tc.id), a))
-                                                            runCallIds.add(tc.id)
-                                                            runNames.add(tc.name)
-                                                        case None =>
-                                                            skipResults[idx] = skipMsg ?? "Tool blocked by hook"
-                                                            log.warn("tool ${tc.name} blocked by hook", Array<Attr>())
-                                                    }
-                                                } else {
-                                                    skipResults[idx] = "Tool not allowed: user denied approval"
-                                                    log.warn("tool ${tc.name} denied by user", Array<Attr>())
-                                                }
-                                            case TrustDecision.Denied =>
-                                                skipResults[idx] = "Tool not allowed: workDir is untrusted"
-                                                log.warn("tool ${tc.name} blocked: workDir untrusted", Array<Attr>())
-                                        }
-                                    case None =>
-                                        skipResults[idx] = "Tool not found: " + tc.name
+                                let admission = this.admitToolCall(tc, idx, ctx, sessionId,
+                                    scope.turnCount, hookState, resumedAnswers, log)
+                                match (admission) {
+                                    case ToolAdmission.Allow(args) =>
+                                        let entry: (String, ToolContext, JsonValue) =
+                                            (tc.name, this.callContext(ctx, tc.id), args)
+                                        batch.add(entry)
+                                        runCallIds.add(tc.id)
+                                        runNames.add(tc.name)
+                                    case ToolAdmission.Skip(reason) =>
+                                        skipResults[idx] = reason
+                                    case ToolAdmission.Suspend(req) =>
+                                        pendingAsks.add(req)
                                 }
                                 idx++
                             }

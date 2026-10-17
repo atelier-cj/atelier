@@ -1,8 +1,10 @@
 package atelier.agent
 
 import atelier.message.Message
+import atelier.tool.ExternalRequest
 import std.collection.*
 import std.time.MonoTime
+import jsonvalue.*
 
 /**
  * 一次 run 期间**跨回合保留的可变状态**。
@@ -53,4 +55,23 @@ internal class RunScope {
     init(messages: ArrayList<Message>) {
         this.messages = messages
     }
+}
+
+/**
+ * 单个工具调用的**准入结论**。
+ *
+ * 为什么要有它：准入判定原先写成「三份重复的 10 行 if/else + 一次重复校验 +
+ * 信任状态写入散落两个分支」。三条放行路径（自动放行 / 允许一次 / 总是允许）
+ * 里，建 batch 条目与失败原因记录是**完全相同**的代码，抄三遍意味着改一处就得
+ * 记得还有两处。
+ *
+ * 把"判定"与"执行副作用（写 batch、写信任状态）"分开后，判定本身可单测。
+ */
+internal enum ToolAdmission {
+    /** 放行：参数可能已被 beforeTool 钩子改写 */
+    | Allow(JsonValue)
+    /** 不放行：`String` 是写进历史的原因（必须给出，否则模型不知道为何被跳过） */
+    | Skip(String)
+    /** 宿主要求先确认：整批挂起，等答复后重放 */
+    | Suspend(ExternalRequest)
 }
