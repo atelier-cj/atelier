@@ -727,6 +727,380 @@ public open class AgentRuntime <: AgentLoop {
         }
     }
 
+    /**
+     * 请求派发前的上下文压力处理（dsh 的 pre-step 位置）。
+     *
+     * 先修剪（只影响本次请求，不落库），修剪后仍在阈值之上才摘要 + 替换历史。
+     * 放在请求前而不是回合结束后：回合结束后再压，本轮该发的请求早就发出去了。
+     *
+     * 决策交给 `Compactor`（它回答"压不压、切哪、预算多少"），
+     * 而时序（括弧/台账/互斥）留在运行时保证跨实现一致。
+     */
+    private func compactBeforeRequest(scope: RunScope, sessionId: String,
+        actualModel: String, systemText: String, tools: ArrayList<OpenAITool>,
+        log: Logger): Unit {
+        var measureMessages = scope.messages
+        if (this.compactionEnabledFor()) {
+            let cc = this.compactionConfig()
+            let route = CompactRoute(actualModel,
+                this.modelInfoInUse().info.contextWindow, this.maxOutputTokensInUse())
+            // 修剪版只用于测量：真正发出去的请求由 wireRequest 再修剪一次
+            // （下面 `currentMessages = chatReq.messages` 会把请求表收编为历史，
+            //  在这里写回修剪版会让修剪流进落库历史）
+            match (cc.prune) {
+                case Some(pruneCfg) =>
+                    measureMessages = this.compactor.pruneForRequest(scope.messages, pruneCfg)
+                case None => ()
+            }
+            // 决策交给 compactor：它回答"压不压、切哪、预算多少"，
+            // 而时序（括弧/台账/互斥）留在运行时保证跨实现一致
+            let decision = match (this.compactor) {
+                case bc: BasicCompactor => bc.shouldCompactWith(measureMessages, route, cc)
+                case other => other.shouldCompact(measureMessages, route)
+            }
+            match (decision) {
+                case CompactDecision.Skip(reason) =>
+                    // 只在"算不出预算"这类配置问题上留痕一次；
+                    // 未达阈值是常态，不刷日志
+                    if (!reason.startsWith("under threshold")) {
+                        this.warnCompactionSpecOnce(reason, log)
+                    }
+                case CompactDecision.Proceed(plan) =>
+                    // 报告给事件与台账的 token 数沿用运行时口径（provider 用量锚），
+                    // 与 compactor 内部的判定口径可以不同：前者是"这次压之前有多大"
+                    let total = this.pressureForNextRequest(measureMessages)
+                    let compactor = this.compactor
+                    let compactionRuntime = CompactionRuntime(this.provider, actualModel,
+                        systemText, tools, cc)
+                    scope.messages = this.compactBracketed(plan.trigger, sessionId,
+                        scope.messages, total, log, { msgs, _ =>
+                        compactor.compact(msgs, plan, compactionRuntime)
+                    })
+            }
+        }
+    }
+
+    /**
+     * 调用 provider，并在"超上下文窗口"时压掉头部重试。
+     *
+     * 这条恢复路径**不受压力阈值约束** —— 请求已经被拒了，阈值就没有意义了；
+     * 次数受 `CompactionConfig.maxOverflowRetries` 限制。
+     *
+     * 传输级重试（连接失败 / 429 / 瞬时 5xx）由 provider 实现负责，不在这里；
+     * 本方法只处理"必须改写历史才能继续"的这一种失败。
+     *
+     * @return (结论, 最终请求) —— 重试后请求可能已重建，调用方须用返回值覆盖
+     */
+    private func invokeProvider(scope: RunScope, chatReq: ChatRequest, cancelFlag: AtomicBool,
+        stream: EventStream<AgentEvent, ArrayList<Message>>, sessionId: String,
+        actualModel: String, systemText: String, tools: ArrayList<OpenAITool>,
+        ctxBuilder: ContextBuilder, log: Logger): (ProviderAttempt, ChatRequest) {
+        // 重试可能重建请求：用局部可变副本，最终通过返回值交给调用方
+        var req = chatReq
+        // 再重试同一请求（次数受 CompactionConfig.maxOverflowRetries 限制）。这条
+        // 恢复路径不受压力阈值约束 —— 已经被拒了，阈值就没有意义了。
+        let ccForOverflow = this.compactionConfig()
+        var overflowRetries: Int64 = 0
+        var assistantMsg = AssistantMessage(ContentList.ofText(""), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0)
+        var requestFailed = false
+        while (true) {
+            var contentBuilder = StringBuilder()
+            var attemptOk = false
+            try {
+                // provider 通常在**发起请求时**就抛（HTTP 4xx 拿不到流），
+                // 所以这一步也必须在 try 内，否则溢出恢复接不到
+                let chatStream = this.provider.chatStreaming(this.wireRequest(req))
+                var aborted = false
+                while (!aborted) {
+                    if (cancelFlag.load()) {
+                        // 取消：用已累积内容构造部分消息，跳过 result() 等待
+                        assistantMsg = AssistantMessage(ContentList.ofText(contentBuilder.toString()), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0)
+                        aborted = true
+                        break
+                    }
+                    match (chatStream.receive(5 * Duration.second)) {
+                        case Some(delta) =>
+                            if (delta.delta != "") {
+                                contentBuilder.append(delta.delta)
+                                this.emit(stream, MessageUpdateEvent(
+                                    AssistantMessage(ContentList.ofText(contentBuilder.toString()), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0),
+                                    delta.delta))
+                            }
+                            match (delta.finishReason) {
+                                case Some(_) => break
+                                case None => ()
+                            }
+                        case None => break
+                    }
+                }
+                if (!aborted) { assistantMsg = chatStream.result() }
+                attemptOk = true
+            } catch (e: Exception) {
+                // 用 toString() 而不是 message：Socket/FS 这类异常的 message 常为空，
+                // 只打 message 在日志里就是一行「provider error: 」，等于没有信息
+                let errText = e.toString()
+                match (this.recoverFromOverflow(errText, scope.messages, overflowRetries,
+                    ccForOverflow, req, actualModel, systemText, tools, sessionId, log)) {
+                    case Some(nextMsgs) =>
+                        overflowRetries++
+                        scope.messages = nextMsgs
+                        // 用同一套参数重建请求（保留可能已被 hook 改过的 model）
+                        req = ctxBuilder.buildChatRequest(req.model, systemText, scope.messages,
+                            Float64(this.config.temperature), this.maxOutputTokensInUse(),
+                            this.config.thinkingLevel, tools)
+                        continue
+                    case None =>
+                        log.error("provider error: ${errText}", Array<Attr>())
+                        let failureMsg = AssistantMessage(ContentList.ofText("[provider error] ${errText}"), "", "", StopReason.Error, TokenUsage(0, 0), 0)
+                        // 同短路分支：错误必须进消息列表，否则消费端与界面都看不到它
+                        scope.messages.add(failureMsg)
+                        this.emit(stream, TurnEndEvent(failureMsg, ArrayList<ToolResultMessage>()))
+                        requestFailed = true
+                }
+            }
+            if (requestFailed || attemptOk) { break }
+        }
+        if (requestFailed) {
+            return (ProviderAttempt.Failed, req)
+        }
+        // 溢出重试期间 req 可能已被重建（保留 hook 改过的 model），
+        // 故把最终请求一并返回，调用方据此继续后续钩子与收尾处理
+        return (ProviderAttempt.Ok(assistantMsg), req)
+    }
+
+    /**
+     * 执行工具批次并回写结果。
+     *
+     * **本方法的核心不变量**：每个 `toolCall` 必须恰好得到一条 `ToolResultMessage`。
+     * 否则历史里就是 `assistant(tool_calls=N)` 对不上结果，下一次请求被 provider 判 400
+     * （不可重试），整个回合作废。
+     *
+     * 这条不变量由四个来源共同保证，此前散在 87 行的循环体里、靠注释提醒：
+     *   ① 被 hook/信任闸门跳过的 → 从 `skipResults` 取原因
+     *   ② 整批执行抛异常 → 每个 call 各补一条错误结果
+     *   ③ 执行器少给结果 → 补显式失败（不静默跳过）
+     *   ④ 工具要等外部结果 → **不写**结果（写了等于伪造），整批挂起
+     *
+     * 抽成方法后，①②③ 可以单独断言；④ 由返回值表达。
+     */
+    private func executeToolBatch(scope: RunScope, assistantMsg: AssistantMessage,
+        toolCalls: ArrayList<ToolCallBlock>, batch: ArrayList<(String, ToolContext, JsonValue)>,
+        skipResults: HashMap<Int64, String>, runCallIds: ArrayList<String>,
+        runNames: ArrayList<String>, pendingAsks: ArrayList<ExternalRequest>,
+        stream: EventStream<AgentEvent, ArrayList<Message>>,
+        hookState: HookState, log: Logger): ToolBatchOutcome {
+                    let minIntervalMs = Int64(this.config.minToolInterval)
+                    if (minIntervalMs > 0) {
+                        let elapsed = (MonoTime.now() - scope.lastToolTime).toMilliseconds()
+                        if (elapsed < minIntervalMs) {
+                            sleep(Duration.millisecond * (minIntervalMs - elapsed))
+                        }
+                    }
+                    if (pendingAsks.size > 0) {
+                        // 整批一起挂起：一次把本批所有待确认项交给宿主，
+                        // 恢复后同一批一次做完（而不是逐个挂起、逐个恢复）
+                        this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
+                        this.emit(stream, SuspendEvent(pendingAsks))
+                        return ToolBatchOutcome.Suspended
+                    }
+                    // 工具执行开始事件（供流式消费方展示工具进度；被跳过/拦截的工具不发）
+                    for (k in 0..runCallIds.size) {
+                        this.emit(stream, ToolExecutionStartEvent(runCallIds[Int64(k)], runNames[Int64(k)]))
+                    }
+                    let results = try {
+                        this.toolExecutor.executeBatch(batch)
+                    } catch (e: Exception) {
+                        // 同 provider 错误：异常 message 常为空（FS/Socket 类），只打 message 等于没打
+                        log.error("tool execute error: ${e.toString()}", Array<Attr>())
+                        // 整批失败也必须**每个 call 各回一条**结果：只回一条（且 id 为空）
+                        // 会让历史里 assistant(tool_calls=N) 对不上结果，下一次请求被 provider 判 400
+                        for (i in 0..toolCalls.size) {
+                            let tc = toolCalls[Int64(i)]
+                            let text = match (skipResults.get(Int64(i))) {
+                                case Some(msg) => msg
+                                case None => "[Tool error: ${e.message}]"
+                            }
+                            scope.messages.add(ToolResultMessage(tc.id, tc.name,
+                                ContentList.ofText(text), true, 0))
+                        }
+                        this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
+                        return ToolBatchOutcome.Suspended
+                    }
+                    var resIdx: Int64 = 0
+                    // 需要外部给结果的调用：本次 run 挂起（不写结果消息，历史停在
+                    // assistant(tool_calls)），由调用方在下一次 run 带回结果
+                    let pendingExternal = ArrayList<ExternalRequest>()
+                    for (i in 0..toolCalls.size) {
+                        let tc = toolCalls[Int64(i)]
+                        match (skipResults.get(Int64(i))) {
+                            case Some(msg) =>
+                                let tr = ToolResultMessage(tc.id, tc.name, ContentList.ofText(msg), false, 0)
+                                scope.messages.add(tr)
+                            case None =>
+                                if (resIdx < results.size) {
+                                    let r = results[Int64(resIdx)]
+                                    match (r.external) {
+                                        case Some(req) =>
+                                            // 挂起：不产生结果消息（写了就等于伪造结果）
+                                            log.info("tool ${tc.name} awaits external result: ${req.id}", Array<Attr>())
+                                            pendingExternal.add(req)
+                                            resIdx++
+                                            continue
+                                        case None => ()
+                                    }
+                                    log.info("tool ${tc.name} done: err=${r.isError}", Array<Attr>())
+                                    this.mcpManager.markUsedTool(tc.name)
+                                    // 工具执行结束事件（与开始事件一一对应）
+                                    this.emit(stream, ToolExecutionEndEvent(tc.id, r.text, r.isError))
+                                    let tr = ToolResultMessage(tc.id, tc.name, ContentList.ofText(r.text), r.isError, 0)
+                                    scope.messages.add(tr)
+                                    callAfterToolHooks(hookState, scope.turnCount, tc, tr)
+                                    resIdx++
+                                } else {
+                                    // 执行器少给了结果：静默跳过会让这条 call 永远没有配对结果，
+                                    // 下一次请求直接被判 400 —— 宁可回一条显式失败
+                                    log.error("tool executor returned ${results.size} result(s) for ${batch.size} call(s); '${tc.name}' has no result", Array<Attr>())
+                                    scope.messages.add(ToolResultMessage(tc.id, tc.name,
+                                        ContentList.ofText("[Tool error: no result returned by executor]"), true, 0))
+                                }
+                        }
+                    }
+                    scope.toolCallCount += toolCalls.size
+                    scope.lastToolTime = MonoTime.now()
+                    this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
+                    if (pendingExternal.size > 0) {
+                        // 中止本次 run：历史已落在 assistant(tool_calls)，
+                        // 下一次 run 带结果即可继续（见 SuspendEvent 注释）
+                        this.emit(stream, SuspendEvent(pendingExternal))
+                        return ToolBatchOutcome.Suspended
+                    }
+                    ToolBatchOutcome.ContinueRun
+    }
+
+    /**
+     * 单个工具调用的准入判定：**放行 / 跳过 / 挂起**。
+     *
+     * 抽出来的理由：原先是三段几乎相同的 if/else（自动放行 / 允许一次 / 总是允许），
+     * 每段都重复「调 beforeTool 钩子 → 建 batch 条目 → 记录失败原因」；
+     * 且 `validateAnswer` 被调了两次（一次只为打日志）。改一处必须记得另外两处。
+     *
+     * 判定与副作用在这里分开：本方法**只决定**，写 batch / 写信任状态由调用方做。
+     * 这样四分支（Allow / Skip / Suspend 及其子类）可以单独测。
+     *
+     * @param idx 在原始 toolCalls 中的下标（`skipResults` 的键，裁剪后仍需对上）
+     */
+    private func admitToolCall(tc: ToolCallBlock, idx: Int64, ctx: ToolContext,
+        sessionId: String, turnCount: Int64, hookState: HookState,
+        resumed: HashMap<String, UserAnswer>, log: Logger): ToolAdmission {
+        let tool = match (this.toolRegistry.get(tc.name)) {
+            case Some(t) => t
+            case None => return ToolAdmission.Skip("Tool not found: " + tc.name)
+        }
+        match (this.trustGate(tool, ctx.workDir, sessionId)) {
+            case TrustDecision.Denied =>
+                log.warn("tool ${tc.name} blocked: workDir untrusted", Array<Attr>())
+                return ToolAdmission.Skip("Tool not allowed: workDir is untrusted")
+            case TrustDecision.Allowed =>
+                return this.admitAfterHooks(tc, turnCount, hookState, log)
+            case TrustDecision.NeedsApproval =>
+                return this.admitByAsking(tc, idx, ctx, sessionId, turnCount, hookState,
+                    resumed, log)
+        }
+    }
+
+    /** 已通过信任闸门：过滤器 hooks 是否进一步拦截或改写参数 */
+    private func admitAfterHooks(tc: ToolCallBlock, turnCount: Int64,
+        hookState: HookState, log: Logger): ToolAdmission {
+        let (args, skipMsg) = decideToolCall(hookState, turnCount, tc)
+        match (args) {
+            case Some(a) => return ToolAdmission.Allow(a)
+            case None => ()
+        }
+        let reason = skipMsg ?? "Tool blocked by hook"
+        log.warn("tool ${tc.name} blocked by hook", Array<Attr>())
+        ToolAdmission.Skip(reason)
+    }
+
+    /**
+     * 需要审批：问宿主 → 校验答复 → 按结论决定。
+     *
+     * `validateAnswer` 只调一次：不合格的答复按拒绝处理（不静默接受），
+     * 并且**不写信任状态**（宁可下次再问，也不要让一次坏答复把目录永久标记为可信）。
+     */
+    private func admitByAsking(tc: ToolCallBlock, idx: Int64, ctx: ToolContext,
+        sessionId: String, turnCount: Int64, hookState: HookState,
+        resumed: HashMap<String, UserAnswer>, log: Logger): ToolAdmission {
+        // 审批走结构化提问：菜单由 approvalRequest 统一构造，结论只认选项 id
+        // 参数原样带上：审批的全部意义是让人看清「要执行什么」，只给工具名等于让人盲签
+        let gateReq = approvalRequest(
+            "ask:${sessionId}:${turnCount}:${tc.id}:approval",
+            tc.name, tc.args, "Tool '" + tc.name + "' needs your approval.",
+            toolCallId: tc.id)
+        let gateAns = this.askHost(gateReq, resumed)
+        // 宿主要求挂起：整批都不执行（结果在批量执行后才写历史，
+        // 所以此刻挂起等于"什么都没发生"，重放不会重复副作用）
+        match (gateAns.status) {
+            case UserAnswerStatus.Pending =>
+                // 带上原始提问：协议适配层据此生成答复契约（AG-UI 的 responseSchema）
+                return ToolAdmission.Suspend(ExternalRequest(gateReq.id,
+                    "confirmation", gateReq.message, toolCallId: tc.id,
+                    request: Some(gateReq)))
+            case _ => ()
+        }
+        // 答复一律过校验：不合格按拒绝处理，且不写信任状态
+        match (validateAnswer(gateReq, gateAns)) {
+            case Some(err) =>
+                log.warn("invalid approval answer (${err}); treating as deny", Array<Attr>())
+                return ToolAdmission.Skip("Tool not allowed: invalid approval answer")
+            case None => ()
+        }
+        if (gateAns.isAllowAlways()) {
+            this.trustManager.setTrust(ctx.workDir, TrustState.Trusted)
+            log.info("tool ${tc.name} always approved for ${ctx.workDir}", Array<Attr>())
+            return this.admitAfterHooks(tc, turnCount, hookState, log)
+        }
+        if (gateAns.isAllowOnce()) {
+            this.trustManager.setSessionTrust(sessionId, ctx.workDir, TrustState.Trusted)
+            log.info("tool ${tc.name} approved for session", Array<Attr>())
+            return this.admitAfterHooks(tc, turnCount, hookState, log)
+        }
+        log.warn("tool ${tc.name} denied by user", Array<Attr>())
+        ToolAdmission.Skip("Tool not allowed: user denied approval")
+    }
+
+    /**
+     * 回合开场：推进回合计数 + 插话落地 + 历史归档转换。
+     *
+     * 三件事放一处的原因：它们有**固定的先后顺序**，而这个顺序本身是契约
+     * （插话必须在归档转换之前落地，否则会被当轮转换处理掉）。
+     *
+     * 续跑（`resumingSameTurn`）不重复推进回合计数：截断续跑是同一回合的延续，
+     * 每次续跑都计数会让 `maxTurns` 被快速吃光，表现为「任务莫名被截断」。
+     */
+    private func openTurn(scope: RunScope, sessionId: String,
+        stream: EventStream<AgentEvent, ArrayList<Message>>,
+        ctxBuilder: ContextBuilder, log: Logger): Unit {
+        if (!scope.resumingSameTurn) {
+            this.emit(stream, TurnStartEvent())
+            scope.turnCount++
+            // 续跑预算按回合重置：每回合最多因截断续跑 maxLengthContinuations 次
+            scope.lengthContinuations = 0
+            this.mcpManager.advanceTurn()
+            log.info("turn ${scope.turnCount} start", Array<Attr>())
+        }
+        scope.resumingSameTurn = false
+        // 插话先落地（纪律：必须在 archive 转换之前，见 AgentLoop.steer 的约定）。
+        // 追加到尾部而不是插进历史中部：尾部是压缩的保留区（retainTokens），
+        // 插在那里不会被下一轮压缩掉。
+        for (m in this.drainSteers(sessionId)) {
+            scope.messages.add(withInterjectionMark(m))
+        }
+        // 顺序：历史归档标记在前（处理 store 加载的历史 ArchiveMessage），
+        // 本轮调用对在后（产生的 ArchiveMessage 位于 index==startIndex，不能被标记跳过）
+        scope.messages = ctxBuilder.applyArchiveMarks(scope.messages)
+        scope.messages = ctxBuilder.applyArchives(scope.messages)
+    }
+
     private func chatWithEnv(sessionId: String, messages: ArrayList<Message>, sessionEnv: SessionEnvironment): EventStream<AgentEvent, ArrayList<Message>> {
         let stream = EventStream<AgentEvent, ArrayList<Message>>()
         let se = sessionEnv
@@ -758,117 +1132,46 @@ public open class AgentRuntime <: AgentLoop {
                 // PTC 的 SDK 段随「本轮可见工具」变化，因此在循环内拼接（见下）。
                 let baseSystemText = ctxBuilder.buildSystemText(
                     this.config.systemPrompt, this.config.skills)
-                var currentMessages = ArrayList<Message>()
-                for (m in messages) { currentMessages.add(m) }
-                var turnCount: Int64 = 0
-                var toolCallCount: Int64 = 0
-                // 本回合内因输出被 token 上限截断而自动续跑的次数（每次续跑仍算同一个循环轮次）
-                var lengthContinuations: Int64 = 0
-                // 收尾前自验已用次数（每次自验按一个新回合计，受 maxTurns 约束）
-                var verifyPasses: Int64 = 0
-                // 本次迭代是「上一回合因截断而续跑」：不计新回合、不重置续跑预算、
-                // 不推进 MCP 冷却回合（continue 会重新走一遍循环体顶部，副作用必须在这里挡住）
-                var resumingSameTurn = false
-                var lastToolTime: MonoTime = MonoTime.now()
-                var finished = false
+                let initial = ArrayList<Message>()
+                for (m in messages) { initial.add(m) }
+                // 循环级可变状态收进 RunScope：阶段方法只收一个引用，不必逐个传 8 个标量
+                let scope = RunScope(initial)
 
-                while (!finished && !cancelFlag.load() && turnCount < Int64(this.config.maxTurns)) {
-                    if (!resumingSameTurn) {
-                        this.emit(stream, TurnStartEvent())
-                        turnCount++
-                        // 续跑预算按回合重置：每回合最多因截断续跑 maxLengthContinuations 次
-                        lengthContinuations = 0
-                        this.mcpManager.advanceTurn()
-                        log.info("turn ${turnCount} start", Array<Attr>())
-                    }
-                    resumingSameTurn = false
-                    // 插话先落地（纪律：必须在 archive 转换之前，见 AgentLoop.steer 的约定）。
-                    // 追加到尾部而不是插进历史中部：尾部是压缩的保留区（retainTokens），
-                    // 插在那里不会被下一轮压缩掉。
-                    for (m in this.drainSteers(sessionId)) {
-                        currentMessages.add(withInterjectionMark(m))
-                    }
-                    // 顺序：历史归档标记在前（处理 store 加载的历史 ArchiveMessage），
-                    // 本轮调用对在后（产生的 ArchiveMessage 位于 index==startIndex，不能被标记跳过）
-                    currentMessages = ctxBuilder.applyArchiveMarks(currentMessages)
-                    currentMessages = ctxBuilder.applyArchives(currentMessages)
+                while (!scope.finished && !cancelFlag.load() && scope.turnCount < Int64(this.config.maxTurns)) {
+                    this.openTurn(scope, sessionId, stream, ctxBuilder, log)
 
-                    this.emit(stream, MessageStartEvent(currentMessages[0]))
+                    this.emit(stream, MessageStartEvent(scope.messages[0]))
                     let actualModel = this.pickModel(this.config.model)
                     // 先解析可见工具，再据此生成 SDK 段：两处必须来自同一次解析，
                     // 否则模型看到的绑定会与程序实际能调用的能力分叉
                     let visible = this.resolveVisibleTools()
                     let tools = this.resolveTools(visible, ctx, stream, cancelFlag,
-                        hookState, turnCount)
+                        hookState, scope.turnCount)
                     let systemText = if (this.config.toolPresentation == ToolPresentationMode.Native) {
                         baseSystemText
                     } else {
                         baseSystemText + "\n\n" + PtcSdkRenderer.render(visible)
                     }
-                    // —— 请求派发前的上下文压力处理（dsh 的 pre-step 位置）——
-                    // 先修剪（只影响本次请求，不落库），修剪后仍在阈值之上才摘要 + 替换历史。
-                    // 放在请求前而不是回合结束后：回合结束后再压，本轮该发的请求早就发出去了。
-                    // 注意：这里算出的修剪版**只用于测量与决策**。真正发出去的请求在
-                    // wireRequest() 里再修剪一次 —— 因为下面 `currentMessages = chatReq.messages`
-                    // 会把请求的消息表收编为历史，若在这里就把修剪版写回去，修剪会落进落库历史。
-                    var measureMessages = currentMessages
-                    if (this.compactionEnabledFor()) {
-                        let cc = this.compactionConfig()
-                        let route = CompactRoute(actualModel,
-                            this.modelInfoInUse().info.contextWindow, this.maxOutputTokensInUse())
-                        // 修剪版只用于测量：真正发出去的请求由 wireRequest 再修剪一次
-                        // （下面 `currentMessages = chatReq.messages` 会把请求表收编为历史，
-                        //  在这里写回修剪版会让修剪流进落库历史）
-                        match (cc.prune) {
-                            case Some(pruneCfg) =>
-                                measureMessages = this.compactor.pruneForRequest(currentMessages, pruneCfg)
-                            case None => ()
-                        }
-                        // 决策交给 compactor：它回答"压不压、切哪、预算多少"，
-                        // 而时序（括弧/台账/互斥）留在运行时保证跨实现一致
-                        let decision = match (this.compactor) {
-                            case bc: BasicCompactor => bc.shouldCompactWith(measureMessages, route, cc)
-                            case other => other.shouldCompact(measureMessages, route)
-                        }
-                        match (decision) {
-                            case CompactDecision.Skip(reason) =>
-                                // 只在"算不出预算"这类配置问题上留痕一次；
-                                // 未达阈值是常态，不刷日志
-                                if (!reason.startsWith("under threshold")) {
-                                    this.warnCompactionSpecOnce(reason, log)
-                                }
-                            case CompactDecision.Proceed(plan) =>
-                                // 报告给事件与台账的 token 数沿用运行时口径（provider 用量锚），
-                                // 与 compactor 内部的判定口径可以不同：前者是"这次压之前有多大"
-                                let total = this.pressureForNextRequest(measureMessages)
-                                let compactor = this.compactor
-                                let compactionRuntime = CompactionRuntime(this.provider, actualModel,
-                                    systemText, tools, cc)
-                                currentMessages = this.compactBracketed(plan.trigger, sessionId,
-                                    currentMessages, total, log, { msgs, _ =>
-                                    compactor.compact(msgs, plan, compactionRuntime)
-                                })
-                        }
-                    }
-                    var chatReq = ctxBuilder.buildChatRequest(actualModel, systemText, currentMessages,
+                    this.compactBeforeRequest(scope, sessionId, actualModel, systemText, tools, log)
+                    var chatReq: ChatRequest = ctxBuilder.buildChatRequest(actualModel, systemText, scope.messages,
                         Float64(this.config.temperature), this.maxOutputTokensInUse(),
                         this.config.thinkingLevel, tools)
-                    match (runBeforeTurnHooks(hookState, turnCount, chatReq)) {
+                    match (runBeforeTurnHooks(hookState, scope.turnCount, chatReq)) {
                         case Some(r) =>
                             chatReq = r
                             if (chatReq.model != actualModel) {
                                 log.info("model routed: ${actualModel} -> ${chatReq.model}", Array<Attr>())
                             }
                             // 若 hook 改写了请求的 messages，同步回运行时上下文，避免分叉
-                            currentMessages = chatReq.messages
+                            scope.messages = chatReq.messages
                         case None =>
                             log.info("beforeTurn hook short-circuited run", Array<Attr>())
                             let shortCircuitMsg = AssistantMessage(ContentList.ofText("[Run short-circuited by hook]"), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0)
                             // 必须同时进消息列表：消费端只从 result() 读消息，仅 emit 事件
                             // 等于什么都没发生（交互前端表现为「跑完界面上没有任何输出」）
-                            currentMessages.add(shortCircuitMsg)
+                            scope.messages.add(shortCircuitMsg)
                             this.emit(stream, TurnEndEvent(shortCircuitMsg, ArrayList<ToolResultMessage>()))
-                            finished = true
+                            scope.finished = true
                             break
                     }
 
@@ -880,77 +1183,18 @@ public open class AgentRuntime <: AgentLoop {
                         log.warn("history had ${patched} tool call(s) without results; inserted placeholders to keep the request valid", Array<Attr>())
                     }
 
-                    // provider 调用 + **溢出恢复**：明确报"超上下文窗口"时，压掉最大的一段头部
-                    // 再重试同一请求（次数受 CompactionConfig.maxOverflowRetries 限制）。这条
-                    // 恢复路径不受压力阈值约束 —— 已经被拒了，阈值就没有意义了。
-                    let ccForOverflow = this.compactionConfig()
-                    var overflowRetries: Int64 = 0
-                    var assistantMsg = AssistantMessage(ContentList.ofText(""), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0)
-                    var requestFailed = false
-                    while (true) {
-                        var contentBuilder = StringBuilder()
-                        var attemptOk = false
-                        try {
-                            // provider 通常在**发起请求时**就抛（HTTP 4xx 拿不到流），
-                            // 所以这一步也必须在 try 内，否则溢出恢复接不到
-                            let chatStream = this.provider.chatStreaming(this.wireRequest(chatReq))
-                            var aborted = false
-                            while (!aborted) {
-                                if (cancelFlag.load()) {
-                                    // 取消：用已累积内容构造部分消息，跳过 result() 等待
-                                    assistantMsg = AssistantMessage(ContentList.ofText(contentBuilder.toString()), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0)
-                                    aborted = true
-                                    break
-                                }
-                                match (chatStream.receive(5 * Duration.second)) {
-                                    case Some(delta) =>
-                                        if (delta.delta != "") {
-                                            contentBuilder.append(delta.delta)
-                                            this.emit(stream, MessageUpdateEvent(
-                                                AssistantMessage(ContentList.ofText(contentBuilder.toString()), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0),
-                                                delta.delta))
-                                        }
-                                        match (delta.finishReason) {
-                                            case Some(_) => break
-                                            case None => ()
-                                        }
-                                    case None => break
-                                }
-                            }
-                            if (!aborted) { assistantMsg = chatStream.result() }
-                            attemptOk = true
-                        } catch (e: Exception) {
-                            // 用 toString() 而不是 message：Socket/FS 这类异常的 message 常为空，
-                            // 只打 message 在日志里就是一行「provider error: 」，等于没有信息
-                            let errText = e.toString()
-                            match (this.recoverFromOverflow(errText, currentMessages, overflowRetries,
-                                ccForOverflow, chatReq, actualModel, systemText, tools, sessionId, log)) {
-                                case Some(nextMsgs) =>
-                                    overflowRetries++
-                                    currentMessages = nextMsgs
-                                    // 用同一套参数重建请求（保留可能已被 hook 改过的 model）
-                                    chatReq = ctxBuilder.buildChatRequest(chatReq.model, systemText, currentMessages,
-                                        Float64(this.config.temperature), this.maxOutputTokensInUse(),
-                                        this.config.thinkingLevel, tools)
-                                    continue
-                                case None =>
-                                    log.error("provider error: ${errText}", Array<Attr>())
-                                    let failureMsg = AssistantMessage(ContentList.ofText("[provider error] ${errText}"), "", "", StopReason.Error, TokenUsage(0, 0), 0)
-                                    // 同短路分支：错误必须进消息列表，否则消费端与界面都看不到它
-                                    currentMessages.add(failureMsg)
-                                    this.emit(stream, TurnEndEvent(failureMsg, ArrayList<ToolResultMessage>()))
-                                    requestFailed = true
-                            }
-                        }
-                        if (requestFailed || attemptOk) { break }
-                    }
-                    if (requestFailed) {
-                        finished = true
-                        break
+                    let (attempt, effectiveReq) = this.invokeProvider(scope, chatReq, cancelFlag,
+                        stream, sessionId, actualModel, systemText, tools, ctxBuilder, log)
+                    chatReq = effectiveReq
+                    let assistantMsg = match (attempt) {
+                        case ProviderAttempt.Ok(m) => m
+                        case ProviderAttempt.Failed =>
+                            scope.finished = true
+                            continue
                     }
                     log.info("provider response received", Array<Attr>())
                     this.emit(stream, MessageEndEvent(assistantMsg))
-                    currentMessages.add(assistantMsg)
+                    scope.messages.add(assistantMsg)
 
                     match (assistantMsg.stopReason) {
                         case StopReason.ToolUse =>
@@ -958,7 +1202,7 @@ public open class AgentRuntime <: AgentLoop {
                                 // 取消：不再发起工具批次，直接收尾
                                 log.info("run cancelled at tool boundary", Array<Attr>())
                                 this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
-                                finished = true
+                                scope.finished = true
                                 break
                             }
                             let toolCalls = assistantMsg.toolCalls()
@@ -967,19 +1211,19 @@ public open class AgentRuntime <: AgentLoop {
                                 // （每轮请求都一样），按回合结束收尾
                                 log.warn("stop reason is ToolUse but the message carries no tool call; finish the turn", Array<Attr>())
                                 this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
-                                finished = true
+                                scope.finished = true
                                 break
                             }
                             log.info("tool calls: ${toolCalls.size}", Array<Attr>())
                             let maxCalls = Int64(this.config.maxToolCalls)
                             // 预算裁决交给纯函数（可单测）：三种走向语义不同，埋在这里看不出边界
-                            match (decideToolBudget(toolCallCount, toolCalls.size, maxCalls)) {
+                            match (decideToolBudget(scope.toolCallCount, toolCalls.size, maxCalls)) {
                                 case ToolBudgetVerdict.Exhausted =>
                                     log.warn("max tool calls (${maxCalls}) reached", Array<Attr>())
-                                    currentMessages.add(ToolResultMessage("", "",
+                                    scope.messages.add(ToolResultMessage("", "",
                                         ContentList.ofText("Max tool calls (${maxCalls}) reached, skipping"), true, 0))
                                     this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
-                                    finished = true
+                                    scope.finished = true
                                     break
                                 case ToolBudgetVerdict.AllAllowed => ()
                                 case ToolBudgetVerdict.Trimmed(allowed) =>
@@ -991,7 +1235,7 @@ public open class AgentRuntime <: AgentLoop {
                                     // 下一次请求直接被判 400
                                     var skipIdx = allowed
                                     while (skipIdx < original.size) {
-                                        currentMessages.add(ToolResultMessage(original[Int64(skipIdx)].id,
+                                        scope.messages.add(ToolResultMessage(original[Int64(skipIdx)].id,
                                             original[Int64(skipIdx)].name,
                                             ContentList.ofText("Skipped: max tool calls limit"), true, 0))
                                         skipIdx++
@@ -1008,178 +1252,30 @@ public open class AgentRuntime <: AgentLoop {
                             var idx: Int64 = 0
                             while (idx < toolCalls.size) {
                                 let tc = toolCalls[idx]
-                                match (this.toolRegistry.get(tc.name)) {
-                                    case Some(t) =>
-                                        match (this.trustGate(t, ctx.workDir, sessionId)) {
-                                            case TrustDecision.Allowed =>
-                                                let (args, skipMsg) = decideToolCall(hookState, turnCount, tc)
-                                                match (args) {
-                                                    case Some(a) =>
-                                                        batch.add((tc.name, this.callContext(ctx, tc.id), a))
-                                                        runCallIds.add(tc.id)
-                                                        runNames.add(tc.name)
-                                                    case None =>
-                                                        skipResults[idx] = skipMsg ?? "Tool blocked by hook"
-                                                        log.warn("tool ${tc.name} blocked by hook", Array<Attr>())
-                                                }
-                                            case TrustDecision.NeedsApproval =>
-                                                // 审批走结构化提问：菜单由 approvalRequest 统一构造，
-                                                // 结论只认选项 id（不再比对 "y"/"yes"/"a" 这类魔法字符串）
-                                                // 参数原样带上：审批的全部意义是让人看清「要执行什么」，
-                                                // 只给工具名等于让人盲签（钩子改写前的原始参数）
-                                                let gateReq = approvalRequest(
-                                                    "ask:${sessionId}:${turnCount}:${tc.id}:approval",
-                                                    tc.name, tc.args,
-                                                    "Tool '" + tc.name + "' needs your approval.",
-                                                    toolCallId: tc.id)
-                                                let gateAns = this.askHost(gateReq, resumedAnswers)
-                                                // 宿主要求挂起：记下来，整批都不执行（结果在批量执行后才写历史，
-                                                // 所以此刻挂起等于"什么都没发生"，重放不会重复副作用）
-                                                match (gateAns.status) {
-                                                    case UserAnswerStatus.Pending =>
-                                                        // 带上原始提问：协议适配层据此生成答复契约
-                                                        // （AG-UI 的 responseSchema），只有 message 的话
-                                                        // 前端只能猜表单该收什么字段
-                                                        pendingAsks.add(ExternalRequest(gateReq.id,
-                                                            "confirmation", gateReq.message,
-                                                            toolCallId: tc.id, request: Some(gateReq)))
-                                                    case _ => ()
-                                                }
-                                                // 答复一律过校验：不合格按拒绝处理（不静默接受）
-                                                match (validateAnswer(gateReq, gateAns)) {
-                                                    case Some(err) =>
-                                                        log.warn("invalid approval answer (${err}); treating as deny", Array<Attr>())
-                                                    case None => ()
-                                                }
-                                                let gateInvalid = match (validateAnswer(gateReq, gateAns)) {
-                                                    case Some(_) => true
-                                                    case None => false
-                                                }
-                                                if (!gateInvalid && gateAns.isAllowAlways()) {
-                                                    this.trustManager.setTrust(ctx.workDir, TrustState.Trusted)
-                                                    log.info("tool ${tc.name} always approved for ${ctx.workDir}", Array<Attr>())
-                                                    let (args, skipMsg) = decideToolCall(hookState, turnCount, tc)
-                                                    match (args) {
-                                                        case Some(a) =>
-                                                            batch.add((tc.name, this.callContext(ctx, tc.id), a))
-                                                            runCallIds.add(tc.id)
-                                                            runNames.add(tc.name)
-                                                        case None =>
-                                                            skipResults[idx] = skipMsg ?? "Tool blocked by hook"
-                                                            log.warn("tool ${tc.name} blocked by hook", Array<Attr>())
-                                                    }
-                                                } else if (!gateInvalid && gateAns.isAllowOnce()) {
-                                                    this.trustManager.setSessionTrust(sessionId, ctx.workDir, TrustState.Trusted)
-                                                    log.info("tool ${tc.name} approved for session", Array<Attr>())
-                                                    let (args, skipMsg) = decideToolCall(hookState, turnCount, tc)
-                                                    match (args) {
-                                                        case Some(a) =>
-                                                            batch.add((tc.name, this.callContext(ctx, tc.id), a))
-                                                            runCallIds.add(tc.id)
-                                                            runNames.add(tc.name)
-                                                        case None =>
-                                                            skipResults[idx] = skipMsg ?? "Tool blocked by hook"
-                                                            log.warn("tool ${tc.name} blocked by hook", Array<Attr>())
-                                                    }
-                                                } else {
-                                                    skipResults[idx] = "Tool not allowed: user denied approval"
-                                                    log.warn("tool ${tc.name} denied by user", Array<Attr>())
-                                                }
-                                            case TrustDecision.Denied =>
-                                                skipResults[idx] = "Tool not allowed: workDir is untrusted"
-                                                log.warn("tool ${tc.name} blocked: workDir untrusted", Array<Attr>())
-                                        }
-                                    case None =>
-                                        skipResults[idx] = "Tool not found: " + tc.name
+                                let admission = this.admitToolCall(tc, idx, ctx, sessionId,
+                                    scope.turnCount, hookState, resumedAnswers, log)
+                                match (admission) {
+                                    case ToolAdmission.Allow(args) =>
+                                        let entry: (String, ToolContext, JsonValue) =
+                                            (tc.name, this.callContext(ctx, tc.id), args)
+                                        batch.add(entry)
+                                        runCallIds.add(tc.id)
+                                        runNames.add(tc.name)
+                                    case ToolAdmission.Skip(reason) =>
+                                        skipResults[idx] = reason
+                                    case ToolAdmission.Suspend(req) =>
+                                        pendingAsks.add(req)
                                 }
                                 idx++
                             }
-                            let minIntervalMs = Int64(this.config.minToolInterval)
-                            if (minIntervalMs > 0) {
-                                let elapsed = (MonoTime.now() - lastToolTime).toMilliseconds()
-                                if (elapsed < minIntervalMs) {
-                                    sleep(Duration.millisecond * (minIntervalMs - elapsed))
-                                }
-                            }
-                            if (pendingAsks.size > 0) {
-                                // 整批一起挂起：一次把本批所有待确认项交给宿主，
-                                // 恢复后同一批一次做完（而不是逐个挂起、逐个恢复）
-                                this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
-                                this.emit(stream, SuspendEvent(pendingAsks))
-                                finished = true
-                                continue
-                            }
-                            // 工具执行开始事件（供流式消费方展示工具进度；被跳过/拦截的工具不发）
-                            for (k in 0..runCallIds.size) {
-                                this.emit(stream, ToolExecutionStartEvent(runCallIds[Int64(k)], runNames[Int64(k)]))
-                            }
-                            let results = try {
-                                this.toolExecutor.executeBatch(batch)
-                            } catch (e: Exception) {
-                                // 同 provider 错误：异常 message 常为空（FS/Socket 类），只打 message 等于没打
-                                log.error("tool execute error: ${e.toString()}", Array<Attr>())
-                                // 整批失败也必须**每个 call 各回一条**结果：只回一条（且 id 为空）
-                                // 会让历史里 assistant(tool_calls=N) 对不上结果，下一次请求被 provider 判 400
-                                for (i in 0..toolCalls.size) {
-                                    let tc = toolCalls[Int64(i)]
-                                    let text = match (skipResults.get(Int64(i))) {
-                                        case Some(msg) => msg
-                                        case None => "[Tool error: ${e.message}]"
-                                    }
-                                    currentMessages.add(ToolResultMessage(tc.id, tc.name,
-                                        ContentList.ofText(text), true, 0))
-                                }
-                                this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
-                                continue
-                            }
-                            var resIdx: Int64 = 0
-                            // 需要外部给结果的调用：本次 run 挂起（不写结果消息，历史停在
-                            // assistant(tool_calls)），由调用方在下一次 run 带回结果
-                            let pendingExternal = ArrayList<ExternalRequest>()
-                            for (i in 0..toolCalls.size) {
-                                let tc = toolCalls[Int64(i)]
-                                match (skipResults.get(Int64(i))) {
-                                    case Some(msg) =>
-                                        let tr = ToolResultMessage(tc.id, tc.name, ContentList.ofText(msg), false, 0)
-                                        currentMessages.add(tr)
-                                    case None =>
-                                        if (resIdx < results.size) {
-                                            let r = results[Int64(resIdx)]
-                                            match (r.external) {
-                                                case Some(req) =>
-                                                    // 挂起：不产生结果消息（写了就等于伪造结果）
-                                                    log.info("tool ${tc.name} awaits external result: ${req.id}", Array<Attr>())
-                                                    pendingExternal.add(req)
-                                                    resIdx++
-                                                    continue
-                                                case None => ()
-                                            }
-                                            log.info("tool ${tc.name} done: err=${r.isError}", Array<Attr>())
-                                            this.mcpManager.markUsedTool(tc.name)
-                                            // 工具执行结束事件（与开始事件一一对应）
-                                            this.emit(stream, ToolExecutionEndEvent(tc.id, r.text, r.isError))
-                                            let tr = ToolResultMessage(tc.id, tc.name, ContentList.ofText(r.text), r.isError, 0)
-                                            currentMessages.add(tr)
-                                            callAfterToolHooks(hookState, turnCount, tc, tr)
-                                            resIdx++
-                                        } else {
-                                            // 执行器少给了结果：静默跳过会让这条 call 永远没有配对结果，
-                                            // 下一次请求直接被判 400 —— 宁可回一条显式失败
-                                            log.error("tool executor returned ${results.size} result(s) for ${batch.size} call(s); '${tc.name}' has no result", Array<Attr>())
-                                            currentMessages.add(ToolResultMessage(tc.id, tc.name,
-                                                ContentList.ofText("[Tool error: no result returned by executor]"), true, 0))
-                                        }
-                                }
-                            }
-                            toolCallCount += toolCalls.size
-                            lastToolTime = MonoTime.now()
-                            this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
-                            if (pendingExternal.size > 0) {
-                                // 中止本次 run：历史已落在 assistant(tool_calls)，
-                                // 下一次 run 带结果即可继续（见 SuspendEvent 注释）
-                                this.emit(stream, SuspendEvent(pendingExternal))
-                                finished = true
-                                continue
+                            let outcome = this.executeToolBatch(scope, assistantMsg, toolCalls,
+                                batch, skipResults, runCallIds, runNames, pendingAsks,
+                                stream, hookState, log)
+                            match (outcome) {
+                                case ToolBatchOutcome.Suspended =>
+                                    scope.finished = true
+                                    continue
+                                case ToolBatchOutcome.ContinueRun => ()
                             }
 
                         case _ =>
@@ -1187,7 +1283,7 @@ public open class AgentRuntime <: AgentLoop {
                                 // 取消：跳过 afterTurn 改写与压缩等后续处理，直接收尾
                                 log.info("run cancelled at turn end", Array<Attr>())
                                 this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
-                                finished = true
+                                scope.finished = true
                                 break
                             }
                             // 带 tool_call 却又不是工具回合（输出被截断、终止原因缺失/未识别、
@@ -1198,51 +1294,51 @@ public open class AgentRuntime <: AgentLoop {
                             if (prematureCalls.size > 0) {
                                 log.warn("non-tool stop reason carries ${prematureCalls.size} tool call(s); recording them as not executed", Array<Attr>())
                                 for (tc in prematureCalls) {
-                                    currentMessages.add(ToolResultMessage(tc.id, tc.name,
+                                    scope.messages.add(ToolResultMessage(tc.id, tc.name,
                                         ContentList.ofText(unansweredToolCallNote(tc.name)), true, 0))
                                 }
                             }
                             // 回合收尾的三种走向交给纯函数判定（可单测，见 turn_policy.cj）：
                             // 截断续跑 / 收尾前自验 / 正常收尾。这里只负责按判定执行副作用。
-                            match (decideTurnVerdict(assistantMsg.stopReason, lengthContinuations,
-                                Int64(this.config.maxLengthContinuations), toolCallCount,
-                                verifyPasses, Int64(this.config.maxVerifyPasses))) {
+                            match (decideTurnVerdict(assistantMsg.stopReason, scope.lengthContinuations,
+                                Int64(this.config.maxLengthContinuations), scope.toolCallCount,
+                                scope.verifyPasses, Int64(this.config.maxVerifyPasses))) {
                                 case TurnVerdict.ContinueAfterTruncation =>
-                                    lengthContinuations++
-                                    log.warn("response truncated by token limit, continue in same turn (${lengthContinuations}/${this.config.maxLengthContinuations})", Array<Attr>())
-                                    currentMessages.add(UserMessage(ContentList.ofText(lengthContinuationPrompt()), 0))
-                                    resumingSameTurn = true
+                                    scope.lengthContinuations++
+                                    log.warn("response truncated by token limit, continue in same turn (${scope.lengthContinuations}/${this.config.maxLengthContinuations})", Array<Attr>())
+                                    scope.messages.add(UserMessage(ContentList.ofText(lengthContinuationPrompt()), 0))
+                                    scope.resumingSameTurn = true
                                     continue
                                 case TurnVerdict.VerifyBeforeFinish =>
-                                    verifyPasses++
-                                    log.warn("agent announced completion, run verify pass (${verifyPasses}/${this.config.maxVerifyPasses})", Array<Attr>())
-                                    currentMessages.add(UserMessage(ContentList.ofText(verifyBeforeFinishPrompt()), 0))
+                                    scope.verifyPasses++
+                                    log.warn("agent announced completion, run verify pass (${scope.verifyPasses}/${this.config.maxVerifyPasses})", Array<Attr>())
+                                    scope.messages.add(UserMessage(ContentList.ofText(verifyBeforeFinishPrompt()), 0))
                                     continue
                                 case TurnVerdict.End => ()
                             }
                             log.info("turn finished", Array<Attr>())
-                            let turnUpdate = runAfterTurnHooks(hookState, turnCount)
+                            let turnUpdate = runAfterTurnHooks(hookState, scope.turnCount)
                             match (turnUpdate.messages) {
                                 case Some(msgs) =>
-                                    currentMessages = msgs
+                                    scope.messages = msgs
                                     log.info("afterTurn hook rewrote messages to ${msgs.size}", Array<Attr>())
                                 case None => ()
                             }
                             if (turnUpdate.shortCircuit) {
                                 log.info("afterTurn hook short-circuited run", Array<Attr>())
                                 this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
-                                finished = true
+                                scope.finished = true
                                 break
                             }
                             this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
-                            finished = true
+                            scope.finished = true
                     }
                 }
 
-                log.info("agent end, total turns=${turnCount}", Array<Attr>())
-                callHooks("afterRun", turnCount, hookState)
-                stream.setResult(currentMessages)
-                this.emit(stream, AgentEndEvent(currentMessages))
+                log.info("agent end, total turns=${scope.turnCount}", Array<Attr>())
+                callHooks("afterRun", scope.turnCount, hookState)
+                stream.setResult(scope.messages)
+                this.emit(stream, AgentEndEvent(scope.messages))
             } catch (e: Exception) {
                 log.error("unhandled error: ${e.message}", Array<Attr>())
                 // 先发结束事件（携带错误说明），再置错误信号：流消费者按 AgentEndEvent 收敛，
