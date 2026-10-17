@@ -7,11 +7,18 @@
 > 一句话：**现有 run 假定用户在场。常驻 agent 大部分时间不在 run 里，也没有人守着。**
 > atelier 要补的正是这两件事——run 之外的语义，与无人在场时的语义。
 >
+> **v3 修订（2026-10-17）—— 推翻 v2 的一条前置**：
+> v2 说「run 保留，但入口要从"会话绑定"改成"**注意力快照绑定**"，这是所有其它项的前置」。
+> **核实后这条不成立**：面板/常驻形态**不走 atelier 的 run 入口**——starline
+> `docs/design.md:123` 明确「不改造现有 AgentRuntime……Liveboard 是平行新层」，其
+> `src/core/runtime.cj` 是自研 74 行循环，全仓对 `AgentRuntime` / `createLoop` /
+> `HarnessSpec` 的引用数为 **0**。无会话入口本身已由 `drive(RunInput)` 落地（`sessionId` 可空），
+> **不需要"注意力快照"类型**。故 A0 从"一切的前置"降为"已收敛的小项"，A1 直接可做。
+>
 > **v2 修订（2026-10-17，对齐总设计 v4）**，三处**结论性变化**：
 > 1. **新增 A 组的第 0 步**：总设计 v4 的 §6.0 **首次定义了 run**（三层模型）。
 >    在这之前本文把 run 当既有概念用，**"要不要补 run"这个前提本身没被审过**。
->    现在明确了：**run 保留，但入口要从"会话绑定"改成"注意力快照绑定"**——
->    这是**所有其它项的前置**（原文档缺这一步）。
+>    （~~run 保留，但入口要从"会话绑定"改成"注意力快照绑定"~~ → **见 v3 修订，此条推翻**。）
 > 2. **A2 预授权大幅降级**：部署形态定为 **agent 独占一个 Linux 用户**（总设计 v4 §6.6），
 >    隔离边界下沉到操作系统。**应用层授权体系（凭证代理 / Sentinel / 授权范围分级）不做**，
 >    预授权从"安全边界"降级为"**便利性开关**"。**能力量级完全不同了。**
@@ -42,14 +49,15 @@ D1（约束，随时遵守）· D2/D3（可后置）· D4（可后置）
 E（上线前必须完成，可与上面并行）
 ```
 
-**A0 是新增的关键前置**：不先解绑会话，A1 的 RunPolicy 无处安放——因为
-`chatWithSessionId` 的签名里根本没有"这次 run 用什么策略"的位置。
+**A0 已基本收敛（v3）**：无会话入口 `drive(RunInput)` 已落地，`sessionId` 可空。但 v2 里
+"入口要绑定注意力快照"的要求**被核实推翻**——面板/常驻形态各自持有循环，不走 atelier 的
+run 入口（详见 A0）。**A1 不再被 A0 阻塞**：`RunInput` 靠加字段演进，不需要先造新类型。
 
 ---
 
 ## A. run 语义
 
-### A0. 入口解绑会话（**v2 新增，一切的前置**）
+### A0. 入口解绑会话（**v2 新增；v3 按核实结果收窄**）
 
 **问题**：总设计 v4 §6.0 明确了 run 的定位（Runtime 内的一次执行），并指出 atelier
 现状与它的差距。**这是本文档原版缺失的一步**——原版直接从"RunPolicy"开始，
@@ -57,21 +65,32 @@ E（上线前必须完成，可与上面并行）
 
 **现状（已核实）**：
 
-| 位置 | 现状 | 为什么不满足 |
+| 位置 | 现状 | 与 A0 的关系 |
 |---|---|---|
-| `atelier/src/agent/runtime.cj:562` | `chatWithSessionId(sessionId, messages, env)` | **会话挂靠焊在入口上**：调用方必须给 sessionId，panel 模式（无会话）用不了 |
-| `atelier/src/agent/session_loop.cj:43` | `SessionLoop.run(sessionId, inputText, ...)` | 面向"历史 + 输入文本"，同样把会话当前提 |
-| `atelier/src/context/system_prompt_builder.cj:12` | `PromptSegmentContributor`（**目前无宿主使用**） | **现成的接缝**：宿主往系统提示注入自定义段。面板渲染从这里进系统提示，是把 starline 接上 run 的最小改动 |
+| `atelier/src/agent/runtime.cj` | `chatWithSessionId(sessionId, messages, env)` | 会话型主入口；**acp / a2a / server / 子代理 / 世界树都在用** |
+| `atelier/src/agent/runtime.cj` | `drive(RunInput)`（`sessionId` 可空） | ✅ **A0 的入口已就位**：不要求 sessionId，空串表示无会话执行 |
+| `atelier/src/agent/session_loop.cj` | `SessionLoop.run(sessionId, inputText, ...)` | 面向"历史 + 输入文本"，属**会话型宿主封装**（不是 run 的入口层） |
+| `atelier/src/context/system_prompt_builder.cj` | `PromptSegmentContributor`（**目前无宿主使用**） | **现成的接缝**：宿主往系统提示注入自定义段 |
 
-**要补的**：
+**已落地**：`RunInput(messages, sessionId!, env!)` —— `sessionId` 可空，四个入口
+（`chat` / `chatWithEnv` / `drive` / `chatWithSessionId`）收敛到同一份实现。
 
-- 一个**不落会话树、以消息数组为输入**的 run 入口（供 panel 模式用）；
-- 该入口要能表达**注意力快照**而非"整段会话历史"（面板渲染 + 最近 N 条 + 记忆概览）；
-- **保留** `chatWithSessionId` 给会话型宿主（acp / a2a / server / 子代理都在用，不能动）；
-- 面板渲染的注入走 `PromptSegmentContributor`，**不要**另造一套上下文拼装。
+**A0 收敛后的剩余范围**（**比 v2 小得多**）：
 
-**验收**：能跑一个"无 sessionId"的 run，其系统提示里带面板渲染，事件流与工具执行
-与现有一致（`AgentEvent` 全套、`cancelSession` 等效能力、工具预算生效）。
+- ~~补一个无会话 run 入口~~ → ✅ 已由 `drive` 提供
+- ~~该入口要能表达「注意力快照」~~ → ❌ **撤销**：核实后确认**面板/常驻形态不走 atelier 循环**
+  （starline `docs/design.md:123`：「不改造现有 AgentRuntime……Liveboard 是平行新层」；
+  其自研 `LiveboardRuntime.chat()` 74 行，全仓 atelier 循环组件引用数为 0）。
+  把产品形态的上下文构建塞进 SDK 接口，等于让 SDK 承担一个它并不服务的场景。
+- 「无会话执行要不要落库」的语义仍是开放的：`drive` 的 `sessionId` 为空时只用于
+  事件与取消关联，**不落会话树**——这条要在 A1/D4 里明确
+
+**因此 A0 不再是"A1 的一切前置"**：`RunInput` 的字段可以随 A1 增长（加字段不改签名），
+不需要先造一个"注意力快照"类型。**A0 剩下的实际工作量为零，其余转 A1。**
+
+**关于 `drive` 的诚实定位**：它目前**没有生产调用点**（唯一调用在测试）。它的价值是
+语义清晰（宿主不必自造空会话 id），**不是**"为面板模式准备的入口"。任何文档都不应把
+未兑现的产品形态挂在这个方法名下。
 
 ### A1. RunPolicy：给 run 补一种运行模式
 

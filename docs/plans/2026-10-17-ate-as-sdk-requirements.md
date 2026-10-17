@@ -20,10 +20,16 @@
 | 产品 | 定位 | 需要 atelier 提供的 | 现状 |
 |---|---|---|---|
 | **atelier-lumine** | Windows 桌面 AI 工坊 | **自己的会话存储**（jsonl） | ⚠️ **有自己的 jsonl 实现，但没接进 `SessionStore` 接口** |
-| **世界树**（atelier-yggdrasil） | 复刻 dsh 的插件宿主 | **换掉整个 agent 循环** + 换压缩策略 | ❌ 循环不是接口，10 处硬编码 |
-| **starline** | 常驻智能体产品 | **换压缩策略**（记忆层与压缩分工） | ❌ 压缩逻辑焊在主循环里 |
+| **世界树**（atelier-yggdrasil） | 复刻 dsh 的插件宿主 | **能换掉循环实现** + 换压缩策略 | ❌ 压缩焊在循环里；循环已提为 `AgentLoop` 接口（世界树当前用的是 `chatWithSessionId`，尚未换实现） |
+| **starline** | 常驻智能体产品 | **不需要 atelier 的循环**（自持 `LiveboardRuntime`） | ✅ 已自持循环；从 atelier 只取叶子组件（Message / Provider / Tool / Skill） |
 
-**一句话：三个产品要换的是三样不同的东西，而其中两样（循环、压缩）现在换不了。**
+**一句话：三个产品要换的是三样不同的东西。** 循环与压缩的可替换点已就位（`AgentLoop` /
+`Compactor`），但**没有任何下游真的换过实现**——目前所有宿主都还在用 `AgentRuntime`。
+
+> **一处必须纠正的预期**：曾把 starline 当作 atelier 循环的消费者，据此设计了「无会话 run 入口」。
+> 核实后不成立：starline `docs/design.md:123` 明确「**不改造现有 AgentRuntime**……Liveboard 是
+> **平行新层**」，其 `src/core/runtime.cj` 是自研的 74 行循环，全仓 `AgentRuntime` /
+> `createLoop` / `HarnessSpec` 引用数为 **0**。**不要把 starline 的产品形态当作 atelier 接口的设计依据。**
 
 ---
 
@@ -309,7 +315,7 @@ export type AgentStatus = 'idle' | 'running';
 | **B-2** | 默认实现独立成包 | `atelier/src/compaction/`（把 `context/compaction.cj` 727 行迁过去） |
 | **B-3** | **把主循环里的压缩调用逻辑抽出来** | `runtime.cj` 里的：请求前压力检测、溢出恢复、括弧事件、台账写入 |
 | **B-4** | 装配 | `HarnessSpec.compactor: Compactor` + `withCompactor` |
-| **B-5** | 提供"不压缩"实现 | 供 panel 模式用（证明真的可插拔） |
+| **B-5** | 提供"不压缩"实现 | `NoopCompactor`（证明真的可插拔；宿主自持上下文策略时用它关掉压缩） |
 
 **B-3 是本档的真难点**：压缩不只在 `compaction.cj`，主循环里还有一大坨调用与事件编排。
 
@@ -335,26 +341,57 @@ export type AgentStatus = 'idle' | 'running';
 ### 6.1 `AgentLoop`（档 C）
 
 ```cangjie
-// atelier/src/agent/loop_interface.cj —— 纯契约
+// atelier/src/agent/loop_interface.cj —— 纯契约（草案；落地形态见 §6.1.1）
 
-// run 的输入：不要求 sessionId（A0）
+// run 的输入：不要求 sessionId
 public class RunInput {
-    public let attention: AttentionSnapshot   // 面板渲染 + 最近 N 条 + 记忆概览
-    public let trigger: RunTrigger            // 谁触发的（C）
-    public let policy: RunPolicy              // attended / unattended（A1）
+    public let messages: ArrayList<Message>   // 本次执行的输入消息
+    public let sessionId: String              // 可空串：归属线索，不是执行前提
+    public let env: SessionEnvironment        // 工作目录等
 }
 
 public interface AgentLoop {
-    // 生命周期状态（解决 B：比 run 长寿）
+    // 生命周期状态（比 run 长寿）
     func status(): AgentStatus                // idle / running
-    func drive(input: RunInput): RunOutcome   // 一次执行
-    func cancel(): Unit
+    func drive(input: RunInput): EventStream<AgentEvent, ArrayList<Message>>
+    func cancel(sessionId: String): Unit
+
+    // 会话型入口（既有宿主的形态）
+    func chat(messages: ArrayList<Message>): ...
+    func chatWithSessionId(sessionId: String, messages: ArrayList<Message>,
+        sessionEnv: SessionEnvironment): ...
 
     // 插话与注入（见 §11）：必须 interface —— 要操作队列，队列就是状态
-    func steer(msg: Message): Unit            // 插话：下一次模型调用可见，不打断工具
-    func inject(msg: Message): Unit           // 注入上下文：不唤醒 idle 的 loop
+    func steer(sessionId: String, msg: Message): Unit
+    func inject(sessionId: String, msg: Message): Unit
 }
 ```
+
+### 6.1.1 落地后收回的两处设计假设（2026-10-17 补）
+
+**① `attention` / `trigger` / `policy` 三个字段没有落进 `RunInput`。**
+
+草案里 `RunInput` 装的是「注意力快照 + 触发源 + 运行模式」，落地时只保留了
+`messages` / `sessionId` / `env`。理由不是"以后再说"，而是**没有依据支撑那三个字段**：
+
+- **`attention`（注意力快照）**：它服务的形态是「面板渲染 + 最近 N 条 + 记忆概览」，
+  前提是**面板由 atelier 的循环驱动**。核实结果不是这样——starline 自持循环
+  （`atelier-starline/docs/design.md:123` 原文：「**不改造现有 AgentRuntime**：它的循环
+  深度耦合会话，保留给对话流；**Liveboard 是平行新层**」），其 `LiveboardRuntime.chat()`
+  自行拼上下文。**没有任何宿主会传 `attention` 进来**。
+- **`trigger` / `policy`**：服务的是无人值守模式（本文档 A1）。它依赖的信任/授权改造
+  尚未开始，在此之前这两个字段没有消费者。
+
+> **判据**：接口字段应当由**真实消费者**反推，而不是由想象中的产品形态正推。
+> 先落 `messages`（唯一每个宿主都真有的东西），等 A1 真正落地时再加字段——
+> `RunInput` 用字段而非位置参数，加字段本来就不改签名（见下方 §6.1 语言约束）。
+
+**② `drive` / `RunInput` 目前没有生产调用点，且不承载「面板模式」的期待。**
+
+全部 `chat*` 入口（`chat` / `chatWithEnv` / `drive` / `chatWithSessionId`）已经收敛到
+同一份实现，`drive` 只是「`sessionId` 可空」的语义化包装。它的价值是**语义清晰**
+（宿主不必自造一个空会话 id），而不是"为面板模式准备的入口"——**面板模式不走 atelier 循环**。
+写文档时不要把未兑现的产品形态挂在它名下。
 
 **✅ 已探针验证的语言约束（2026-10-17 实测，cjc 1.2.0）**：
 
@@ -367,8 +404,12 @@ public interface AgentLoop {
 | **用 Options 类包参数** `func drive(o: Opts)` + `Opts(a!: Int64 = 1)` | ✅ **通过** | ⭐ **绕开限制的标准做法** |
 
 > **结论：接口方法一律收敛成「少数几个必填参数」**，变化的部分装进一个 Options 类
-> （`RunInput` / `CompactOptions` 就是这个作用）。这既绕开了语言限制，也让接口**更容易演进**
+> （`RunInput` 就是这个作用）。这既绕开了语言限制，也让接口**更容易演进**
 > （加字段不改签名）——两个好处方向一致。
+>
+> **落地佐证**：`AgentLoop.drive(input: RunInput)` 已按此形态实现。`RunInput` 当前只有
+> `messages` / `sessionId` / `env` 三个字段，后续加 `trigger` / `policy` 无需改签名
+> （见 §6.1.1）。
 
 ### 6.2 `Compactor`（档 B）
 
@@ -444,13 +485,17 @@ spec.withTrustGate({ tool, wd, sid =>
    - 给 `shouldCompact` + `compact`？那循环只负责"问它、按它说的做"（推荐）。
    - 还要不要 `report`（台账/事件）？**建议事件由循环统一发**（保证括弧成对），`report` 只返回数据。
 
-3. **`AgentLoop` 的方法集：`drive` 一次还是暴露阶段回调？**
-   - 方案①：`drive(input) -> outcome`（最简单，循环内部完全自主）
+3. **`AgentLoop` 的方法集：`drive` 一次还是暴露阶段回调？** ✅ **已定：方案①**
+   - 方案①：`drive(input)`（最简单，循环内部完全自主）
    - 方案②：加 `onBeforeRequest` / `onAfterTurn` 等回调（能插入中间，但等于把 `Hook` 又造一遍）
-   - **建议①**，理由：需要中间介入的场景已有 `Hook` 覆盖；循环级替换要的就是"整个换掉"。
+   - **定①**，理由：需要中间介入的场景已有 `Hook` 覆盖；循环级替换要的就是"整个换掉"。
+   - **落地形态**：`drive(input: RunInput): EventStream<AgentEvent, ArrayList<Message>>`，
+     不返回自造的 `RunOutcome` —— 事件流是既有的唯一进度出口，另造一个结果类型等于并行两套。
 
-4. **`AgentRuntime` 这个名字保留吗？**
-   `AgentRuntime` → `DefaultAgentLoop` 会造成 10 处构造点 + 文档全面改名。**建议：接口叫 `AgentLoop`，现有类保留 `AgentRuntime` 名字但 `implements AgentLoop`**（零改名，语义也通）。
+4. **`AgentRuntime` 这个名字保留吗？** ✅ **已定：保留**
+   接口叫 `AgentLoop`，现有类保留 `AgentRuntime` 名字并 `<: AgentLoop`（零改名，语义也通）。
+   附带澄清：它是 `AgentLoop` 的**当前唯一实现**，不是"默认实现之一"——仓内没有第二个实现，
+   所以"能不能换"这件事只能靠测试与文档保证，没有第二个实现做实证。
 
 5. **`SessionLoop` 的归宿？**
    它现在承担"加载历史 → 调 runtime → 收事件 → 落库"。抽 `AgentLoop` 后它可能：
@@ -614,10 +659,14 @@ func withInterjectionMark(m: Message): Message {
 
 **`steer` / `inject` 的差别只在"要不要唤醒"**：
 
-| 方法 | 行为 |
-|---|---|
-| `steer` | 入队 + **若 loop 当前 idle 则启动一轮**（dsh 语义："An idle driver starts a turn"） |
-| `inject` | 入队，**不唤醒**；已在跑的 loop 在下一个 step 边界取走，idle 就一直挂着 |
+| 方法 | 设计行为 | **当前落地** |
+|---|---|---|
+| `steer` | 入队 + **若 loop 当前 idle 则启动一轮**（dsh 语义："An idle driver starts a turn"） | ⚠️ **只做了入队**：目标 run 结束后消息留在队列里，等下一次 `drive`/`chat*` 取用；**不会自己唤醒启动一轮** |
+| `inject` | 入队，**不唤醒**；已在跑的 loop 在下一个 step 边界取走，idle 就一直挂着 | ✅ 与设计一致（入队，不唤醒） |
+
+> **"idle 时唤醒"为什么先不做**：唤醒意味着 loop 要持有调度能力（谁被唤醒、按什么策略、
+> 与宿主既有触发源如何不打架）。这属于 A1「无人值守」的范畴，在信任/授权改造落地前做，
+> 等于先造一个没有策略来源的调度器。**先让消息"不丢失"，唤醒等 A1。**
 
 ### 11.7 边界：`steer` 解决不了什么
 
