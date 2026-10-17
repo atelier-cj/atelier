@@ -1,6 +1,6 @@
 package atelier.agent
 
-import atelier.message.Message
+import atelier.message.{Message, AssistantMessage}
 import atelier.tool.ExternalRequest
 import std.collection.*
 import std.time.MonoTime
@@ -87,4 +87,18 @@ internal enum ToolBatchOutcome {
     | ContinueRun
     /** 有调用在等外部结果：本次 run 到此为止 */
     | Suspended
+}
+
+/**
+ * 一次 provider 调用的结论（含溢出恢复重试后的结果）。
+ *
+ * 为什么连 `chatReq` 一起返回：溢出恢复会**重建请求**（保留 hook 改过的 model），
+ * 而重建后的请求后续还要用（回合收尾、下一次迭代）。用元组带回，
+ * 避免方法内捕获外部可变变量。
+ */
+internal enum ProviderAttempt {
+    /** 拿到响应 */
+    | Ok(AssistantMessage)
+    /** 失败且无法恢复（事件与失败消息已由方法内部发出） */
+    | Failed
 }

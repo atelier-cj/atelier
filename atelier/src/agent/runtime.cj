@@ -781,6 +781,94 @@ public open class AgentRuntime <: AgentLoop {
     }
 
     /**
+     * 调用 provider，并在"超上下文窗口"时压掉头部重试。
+     *
+     * 这条恢复路径**不受压力阈值约束** —— 请求已经被拒了，阈值就没有意义了；
+     * 次数受 `CompactionConfig.maxOverflowRetries` 限制。
+     *
+     * 传输级重试（连接失败 / 429 / 瞬时 5xx）由 provider 实现负责，不在这里；
+     * 本方法只处理"必须改写历史才能继续"的这一种失败。
+     *
+     * @return (结论, 最终请求) —— 重试后请求可能已重建，调用方须用返回值覆盖
+     */
+    private func invokeProvider(scope: RunScope, chatReq: ChatRequest, cancelFlag: AtomicBool,
+        stream: EventStream<AgentEvent, ArrayList<Message>>, sessionId: String,
+        actualModel: String, systemText: String, tools: ArrayList<OpenAITool>,
+        ctxBuilder: ContextBuilder, log: Logger): (ProviderAttempt, ChatRequest) {
+        // 重试可能重建请求：用局部可变副本，最终通过返回值交给调用方
+        var req = chatReq
+        // 再重试同一请求（次数受 CompactionConfig.maxOverflowRetries 限制）。这条
+        // 恢复路径不受压力阈值约束 —— 已经被拒了，阈值就没有意义了。
+        let ccForOverflow = this.compactionConfig()
+        var overflowRetries: Int64 = 0
+        var assistantMsg = AssistantMessage(ContentList.ofText(""), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0)
+        var requestFailed = false
+        while (true) {
+            var contentBuilder = StringBuilder()
+            var attemptOk = false
+            try {
+                // provider 通常在**发起请求时**就抛（HTTP 4xx 拿不到流），
+                // 所以这一步也必须在 try 内，否则溢出恢复接不到
+                let chatStream = this.provider.chatStreaming(this.wireRequest(req))
+                var aborted = false
+                while (!aborted) {
+                    if (cancelFlag.load()) {
+                        // 取消：用已累积内容构造部分消息，跳过 result() 等待
+                        assistantMsg = AssistantMessage(ContentList.ofText(contentBuilder.toString()), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0)
+                        aborted = true
+                        break
+                    }
+                    match (chatStream.receive(5 * Duration.second)) {
+                        case Some(delta) =>
+                            if (delta.delta != "") {
+                                contentBuilder.append(delta.delta)
+                                this.emit(stream, MessageUpdateEvent(
+                                    AssistantMessage(ContentList.ofText(contentBuilder.toString()), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0),
+                                    delta.delta))
+                            }
+                            match (delta.finishReason) {
+                                case Some(_) => break
+                                case None => ()
+                            }
+                        case None => break
+                    }
+                }
+                if (!aborted) { assistantMsg = chatStream.result() }
+                attemptOk = true
+            } catch (e: Exception) {
+                // 用 toString() 而不是 message：Socket/FS 这类异常的 message 常为空，
+                // 只打 message 在日志里就是一行「provider error: 」，等于没有信息
+                let errText = e.toString()
+                match (this.recoverFromOverflow(errText, scope.messages, overflowRetries,
+                    ccForOverflow, req, actualModel, systemText, tools, sessionId, log)) {
+                    case Some(nextMsgs) =>
+                        overflowRetries++
+                        scope.messages = nextMsgs
+                        // 用同一套参数重建请求（保留可能已被 hook 改过的 model）
+                        req = ctxBuilder.buildChatRequest(req.model, systemText, scope.messages,
+                            Float64(this.config.temperature), this.maxOutputTokensInUse(),
+                            this.config.thinkingLevel, tools)
+                        continue
+                    case None =>
+                        log.error("provider error: ${errText}", Array<Attr>())
+                        let failureMsg = AssistantMessage(ContentList.ofText("[provider error] ${errText}"), "", "", StopReason.Error, TokenUsage(0, 0), 0)
+                        // 同短路分支：错误必须进消息列表，否则消费端与界面都看不到它
+                        scope.messages.add(failureMsg)
+                        this.emit(stream, TurnEndEvent(failureMsg, ArrayList<ToolResultMessage>()))
+                        requestFailed = true
+                }
+            }
+            if (requestFailed || attemptOk) { break }
+        }
+        if (requestFailed) {
+            return (ProviderAttempt.Failed, req)
+        }
+        // 溢出重试期间 req 可能已被重建（保留 hook 改过的 model），
+        // 故把最终请求一并返回，调用方据此继续后续钩子与收尾处理
+        return (ProviderAttempt.Ok(assistantMsg), req)
+    }
+
+    /**
      * 执行工具批次并回写结果。
      *
      * **本方法的核心不变量**：每个 `toolCall` 必须恰好得到一条 `ToolResultMessage`。
@@ -1065,7 +1153,7 @@ public open class AgentRuntime <: AgentLoop {
                         baseSystemText + "\n\n" + PtcSdkRenderer.render(visible)
                     }
                     this.compactBeforeRequest(scope, sessionId, actualModel, systemText, tools, log)
-                    var chatReq = ctxBuilder.buildChatRequest(actualModel, systemText, scope.messages,
+                    var chatReq: ChatRequest = ctxBuilder.buildChatRequest(actualModel, systemText, scope.messages,
                         Float64(this.config.temperature), this.maxOutputTokensInUse(),
                         this.config.thinkingLevel, tools)
                     match (runBeforeTurnHooks(hookState, scope.turnCount, chatReq)) {
@@ -1095,73 +1183,14 @@ public open class AgentRuntime <: AgentLoop {
                         log.warn("history had ${patched} tool call(s) without results; inserted placeholders to keep the request valid", Array<Attr>())
                     }
 
-                    // provider 调用 + **溢出恢复**：明确报"超上下文窗口"时，压掉最大的一段头部
-                    // 再重试同一请求（次数受 CompactionConfig.maxOverflowRetries 限制）。这条
-                    // 恢复路径不受压力阈值约束 —— 已经被拒了，阈值就没有意义了。
-                    let ccForOverflow = this.compactionConfig()
-                    var overflowRetries: Int64 = 0
-                    var assistantMsg = AssistantMessage(ContentList.ofText(""), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0)
-                    var requestFailed = false
-                    while (true) {
-                        var contentBuilder = StringBuilder()
-                        var attemptOk = false
-                        try {
-                            // provider 通常在**发起请求时**就抛（HTTP 4xx 拿不到流），
-                            // 所以这一步也必须在 try 内，否则溢出恢复接不到
-                            let chatStream = this.provider.chatStreaming(this.wireRequest(chatReq))
-                            var aborted = false
-                            while (!aborted) {
-                                if (cancelFlag.load()) {
-                                    // 取消：用已累积内容构造部分消息，跳过 result() 等待
-                                    assistantMsg = AssistantMessage(ContentList.ofText(contentBuilder.toString()), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0)
-                                    aborted = true
-                                    break
-                                }
-                                match (chatStream.receive(5 * Duration.second)) {
-                                    case Some(delta) =>
-                                        if (delta.delta != "") {
-                                            contentBuilder.append(delta.delta)
-                                            this.emit(stream, MessageUpdateEvent(
-                                                AssistantMessage(ContentList.ofText(contentBuilder.toString()), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0),
-                                                delta.delta))
-                                        }
-                                        match (delta.finishReason) {
-                                            case Some(_) => break
-                                            case None => ()
-                                        }
-                                    case None => break
-                                }
-                            }
-                            if (!aborted) { assistantMsg = chatStream.result() }
-                            attemptOk = true
-                        } catch (e: Exception) {
-                            // 用 toString() 而不是 message：Socket/FS 这类异常的 message 常为空，
-                            // 只打 message 在日志里就是一行「provider error: 」，等于没有信息
-                            let errText = e.toString()
-                            match (this.recoverFromOverflow(errText, scope.messages, overflowRetries,
-                                ccForOverflow, chatReq, actualModel, systemText, tools, sessionId, log)) {
-                                case Some(nextMsgs) =>
-                                    overflowRetries++
-                                    scope.messages = nextMsgs
-                                    // 用同一套参数重建请求（保留可能已被 hook 改过的 model）
-                                    chatReq = ctxBuilder.buildChatRequest(chatReq.model, systemText, scope.messages,
-                                        Float64(this.config.temperature), this.maxOutputTokensInUse(),
-                                        this.config.thinkingLevel, tools)
-                                    continue
-                                case None =>
-                                    log.error("provider error: ${errText}", Array<Attr>())
-                                    let failureMsg = AssistantMessage(ContentList.ofText("[provider error] ${errText}"), "", "", StopReason.Error, TokenUsage(0, 0), 0)
-                                    // 同短路分支：错误必须进消息列表，否则消费端与界面都看不到它
-                                    scope.messages.add(failureMsg)
-                                    this.emit(stream, TurnEndEvent(failureMsg, ArrayList<ToolResultMessage>()))
-                                    requestFailed = true
-                            }
-                        }
-                        if (requestFailed || attemptOk) { break }
-                    }
-                    if (requestFailed) {
-                        scope.finished = true
-                        break
+                    let (attempt, effectiveReq) = this.invokeProvider(scope, chatReq, cancelFlag,
+                        stream, sessionId, actualModel, systemText, tools, ctxBuilder, log)
+                    chatReq = effectiveReq
+                    let assistantMsg = match (attempt) {
+                        case ProviderAttempt.Ok(m) => m
+                        case ProviderAttempt.Failed =>
+                            scope.finished = true
+                            continue
                     }
                     log.info("provider response received", Array<Attr>())
                     this.emit(stream, MessageEndEvent(assistantMsg))
