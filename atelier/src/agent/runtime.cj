@@ -9,7 +9,10 @@ import atelier.session.*
 import atelier.trust.*
 import atelier.session.CompactionRecord
 import std.time.DateTime
-import atelier.context.{resolveCompactSpec, CompactSpec, compactFrom, retainedCutIndex, lastUserIndex, isContextOverflowError, pruneToolResults, ToolResultPruneConfig, checkpointBody, globalCompactionLedger}
+import atelier.context.{resolveCompactSpec, CompactSpec, compactFrom, retainedCutIndex,
+    lastUserIndex, isContextOverflowError, pruneToolResults, ToolResultPruneConfig,
+    checkpointBody, globalCompactionLedger, Compactor, BasicCompactor, CompactRoute,
+    CompactDecision, CompactionRuntime, CompactionConfig}
 import atelier.context.ContextBuilder
 import atelier.context.PromptSegmentContributor
 import atelier.context.ModelContextRegistry
@@ -17,8 +20,8 @@ import atelier.context.renderCompactionPrompt
 import atelier.context.findPreviousSummary
 import atelier.context.validateSummary
 import atelier.context.compactWithSummary
-import atelier.context.CompactionConfig
 import atelier.context.estimateTokens
+import atelier.context.{summarizeText, plainTextOf}
 import atelier.ptc.*
 import atelier.event.EventStream
 import std.io.InputStream
@@ -107,6 +110,8 @@ public open class AgentRuntime {
     // 生效的信任闸门（装配期解析一次：注入的优先，否则绑定 trustManager 的默认闸门）。
     // 语义与改动前等价，差别只在"判定从哪来"由装配束决定。
     private let trustGate: TrustGate
+    // 生效的压缩策略（装配期解析一次：注入的优先，否则 BasicCompactor = 改动前行为）
+    private let compactor: Compactor
     private let skillRegistry: SkillRegistry
     private let agentRegistry: AgentRegistry
     private let toolExecutor: ToolExecutor
@@ -151,6 +156,7 @@ public open class AgentRuntime {
         this.sessionStore = spec.store
         this.trustManager = spec.trust
         this.trustGate = spec.resolvedTrustGate()
+        this.compactor = spec.resolvedCompactor()
         this.skillRegistry = spec.skills
         this.agentRegistry = spec.agents
         this.toolExecutor = ToolExecutor(this.toolRegistry,
@@ -662,29 +668,40 @@ public open class AgentRuntime {
                     var measureMessages = currentMessages
                     if (this.compactionEnabledFor()) {
                         let cc = this.compactionConfig()
-                        let resolution = resolveCompactSpec(cc,
+                        let route = CompactRoute(actualModel,
                             this.modelInfoInUse().info.contextWindow, this.maxOutputTokensInUse())
-                        match (resolution.spec) {
-                            case Some(cSpec) =>
-                                let pruneCfg = match (cc.prune) {
-                                    case Some(p) => p
-                                    case None => ToolResultPruneConfig()
+                        // 修剪版只用于测量：真正发出去的请求由 wireRequest 再修剪一次
+                        // （下面 `currentMessages = chatReq.messages` 会把请求表收编为历史，
+                        //  在这里写回修剪版会让修剪流进落库历史）
+                        match (cc.prune) {
+                            case Some(pruneCfg) =>
+                                measureMessages = this.compactor.pruneForRequest(currentMessages, pruneCfg)
+                            case None => ()
+                        }
+                        // 决策交给 compactor：它回答"压不压、切哪、预算多少"，
+                        // 而时序（括弧/台账/互斥）留在运行时保证跨实现一致
+                        let decision = match (this.compactor) {
+                            case bc: BasicCompactor => bc.shouldCompactWith(measureMessages, route, cc)
+                            case other => other.shouldCompact(measureMessages, route)
+                        }
+                        match (decision) {
+                            case CompactDecision.Skip(reason) =>
+                                // 只在"算不出预算"这类配置问题上留痕一次；
+                                // 未达阈值是常态，不刷日志
+                                if (!reason.startsWith("under threshold")) {
+                                    this.warnCompactionSpecOnce(reason, log)
                                 }
-                                if (pruneCfg.enabled) {
-                                    let (pruned, _) = pruneToolResults(currentMessages, pruneCfg)
-                                    measureMessages = pruned
-                                }
+                            case CompactDecision.Proceed(plan) =>
+                                // 报告给事件与台账的 token 数沿用运行时口径（provider 用量锚），
+                                // 与 compactor 内部的判定口径可以不同：前者是"这次压之前有多大"
                                 let total = this.pressureForNextRequest(measureMessages)
-                                if (total > cSpec.thresholdTokens) {
-                                    currentMessages = this.compactBracketed("pressure", sessionId,
-                                        currentMessages, total, log, { msgs, totalBefore =>
-                                        this.summarizeAndCompact(msgs, cc, cSpec, totalBefore,
-                                            actualModel, systemText, tools, log)
-                                    })
-                                }
-                            // 配置算不出预算（窗口未知 / 留不出余量 / 保留不小于阈值）：
-                            // 留痕一次并跳过**主动**压缩 —— 配置坏了不该让会话不可用
-                            case None => this.warnCompactionSpecOnce(resolution.reason, log)
+                                let compactor = this.compactor
+                                let compactionRuntime = CompactionRuntime(this.provider, actualModel,
+                                    systemText, tools, cc)
+                                currentMessages = this.compactBracketed(plan.trigger, sessionId,
+                                    currentMessages, total, log, { msgs, _ =>
+                                    compactor.compact(msgs, plan, compactionRuntime)
+                                })
                         }
                     }
                     var chatReq = ctxBuilder.buildChatRequest(actualModel, systemText, currentMessages,
@@ -1392,56 +1409,6 @@ public open class AgentRuntime {
         }
         update
     }
-}
-
-// 待压缩对话文本（截取到约 reserve*4 字节上限，避免子调用超长）
-func summarizeText(msgs: ArrayList<Message>, limit: Int64): String {
-    let sb = StringBuilder()
-    var used: Int64 = 0
-    for (m in msgs) {
-        let t = match (m) {
-            case um: UserMessage => plainTextOf(um)
-            case am: AssistantMessage => plainTextOf(am)
-            case tm: ToolResultMessage => "[tool " + tm.toolName + "]: " + plainTextOf(tm)
-            case cm: CompactionMessage => "[summary] " + checkpointBody(cm.summary)
-            case am2: ArchiveMessage => "[archived " + am2.startIndex.toString() + "-" + am2.endIndex.toString() + "]: " + am2.summary
-            case _ => ""
-        }
-        if (t == "") { continue }
-        if (used + Int64(t.size) > limit * 4) {
-            // 超限：截取该消息前缀到剩余额度，避免摘要子调用拿到空对话
-            let remaining = limit * 4 - used
-            if (remaining > 0) {
-                let cut = if (Int64(t.size) < remaining) { Int64(t.size) } else { remaining }
-                sb.append(t[0..cut])
-                sb.append("\n")
-            }
-            break
-        }
-        sb.append(t)
-        sb.append("\n")
-        used += Int64(t.size)
-    }
-    sb.toString()
-}
-
-// 提取消息文本（ContentList 的 TextBlock 拼接）
-func plainTextOf(m: Message): String {
-    let cl = match (m) {
-        case um: UserMessage => um.content
-        case am: AssistantMessage => am.content
-        case tm: ToolResultMessage => tm.content
-        case cm: CompactionMessage => ContentList.ofText(cm.summary)
-        case _ => ContentList.ofText("")
-    }
-    let sb = StringBuilder()
-    for (b in cl.blocks()) {
-        match (b) {
-            case ContentBlock.TextBlock(t) => sb.append(t)
-            case _ => ()
-        }
-    }
-    sb.toString()
 }
 
 // 输出被 token 上限截断时的续跑提示：要求「接着写」而不是重头再来（重复内容会白烧上下文）。

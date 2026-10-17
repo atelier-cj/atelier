@@ -13,6 +13,7 @@ import atelier.skill.*
 import atelier.trust.*
 import atelier.context.ModelContextRegistry
 import atelier.context.PromptSegmentContributor
+import atelier.context.{Compactor, BasicCompactor}
 import atelier.event.EventStream
 
 /**
@@ -59,6 +60,13 @@ public class HarnessSpec {
     public let middlewares: ArrayList<ProviderMiddleware>
     /** 系统提示段贡献者 */
     public let contributors: ArrayList<PromptSegmentContributor>
+    /**
+     * 上下文压缩策略（判定 + 改写历史）。
+     *
+     * None = 用 [BasicCompactor]（摘要 + 切点替换，等价于改动前的行为）。
+     * 换策略时注入自己的实现：产物不该为压不压、怎么压写死在内核里。
+     */
+    public let compactor: ?Compactor
     /** 进程级事件总线（None = 不发布） */
     public let eventBus: ?EventBus
     // provider 叠加表：注册表是宿主共享的（且是外部类型、没有派生语义），
@@ -79,6 +87,7 @@ public class HarnessSpec {
         models!: ModelContextRegistry = ModelContextRegistry(),
         middlewares!: ArrayList<ProviderMiddleware> = ArrayList<ProviderMiddleware>(),
         contributors!: ArrayList<PromptSegmentContributor> = ArrayList<PromptSegmentContributor>(),
+        compactor!: ?Compactor = None,
         eventBus!: ?EventBus = None
     ) {
         this.tools = tools
@@ -94,6 +103,7 @@ public class HarnessSpec {
         this.models = models
         this.middlewares = middlewares
         this.contributors = contributors
+        this.compactor = compactor
         this.eventBus = eventBus
         this.providerOverlay = HashMap<String, Provider>()
     }
@@ -113,6 +123,7 @@ public class HarnessSpec {
         models!: ?ModelContextRegistry = None,
         middlewares!: ?ArrayList<ProviderMiddleware> = None,
         contributors!: ?ArrayList<PromptSegmentContributor> = None,
+        compactor!: ?Option<Compactor> = None,
         overlay!: ?HashMap<String, Provider> = None
     ) {
         this.tools = match (tools) { case Some(v) => v; case None => from.tools }
@@ -128,6 +139,7 @@ public class HarnessSpec {
         this.models = match (models) { case Some(v) => v; case None => from.models }
         this.middlewares = match (middlewares) { case Some(v) => v; case None => from.middlewares }
         this.contributors = match (contributors) { case Some(v) => v; case None => from.contributors }
+        this.compactor = match (compactor) { case Some(v) => v; case None => from.compactor }
         this.eventBus = from.eventBus
         this.providerOverlay = match (overlay) { case Some(v) => v; case None => from.providerOverlay }
     }
@@ -203,6 +215,26 @@ public class HarnessSpec {
      */
     public func withTrustGate(g: TrustGate): HarnessSpec {
         HarnessSpec(this, trustGate: Some(g))
+    }
+
+    /**
+     * 换压缩策略（判定 + 改写历史）。
+     *
+     * 压缩不是横切关注点，而是可替换的核心能力：注入的实现决定「压不压、怎么压」，
+     * 而事务括弧、会话级互斥、台账留痕仍由运行时统一保证（见 [Compactor] 的契约）。
+     */
+    public func withCompactor(c: Compactor): HarnessSpec {
+        HarnessSpec(this, compactor: Some(c))
+    }
+
+    /**
+     * 解析出生效的压缩策略：显式注入的优先，否则用 [BasicCompactor]（= 改动前行为）。
+     */
+    public func resolvedCompactor(): Compactor {
+        match (this.compactor) {
+            case Some(c) => c
+            case None => BasicCompactor()
+        }
     }
 
     /**
