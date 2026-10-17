@@ -8,6 +8,7 @@ import atelier.session.*
 import atelier.provider.*
 import atelier.util.{toJsonString, fromJsonString}
 import atelier.provider.ModelInfo
+import atelier.trust.{TrustManager, TrustState, TrustDecision}
 
 // ========== 装配束：派生语义 / provider 解析 / 上下文窗口 / 便利层 ==========
 
@@ -213,4 +214,78 @@ func harness_closeIsQuietAndRepeatable() {
     h.close()
     h.close()
     @Expect(true, true)
+}
+
+// ==================== 信任闸门装配（HarnessSpec.trustGate） ====================
+
+// 未注入时：生效闸门绑定 spec 的 trust，行为与改动前一致
+@Test
+func harnessSpec_trustGateDefaultsToTrustManagerBinding() {
+    let trust = TrustManager()
+    trust.setTrust("/proj", TrustState.Trusted)
+    let spec = HarnessSpec(trust: trust)
+    let gate = spec.resolvedTrustGate()
+    // 有副作用工具（Sequential）在已信任目录 → 放行
+    let seq = SpecSequentialToolForGate()
+    @Expect(isTrust(gate(seq, "/proj", ""), TrustDecision.Allowed), true)
+    // 未信任目录 → 要问
+    @Expect(isTrust(gate(seq, "/other", ""), TrustDecision.NeedsApproval), true)
+}
+
+// 注入后：生效闸门就是注入的那个（可替换性）
+@Test
+func harnessSpec_withTrustGateOverridesDefault() {
+    let spec = HarnessSpec().withTrustGate({ _, _, _ => TrustDecision.Denied })
+    let gate = spec.resolvedTrustGate()
+    @Expect(isTrust(gate(SpecSequentialToolForGate(), "/anywhere", ""), TrustDecision.Denied), true)
+}
+
+// 派生值语义：with* 不回写原 spec（同其它组件的契约）
+@Test
+func harnessSpec_withTrustGateIsValueSemantics() {
+    let base = HarnessSpec()
+    let derived = base.withTrustGate({ _, _, _ => TrustDecision.Denied })
+    // 原 spec 仍是"未注入"
+    match (base.trustGate) {
+        case None => @Expect(true, true)
+        case Some(_) => @Expect("base must have no gate", "")
+    }
+    match (derived.trustGate) {
+        case Some(_) => @Expect(true, true)
+        case None => @Expect("derived must have a gate", "")
+    }
+}
+
+// 派生时其它受管字段不变（trustGate 与 trust 是两个字段，互不覆盖）
+@Test
+func harnessSpec_withTrustGateKeepsTrustManager() {
+    let trust = TrustManager()
+    let spec = HarnessSpec(trust: trust).withTrustGate({ _, _, _ => TrustDecision.Allowed })
+    let gate = spec.resolvedTrustGate()
+    @Expect(isTrust(gate(SpecSequentialToolForGate(), "/x", ""), TrustDecision.Allowed), true)
+    // manager 仍在（供 setTrust 等写路径用）
+    trust.setTrust("/x", TrustState.Trusted)
+    @Expect(isState(trust.getTrust("/x"), TrustState.Trusted), true)
+}
+
+class SpecSequentialToolForGate <: Tool {
+    public func name(): String { "spec_seq" }
+    public func description(): String { "" }
+    public func schema(): JsonValue { JsonValue.Map(HashMap<String, JsonValue>()) }
+    public func execute(ctx: ToolContext, args: JsonValue): ToolResult { ToolResult("ok", None, false, false) }
+    public func executionMode(): ToolExecutionMode { ToolExecutionMode.Sequential }
+}
+
+func isTrust(d: TrustDecision, expected: TrustDecision): Bool {
+    match (d) {
+        case expected => true
+        case _ => false
+    }
+}
+
+func isState(s: TrustState, expected: TrustState): Bool {
+    match (s) {
+        case expected => true
+        case _ => false
+    }
 }

@@ -34,8 +34,15 @@ public class HarnessSpec {
     public let providers: ProviderRegistry
     /** 会话存储 */
     public let store: SessionStore
-    /** 信任闸门 */
+    /** 信任表（闸门默认从它取状态） */
     public let trust: TrustManager
+    /**
+     * 信任判定闸门：决定「这一次工具调用该不该放行」。
+     *
+     * None = 用 [pathTrustGate] 绑定本 spec 的 [trust]（等价于改动前的行为）。
+     * 宿主想换策略时注入自己的 `TrustGate`（单方法无状态 → 函数类型，不必写类）。
+     */
+    public let trustGate: Option<TrustGate>
     /** Skill 注册表 */
     public let skills: SkillRegistry
     /** Agent 配置注册表 */
@@ -63,6 +70,7 @@ public class HarnessSpec {
         providers!: ProviderRegistry = ProviderRegistry(),
         store!: SessionStore = MemorySessionStore(),
         trust!: TrustManager = TrustManager(),
+        trustGate!: Option<TrustGate> = None,
         skills!: SkillRegistry = SkillRegistry(),
         agents!: AgentRegistry = AgentRegistry(),
         mcp!: McpManager = McpManager(),
@@ -77,6 +85,7 @@ public class HarnessSpec {
         this.providers = providers
         this.store = store
         this.trust = trust
+        this.trustGate = trustGate
         this.skills = skills
         this.agents = agents
         this.mcp = mcp
@@ -95,6 +104,7 @@ public class HarnessSpec {
         providers!: ?ProviderRegistry = None,
         store!: ?SessionStore = None,
         trust!: ?TrustManager = None,
+        trustGate!: ?Option<TrustGate> = None,
         skills!: ?SkillRegistry = None,
         agents!: ?AgentRegistry = None,
         mcp!: ?McpManager = None,
@@ -109,6 +119,7 @@ public class HarnessSpec {
         this.providers = match (providers) { case Some(v) => v; case None => from.providers }
         this.store = match (store) { case Some(v) => v; case None => from.store }
         this.trust = match (trust) { case Some(v) => v; case None => from.trust }
+        this.trustGate = match (trustGate) { case Some(v) => v; case None => from.trustGate }
         this.skills = match (skills) { case Some(v) => v; case None => from.skills }
         this.agents = match (agents) { case Some(v) => v; case None => from.agents }
         this.mcp = match (mcp) { case Some(v) => v; case None => from.mcp }
@@ -177,6 +188,34 @@ public class HarnessSpec {
 
     public func withTrust(t: TrustManager): HarnessSpec {
         HarnessSpec(this, trust: t)
+    }
+
+    /**
+     * 换信任判定闸门（决定「这一次工具调用该不该放行」）。
+     *
+     * 单方法、无状态的策略用 lambda 即可：
+     *
+     * ```
+     * spec.withTrustGate({ tool, wd, sid =>
+     *     if (tool.name() == "bash") { TrustDecision.NeedsApproval } else { TrustDecision.Allowed }
+     * })
+     * ```
+     */
+    public func withTrustGate(g: TrustGate): HarnessSpec {
+        HarnessSpec(this, trustGate: Some(g))
+    }
+
+    /**
+     * 解析出**生效**的闸门：显式注入的优先，否则绑定本 spec 的 [trust]（= 改动前行为）。
+     *
+     * runtime 在每次判定时调它，因此「没注入」与「注入默认」走同一条路径 ——
+     * 不存在"两条判定路径"这种分叉。
+     */
+    public func resolvedTrustGate(): TrustGate {
+        match (this.trustGate) {
+            case Some(g) => g
+            case None => pathTrustGate(this.trust)
+        }
     }
 
     public func withSkills(s: SkillRegistry): HarnessSpec {

@@ -150,3 +150,64 @@ public func trust_shouldAllowForUsesSession() {
     // 无会话版本（旧行为）
     @Expect(isDecision(shouldAllow(tool, "/home/user/project", mgr), TrustDecision.NeedsApproval), true)
 }
+
+// ==================== TrustGate（函数类型闸门） ====================
+
+// 默认闸门工厂：绑定给它的 manager —— 与改动前 shouldAllowFor 的行为逐条等价
+@Test
+public func trustGate_defaultMatchesLegacyBehavior() {
+    let mgr = TrustManager()
+    let gate: TrustGate = pathTrustGate(mgr)
+    // Parallel 恒放行（与信任表无关）
+    @Expect(isDecision(gate(MockParallelTool(), "/tmp", ""), TrustDecision.Allowed), true)
+    @Expect(isDecision(gate(MockParallelTool(), "/nope/untrusted", "s1"), TrustDecision.Allowed), true)
+    // Sequential：Undecided → 要问
+    @Expect(isDecision(gate(MockSequentialTool(), "/tmp", ""), TrustDecision.NeedsApproval), true)
+    // Sequential：Trusted → 放行
+    mgr.setTrust("/home/user/project", TrustState.Trusted)
+    @Expect(isDecision(gate(MockSequentialTool(), "/home/user/project", ""), TrustDecision.Allowed), true)
+    // Sequential：Untrusted → 拒绝
+    mgr.setTrust("/home/user/project", TrustState.Untrusted)
+    @Expect(isDecision(gate(MockSequentialTool(), "/home/user/project", ""), TrustDecision.Denied), true)
+}
+
+// 闸门按会话隔离（默认实现保留 per-session 语义）
+@Test
+public func trustGate_defaultKeepsSessionIsolation() {
+    let mgr = TrustManager()
+    mgr.setSessionTrust("session_a", "/home/user/project", TrustState.Trusted)
+    let gate: TrustGate = pathTrustGate(mgr)
+    @Expect(isDecision(gate(MockSequentialTool(), "/home/user/project", "session_a"), TrustDecision.Allowed), true)
+    @Expect(isDecision(gate(MockSequentialTool(), "/home/user/project", "session_b"), TrustDecision.NeedsApproval), true)
+}
+
+// 换掉闸门后行为真的变了（证明可替换，而非只是换了个名字）
+@Test
+public func trustGate_customGateReplacesDecision() {
+    // 自定义策略：一律要问（比默认更严）
+    let strict: TrustGate = { _, _, _ => TrustDecision.NeedsApproval }
+    @Expect(isDecision(strict(MockParallelTool(), "/tmp", ""), TrustDecision.NeedsApproval), true)
+    // 默认闸门对同一输入是放行 —— 两者结果不同，说明注入确实生效
+    let mgr = TrustManager()
+    @Expect(isDecision(pathTrustGate(mgr)(MockParallelTool(), "/tmp", ""), TrustDecision.Allowed), true)
+}
+
+// 自定义闸门可以只看工具名，不看信任表（宿主策略的典型形态）
+@Test
+public func trustGate_canPolicyByToolName() {
+    let gate: TrustGate = { tool, _, _ =>
+        if (tool.name() == "mock_sequential") { TrustDecision.Denied } else { TrustDecision.Allowed }
+    }
+    @Expect(isDecision(gate(MockSequentialTool(), "/anywhere", "s"), TrustDecision.Denied), true)
+    @Expect(isDecision(gate(MockParallelTool(), "/anywhere", "s"), TrustDecision.Allowed), true)
+}
+
+// pathTrustGateWith 是核心逻辑：空 manager = 一切 Undecided（这不是默认行为，是默认故障）
+@Test
+public func trustGate_emptyManagerIsAllUndecided() {
+    let empty = TrustManager()
+    // Parallel 仍放行（不看信任表）
+    @Expect(isDecision(pathTrustGateWith(MockParallelTool(), "/x", "", empty), TrustDecision.Allowed), true)
+    // Sequential 一律要问 —— 所以"无状态默认闸门"不可写，必须由工厂绑定 manager
+    @Expect(isDecision(pathTrustGateWith(MockSequentialTool(), "/x", "", empty), TrustDecision.NeedsApproval), true)
+}

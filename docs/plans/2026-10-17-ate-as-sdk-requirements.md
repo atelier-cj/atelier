@@ -1,0 +1,614 @@
+# atelier 作为 SDK 的能力需求整合（重构基准）
+
+> 日期：2026-10-17 ｜ 状态：**需求整合稿**（重构的基准，先定它再动代码）
+> 定位：**atelier 是底层 SDK**，世界树 / atelier-lumine / starline 都是**基于它做的产品**。
+> 本文整合三方需求 + 现有缺口，推导出**重构的基准模式**，作为后续所有改动的前提。
+>
+> 关联：
+> - `docs/plans/2026-10-17-always-on-requirements.md`（always-on 需求 A~E 组）
+> - `/home/ystyle/Projects/Cangjie/docs/plans/2026-10-02-always-on-agent.md`（产品总设计 v4）
+> - `docs/design.md` 第十三章（库集成扩展点矩阵，2026-09-05 盘点）
+
+---
+
+## 0. 本文要解决的问题
+
+**atelier 的定位是「嵌入式 harness 底层 SDK」，但它的可替换性只做到了数据层和工具层，没做到控制流层。**
+
+三方产品现在的真实需求把这件事暴露出来了：
+
+| 产品 | 定位 | 需要 atelier 提供的 | 现状 |
+|---|---|---|---|
+| **atelier-lumine** | Windows 桌面 AI 工坊 | **自己的会话存储**（jsonl） | ⚠️ **有自己的 jsonl 实现，但没接进 `SessionStore` 接口** |
+| **世界树**（atelier-yggdrasil） | 复刻 dsh 的插件宿主 | **换掉整个 agent 循环** + 换压缩策略 | ❌ 循环不是接口，10 处硬编码 |
+| **starline** | 常驻智能体产品 | **换压缩策略**（记忆层与压缩分工） | ❌ 压缩逻辑焊在主循环里 |
+
+**一句话：三个产品要换的是三样不同的东西，而其中两样（循环、压缩）现在换不了。**
+
+---
+
+## 1. 需求来源一：三个产品的真实诉求（已核实）
+
+### 1.1 lumine —— 要换存储（**A 类，其实早就可行，只是没标准化**）
+
+**核实结果**：
+
+| 事实 | 证据 |
+|---|---|
+| lumine 有**自己的 jsonl 会话存储** | `atelier-lumine/src/model/session_store.cj`（`<存档目录>/sessions/<id>.jsonl`） |
+| 它**没有实现 `SessionStore` 接口** | 该文件里只有 `class SessionLine <: JsonSerializable...`，无 `<: SessionStore` |
+| 它装配时注入的是 **`MemorySessionStore()`** | `src/ai/harness.cj:441` |
+
+**结论**：`SessionStore` 接口**存在且可用**（`atelier/src/session/store.cj`），但 lumine 自己写了一份**没接上接口**的实现。
+
+> **这是本设计最重要的一条经验**：**接口存在不等于被使用**。标准化要包含"让消费者知道该用它"。
+
+### 1.2 世界树 —— 要复刻 dsh，**需要换整个循环**（C 类）
+
+**定位（用户原话）**：「世界树的设计思路其实就是 **dsh 复刻**，暂时没自己的想法。」
+
+**核实**：yggdrasil 的 4 个插件全部 `"atelier" = { path = ... }`，`cjpm.toml` 注释写明「**对标 dsh 的 core 包**」「**对标 dsh core/api**」。
+
+**dsh 的实际分层（290 个包）**：
+
+```
+dsh-agent          → Agent 接口 + AgentRegistry + AgentFactory（只管"是什么"）
+dsh-agent-loop     → ReactLoopAgent implements Agent（2494 行，管"怎么跑"）
+dsh-compaction     → 压缩接口
+dsh-compaction-basic            → 1027 行实现
+dsh-compaction-image-offload    → 图片卸载
+dsh-compaction-tool-result-pruner → 工具结果修剪
+```
+
+**dsh 的关键设计**（`dsh-agent` 的注释原文）：
+
+> **Agent service: live registry, factory delegation... Concrete creation and driving belong to the loop.**
+
+**即：`Agent` 接口只管身份（`readonly id: SessionId`），行为约束在 `AgentHandle`（`status`/`cancel`/`send`/`whenIdle`），真正的循环是 `loop` 这个可替换实现。**
+
+### 1.3 starline —— 要换压缩策略（B 类）
+
+**理由**（来自 always-on 需求 §D3）：记忆层与上下文压缩**触发条件不同**（token 用量 vs 分段信号），混成一根管子会"调窗口参数莫名改动记忆质量"。
+
+**现状**：压缩代码分两处——
+
+| 位置 | 内容 |
+|---|---|
+| `atelier/src/context/compaction.cj`（727 行） | `CompactSpec` / `resolveCompactSpec` / `CompactionLedger` / 修剪 / 摘要 |
+| `atelier/src/agent/runtime.cj`（1455 行）**里的调用逻辑** | 请求前压力检测、溢出恢复、括弧事件、台账写入、`retry` 路径 |
+
+**所以压缩现在既不是接口，也没独立成包。**
+
+---
+
+## 2. 需求来源二：现有缺口盘点（2026-10-17 实测）
+
+### 2.1 接口 vs 实现的总体比例
+
+| 项 | 数量 |
+|---|---|
+| `public interface` | **7** |
+| `public class` | **96** |
+| `public open class` | 4 |
+| `public enum` / `struct` | 15 / 29 |
+| `public func`（顶层） | 143 |
+
+### 2.2 按包分布（**按被引用次数排序**）
+
+| 包 | interface | class | 被引用 | 诊断 |
+|---|---|---|---|---|
+| **message** | 0 | 0（纯 struct/enum） | **58** | 数据层，合理 |
+| **tool** | **1**（`Tool`） | 17 | **54** | `ToolRegistry`/`ToolExecutor`/`McpManager` **未抽象** |
+| **provider** | 0（复用外部 `llm_api.Provider`） | 1 | **31** | 外部接口已存在，合理 |
+| **session** | **1**（`SessionStore`） | 5 | **26** | ✅ 接口在，但**消费者没接**（见 §1.1） |
+| **skill** | 0 | 3 | **24** | `SkillRegistry` 未抽象（低优先） |
+| **context** | **1**（`PromptSegmentContributor`） | 5 | **22** | ⚠️ **压缩、ContextBuilder 未抽象** |
+| **trust** | **0** | 1 | **20** | ⚠️ **完全不可替换** |
+| **event** | 0 | 0 | 18 | `EventStream` 为泛型类，无需接口 |
+| **interaction** | 0 | 4 | **16** | 数据层为主，合理 |
+| **util** | 0 | 1 | 12 | 合理 |
+| **agent** | **3** | **38** | **10** | ⚠️ **核心控制流，却是接口最少、被引用最少** |
+| **config** | 0 | 10 | 0 | 数据层，合理 |
+| **ptc** | **1** | 5 | 5 | 尚可 |
+| **acp / a2a** | 0 | 5 + 5 | 0 | 边界适配层，合理 |
+
+### 2.3 现有 7 个接口（全部）
+
+| # | 接口 | 位置 | 粒度 |
+|---|---|---|---|
+| 1 | `Tool` | `tool/interface.cj` | 工具 |
+| 2 | `SessionStore` | `session/store.cj` | 存储 |
+| 3 | `Hook`（6 相位，全默认实现） | `agent/hook.cj` | 回合/工具 |
+| 4 | `ProviderMiddleware`（`wrap` 链） | `agent/provider_middleware.cj` | **单次模型请求** |
+| 5 | `AgentEvent` | `agent/event.cj` | 事件 |
+| 6 | `PromptSegmentContributor` | `context/system_prompt_builder.cj` | 提示段 |
+| 7 | `PtcSubCallHost` | `ptc/binding.cj` | PTC 子调用 |
+
+### 2.4 三个最刺眼的缺口
+
+#### 🔴 缺口 1：核心循环不是接口
+
+| 事实 | 位置 |
+|---|---|
+| `AgentRuntime` 是 `open class`，**4 个入口是 `open`** | `runtime.cj:99,534,543,557,562` |
+| **但 1455 行的主循环在 `private func chatWithEnv(sessionId, ...)`** | `runtime.cj:585` |
+| 那 4 个 `open` 方法**全是转发壳** | 覆盖它们等于丢掉整个 agent 能力 |
+| **10 处**硬编码 `AgentRuntime(...)` 构造** | `server/handler.cj`×3、`cli/tui.cj`×2、`cli/app/main.cj`、`server/ag_ui_handler.cj`、`agent/agent_tool.cj`、`agent/session_loop.cj`、`agent/harness.cj` |
+| `HarnessSpec` **没有 runtime/loop 字段** | `harness.cj:32-56`（**13 个字段**，无 factory） |
+| `agent/` 下**没有任何 loop 接口** | 只有 `Hook`/`ProviderMiddleware`/`AgentEvent` |
+
+#### 🔴 缺口 2：`trust` 包 0 接口，且是自由函数
+
+```cangjie
+// atelier/src/trust/gate.cj（27 行，全部内容）
+public func shouldAllowFor(tool: Tool, workDir: String,
+                            trustManager: TrustManager, sessionId: String): TrustDecision
+```
+
+**问题**：这是**顶层函数**而非方法，参数是**具体类 `TrustManager`**。想换信任策略只能改源码。
+
+> 而 always-on 的 A2（便利性预授权）明确要求"可换策略"——**这一条现在做不到**。
+
+#### 🔴 缺口 3：`Idle` 状态无处安放（always-on B 组）
+
+**核实**：`AgentRuntime` **每次 run 新建一个**（`session_loop.cj:77`）。
+
+**后果**：`Idle`/`Queued` 这类"run 之间"的状态**没有持有者**。
+
+**dsh 的对照**——它有原生答案：
+
+```typescript
+/** An agent's lifecycle state, emitted on every transition as `agent/status` */
+export type AgentStatus = 'idle' | 'running';
+```
+
+> `idle` means no driver is active; `running` begins when waking input starts cancellable pre-step processing...
+> **Disposal removes the agent from its registry; it is not a third observable status.**
+
+**即：dsh 的 loop 实例比一次执行长寿**，所以 `idle` 有地方住。
+
+---
+
+## 3. 需求来源三：always-on（沿用 A~E 组，此处只列**对 SDK 的影响**）
+
+详细条目见 `2026-10-17-always-on-requirements.md`。本文只吸收**改变 SDK 形状**的部分：
+
+| always-on 组 | 对 SDK 形状的影响 |
+|---|---|
+| **A0** 入口解绑会话 | loop 接口**不能要求 `sessionId`**（改成可选的"注意力快照"） |
+| **A1** RunPolicy | 模式是 **loop 实例的属性**，不是 per-run 的 config 字段 |
+| **A2** 便利性预授权 | 需要 `TrustGate` 接口（对应 §2.4 缺口 2） |
+| **A3** 唤醒门控接口 | 新增 `WakeGate` 接口（无实现，只定契约） |
+| **B** run 之间的状态 | **必须有比 run 长寿的持有者** → loop 实例长寿 + `AgentStatus` |
+| **C** 触发源 | `run` 的入参，可扩展类型 |
+| **D1** 缓存友好布局 | 提示装配必须能分"稳定前缀 / 动态段" → `PromptSegmentContributor` 要标明段性质 |
+| **D2** PTC 注册 | 已有 `PtcSubCallHost`，够用 |
+| **E1** 特权代执行 | 复用 `ExternalRequest.reason`（已核实是 `String` 非枚举，加取值零成本） |
+| **E2/E3** 资源与审计 | 只需事件/日志埋点，不改变接口形状 |
+
+---
+
+## 4. 重构的基准模式 ⭐（本文的核心产出）
+
+盘点清楚后，**要做的不是发明新机制，而是把已经正确的东西补齐到缺它的位置上。**
+
+### 4.1 三段式（所有能力都按这个套）
+
+```
+① 接口在哪       —— atelier/src/<domain>/interface.cj（纯契约，零外部依赖）
+② 默认实现在哪   —— atelier/src/<domain>/default_*.cj 或独立成员包
+③ 怎么装         —— HarnessSpec 的一个字段 + 一个 with* 派生
+```
+
+**验证：现有 7 个接口里已有 5 个符合这个模式**（`Tool` / `SessionStore` / `Hook` / `ProviderMiddleware` / `PromptSegmentContributor`）。
+
+**所以这次重构 = 把这个模式补到 `AgentLoop` 与 `Compactor` 两个缺失位置。**
+
+### 4.2 接口还是函数类型？——先问「有没有状态」
+
+仓颉的函数是一等公民，`type XxxFn = (...) -> ...` 本身就是可注入的扩展点，
+**而且我们已经在重用它三次**：
+
+| 现成的函数类型 | 位置 |
+|---|---|
+| `AskFn = (UserRequest) -> UserAnswer` | `tool/interface.cj:25` |
+| `PtcBindingFunction = (JsonValue) -> PtcBindingOutcome` | `ptc/types.cj:78` |
+| `PtcAuthorizer = (Tool, JsonValue) -> PtcAuthDecision` | `ptc/types.cj:255` |
+
+**判据（按优先级）**：
+
+| 条件 | 用什么 | 理由 |
+|---|---|---|
+| **有状态**（跨调用保留 `idle`/`running`、计数、台账） | **interface + 类** | 函数靠闭包也能捕获变量，但**对开发者不友好**：状态藏在闭包里看不见、不好调试、不好复用 |
+| **无状态但多方法** | interface | 函数类型表达不了多方法 |
+| **单方法且无状态** | **函数类型 `type XxxFn`** | 宿主一行 lambda 就能接，不必写类（`withAsk` 已是这个体验） |
+
+**据此对四个扩展点分类**：
+
+| 扩展点 | 形态 | 理由 |
+|---|---|---|
+| **`AgentLoop`** | **interface（必须）** | 要持有 `idle`/`running` 生命周期 + 三个方法。**闭包捕获状态对开发者不友好**——这是决定性理由，不是语言能力的限制 |
+| **`Compactor`** | interface | 多方法（`shouldCompact` + `compact`），且台账/去重可能需要状态 |
+| **`TrustGate`** | **函数类型** | 单方法、无状态：`type TrustGate = (Tool, String, String) -> TrustDecision` |
+| **`WakeGate`** | **函数类型** | 单方法、无状态：`type WakeGate = (OverviewFeatures) -> WakeDecision` |
+
+> **一条设计纪律**：**SDK 的扩展面优先做成函数类型**（接入成本一行），
+> **interface 只留给确实有状态的**。这条对三个消费方都友好——世界树复刻 dsh 时
+> 大量注入点都是无状态的策略判断，用 lambda 比写类轻得多。
+
+### 4.3 为什么不做第三套回调机制（`RunStage`）
+
+**曾考虑**：加 `RunStage`（wrap 链，仿 `ProviderMiddleware`）。
+
+**否决理由**：
+
+| 理由 | 说明 |
+|---|---|
+| **已有两套够用** | `Hook`（6 相位，run/turn/tool 粒度）+ `ProviderMiddleware`（请求级） |
+| **压缩不是"横切"，是"可替换的核心能力"** | dsh 的做法是独立包而不是中间件（`dsh-compaction-basic` 是插件，不是 middleware） |
+| **SDK 要保持机制数量少** | 三个产品各有偏好，机制越多越难对齐 |
+
+**结论**：用「**接口 + 装配字段**」——与 `SessionStore`/`Tool` 完全同构，不发明新概念。
+
+### 4.4 分层插拔点（最终形态）
+
+| 层 | 粒度 | 机制 | 状态 |
+|---|---|---|---|
+| **请求级** | 一次模型调用 | `ProviderMiddleware` | ✅ 已有 |
+| **回合级** | 一轮「模型+工具」 | `Hook`（6 相位） | ✅ 已有 |
+| **能力级** | 压缩 / 提示装配 / PTC | **`Compactor`** / `PromptSegmentContributor` / `PtcSubCallHost` | ⚠️ **`Compactor` 缺** |
+| **循环级** | 整个 run 的生命周期 | **`AgentLoop`** | ⚠️ **缺** |
+| **装配级** | 组件从哪来 | `HarnessSpec`（13 字段 → **15 字段**） | ⚠️ 缺 `loop` / `compactor` |
+
+> **插话（`steer`/`inject`，§11）不属于上面任何一层**：它不是"插拔点"，而是
+> **loop 运行期的输入通道**——所以在 `AgentLoop` 接口上，不在 `HarnessSpec` 里。
+
+---
+
+## 5. 要实现的东西（三档，全部要做）
+
+> 用户决定：**不考虑工期，夯实 SDK 优先。** 以下三档按依赖顺序排列，但都要完成。
+
+### 档 A —— 标准化已有能力（**不是新功能，是让它们真被用起来**）
+
+| # | 做什么 | 现状问题 | 验收 |
+|---|---|---|---|
+| **A-1** | `trust` 提接口 | `shouldAllowFor` 是自由函数 + 具体类参数 | `TrustGate` 接口 + 默认实现 `PathTrustGate`；`shouldAllowFor` 保留为兼容包装 |
+| **A-2** | **`SessionStore` 的消费者迁移** | lumine 有自己的 jsonl 实现**但没接接口** | lumine 的 `session_store.cj` 实现 `SessionStore`，装配处替换 `MemorySessionStore()` |
+| **A-3** | `context` 的装配面标准化 | `ContextBuilder`/`SystemPromptBuilder` 是具体类 | 是否接口化**待定**（见 §7 待决 1） |
+| **A-4** | 补 `HarnessSpec` 的缺失派生 | —— | 每个新增接口都有对应 `with*` |
+
+**A-2 是本档的重点**：它证明「接口存在 ≠ 被使用」，标准化必须包含迁移指南。
+
+### 档 B —— 压缩可替换（starline 需要）
+
+| # | 做什么 | 拆解 |
+|---|---|---|
+| **B-1** | 抽 `Compactor` 接口 | 方法集：`shouldCompact` / `compact` / `report`？见 §7 待决 2 |
+| **B-2** | 默认实现独立成包 | `atelier/src/compaction/`（把 `context/compaction.cj` 727 行迁过去） |
+| **B-3** | **把主循环里的压缩调用逻辑抽出来** | `runtime.cj` 里的：请求前压力检测、溢出恢复、括弧事件、台账写入 |
+| **B-4** | 装配 | `HarnessSpec.compactor: Compactor` + `withCompactor` |
+| **B-5** | 提供"不压缩"实现 | 供 panel 模式用（证明真的可插拔） |
+
+**B-3 是本档的真难点**：压缩不只在 `compaction.cj`，主循环里还有一大坨调用与事件编排。
+
+### 档 C —— 循环可替换（世界树需要）
+
+| # | 做什么 | 拆解 |
+|---|---|---|
+| **C-1** | 抽 `AgentLoop` 接口 | 见 §7 待决 3 的方法集草案 |
+| **C-2** | **切分 `AgentRuntime` 1455 行** | 核心循环（请求→工具→下一轮）vs 可选阶段 |
+| **C-3** | 默认实现改名 | `AgentRuntime` → `DefaultAgentLoop`（或保留 `AgentRuntime` 作为别名） |
+| **C-4** | `HarnessSpec.loop` + 工厂 | 10 处硬编码构造改走工厂 |
+| **C-5** | **`AgentStatus` 生命周期** | `idle`/`running` + 事件（解决 always-on B 组） |
+| **C-6** | 迁移 `SessionLoop` | 它现在是"加载历史→调 runtime→落库"，抽接口后要重新定位（动 acp/a2a/subagent 三处） |
+| **C-7** | **`steer` / `inject` 插话** | 按会话的 `steerQueues` + 循环顶部 drain + `[User interjection]` 标注（见 §11） |
+| **C-8** | `applyArchiveMarks` / `applyArchives` 保插话验证 | 它们是否原样保留 `UserMessage` 未核实（§11.4 第 1 行），切分时必须确认 |
+
+**C-2 与 C-6 是本档的真难点。**
+
+---
+
+## 6. 接口草案（供讨论，非最终）
+
+### 6.1 `AgentLoop`（档 C）
+
+```cangjie
+// atelier/src/agent/loop_interface.cj —— 纯契约
+
+// run 的输入：不要求 sessionId（A0）
+public class RunInput {
+    public let attention: AttentionSnapshot   // 面板渲染 + 最近 N 条 + 记忆概览
+    public let trigger: RunTrigger            // 谁触发的（C）
+    public let policy: RunPolicy              // attended / unattended（A1）
+}
+
+public interface AgentLoop {
+    // 生命周期状态（解决 B：比 run 长寿）
+    func status(): AgentStatus                // idle / running
+    func drive(input: RunInput): RunOutcome   // 一次执行
+    func cancel(): Unit
+
+    // 插话与注入（见 §11）：必须 interface —— 要操作队列，队列就是状态
+    func steer(msg: Message): Unit            // 插话：下一次模型调用可见，不打断工具
+    func inject(msg: Message): Unit           // 注入上下文：不唤醒 idle 的 loop
+}
+```
+
+**✅ 已探针验证的语言约束（2026-10-17 实测，cjc 1.2.0）**：
+
+| 语法 | 结果 | 对接口设计的影响 |
+|---|---|---|
+| `interface` 方法带默认参数 `func foo(a: Int64, b!: Int64 = 1)` | ❌ **不通过** | **接口方法的参数必须全必填** |
+| `open` 函数带默认参数 | ❌ 不通过 | 与已知限制一致（`SessionLoop.run` 踩过） |
+| `interface` 方法带默认实现 `func foo(a: Int64): Int64 { ... }` | ✅ 通过 | 加方法不破坏已有实现（`Hook` 就是这个用法） |
+| `interface` 方法收发 `ArrayList<T>` | ✅ 通过 | `Compactor` 的消息列表传递没问题 |
+| **用 Options 类包参数** `func drive(o: Opts)` + `Opts(a!: Int64 = 1)` | ✅ **通过** | ⭐ **绕开限制的标准做法** |
+
+> **结论：接口方法一律收敛成「少数几个必填参数」**，变化的部分装进一个 Options 类
+> （`RunInput` / `CompactOptions` 就是这个作用）。这既绕开了语言限制，也让接口**更容易演进**
+> （加字段不改签名）——两个好处方向一致。
+
+### 6.2 `Compactor`（档 B）
+
+```cangjie
+public interface Compactor {
+    // 是否该压：给定当前消息与路由信息，返回决策
+    func shouldCompact(messages: ArrayList<Message>, info: RouteInfo): CompactDecision
+    // 执行压缩：返回替换后的历史（或原样 = 放弃）
+    func compact(messages: ArrayList<Message>, decision: CompactDecision,
+                 ctx: CompactionContext): CompactionResult
+}
+```
+
+### 6.3 `TrustGate` / `WakeGate`（档 A，**函数类型**）
+
+按 §4.2 的判据：单方法、无状态 → **用函数类型，不用 interface**。
+
+```cangjie
+// atelier/src/trust/interface.cj
+// 与现有 AskFn / PtcAuthorizer 同一形态：宿主一行 lambda 就能接
+public type TrustGate = (Tool, String, String) -> TrustDecision
+//                                tool  workDir sessionId
+
+// atelier/src/agent/wake.cj
+public type WakeGate = (OverviewFeatures) -> WakeDecision
+```
+
+**默认实现仍然是函数**（不是类）：
+
+```cangjie
+// 等价于现有 shouldAllowFor 的行为，零变化
+public func pathTrustGate(tool: Tool, workDir: String, sessionId: String): TrustDecision {
+    ...
+}
+```
+
+**装配**（`HarnessSpec.withTrustGate`）：
+
+```cangjie
+// 用默认
+spec.withTrustGate(pathTrustGate)
+// 或者宿主一行 lambda 覆盖
+spec.withTrustGate({ tool, wd, sid => 
+    if (tool.name() == "bash") { TrustDecision.NeedsApproval } else { TrustDecision.Allowed }
+})
+```
+
+> **注意**：现有的 `shouldAllowFor(tool, workDir, trustManager, sessionId)` 是**自由函数**，
+> 且把 `TrustManager` 作为参数传进来。改成函数类型后，`TrustManager` 由**闭包捕获**：
+>
+> ```cangjie
+> let gate: TrustGate = { tool, wd, sid => shouldAllowFor(tool, wd, trustManager, sid) }
+> ```
+>
+> 这样**既保留了现有行为**（零改动），又让"换策略"变成换一个函数——不需要新类型。
+
+---
+
+## 7. 待决问题
+
+1. **`ContextBuilder` / `SystemPromptBuilder` 要不要接口化？**
+   它们现在是具体类。always-on D1 要求"能分清稳定前缀与动态段"——这可以通过 `PromptSegmentContributor` 扩展（加一个 `isDynamic()` 或分段顺序），**不一定需要把整个 builder 接口化**。建议：**先不接口化**，用 contributor 补齐；真需要再抽。
+
+2. **`Compactor` 的方法集边界在哪？**
+   - 只给 `compact(messages) -> messages`？那"该不该压"的判断留在循环里（压缩策略不完整可换）。
+   - 给 `shouldCompact` + `compact`？那循环只负责"问它、按它说的做"（推荐）。
+   - 还要不要 `report`（台账/事件）？**建议事件由循环统一发**（保证括弧成对），`report` 只返回数据。
+
+3. **`AgentLoop` 的方法集：`drive` 一次还是暴露阶段回调？**
+   - 方案①：`drive(input) -> outcome`（最简单，循环内部完全自主）
+   - 方案②：加 `onBeforeRequest` / `onAfterTurn` 等回调（能插入中间，但等于把 `Hook` 又造一遍）
+   - **建议①**，理由：需要中间介入的场景已有 `Hook` 覆盖；循环级替换要的就是"整个换掉"。
+
+4. **`AgentRuntime` 这个名字保留吗？**
+   `AgentRuntime` → `DefaultAgentLoop` 会造成 10 处构造点 + 文档全面改名。**建议：接口叫 `AgentLoop`，现有类保留 `AgentRuntime` 名字但 `implements AgentLoop`**（零改名，语义也通）。
+
+5. **`SessionLoop` 的归宿？**
+   它现在承担"加载历史 → 调 runtime → 收事件 → 落库"。抽 `AgentLoop` 后它可能：
+   - (a) 保留，变成"会话型宿主"的便利封装
+   - (b) 被吸收进 `AgentLoop` 的默认实现
+   - **建议 (a)**：它是 acp/a2a/subagent 共用的宿主循环，与"agent 循环"不是一层。
+
+6. **`AgentConfig` 的 27 个字段里，哪些该挪到 `HarnessSpec`？**
+   `RunPolicy` 之类**属于实例而非配置**的，应该放 `HarnessSpec`（装配期定），而不是 `AgentConfig`（每个 agent 一份）。这条要逐个审。
+
+7. **`AgentLoop` 确定用 interface（已定）**
+   理由不是语言能力（函数靠闭包也能捕获状态），而是**对开发者不友好**：状态藏在闭包里看不见、
+   不好调试、不好复用。**有状态的扩展点一律 interface + 类**——这条已写入 §4.2 的判据。
+
+---
+
+## 8. 不做什么（明确排除）
+
+| 项 | 理由 |
+|---|---|
+| **不引入 DI 容器 / 服务发现** | 现有「装配束 + 显式注入」是刻意选择（`design.md` 十三章），与 dsh 的 cordis 是两条路 |
+| **不抄 cordis 插件体系** | 那是**世界树**的职责，atelier 不该知道插件生命周期 |
+| **不新增 `RunStage` 等第三套回调** | 见 §4.2 |
+| **不为了"跟 dsh 一致"而改名** | 命名对齐只在语义确实相同处做（如 `AgentLoop`） |
+| **不改变 903 个既有用例的行为** | 重构以**全绿**为硬验收；行为变化必须单独立项 |
+
+---
+
+## 9. 验收标准
+
+| 层 | 标准 |
+|---|---|
+| **回归** | `cjpm test` **903 用例全绿**（2026-10-17 实测基线，`TOTAL: 903, PASSED: 903`） |
+| **档 A** | lumine 能用**自己的** `SessionStore` 跑通一个会话；`TrustGate` 可换（有测试证明换了行为变） |
+| **档 B** | 存在**至少两个** `Compactor` 实现（默认 / 不压缩），装配切换有测试 |
+| **档 C** | **存在至少两个 `AgentLoop` 实现**（默认 / 测试用的假实现），10 处构造点全走工厂；`AgentStatus` 能从 `idle→running→idle` 有事件；**`steer` 在工具执行中途投递的插话，下一次模型调用可见**（测试要有断言） |
+| **文档** | `design.md` 第十三章的扩展点矩阵同步更新（7 接口 → N 接口） |
+
+---
+
+## 10. 与既有文档的关系
+
+| 文档 | 关系 |
+|---|---|
+| `2026-10-17-always-on-requirements.md` | **本文吸收它的 A~E 组**（只取改变 SDK 形状的部分，见 §3）；具体的 always-on 行为要求仍在那边 |
+| `docs/design.md` 第十三章 | 重构完成后**回写**：扩展点矩阵从 7 个接口扩到 N 个 |
+| `2026-10-02-always-on-agent.md`（产品总设计 v4） | 本文不动它；它是产品视角，本文是 SDK 视角 |
+| `docs/plans/2026-09-05-acp-server-plan.md` 等历史计划 | 不受影响 |
+
+---
+
+## 11. 插话与连续对话（`steer` / `inject`）
+
+> **需求来源**：starline 的产品形态要求「对话不受其它 panel 操作影响，能连续对话；
+> agent 也能同时操作其它 panel」。**即：用户在 agent 干活时补一句话，它要看得到。**
+
+### 11.1 现状：atelier 不支持插话
+
+| 位置 | 现状 | 证据 |
+|---|---|---|
+| **主 agent 循环** | ❌ 无外部取消息的入口 | `runtime.cj` 主循环只看 `finished` / `cancelFlag` 两个信号；`currentMessages.add(UserMessage(...))` 仅两处，都是**内部生成**（截断续跑 / 自验 prompt），不是用户输入 |
+| **TUI** | ❌ busy 时直接拒绝 | `cli/src/tui.cj:725-730`：`"上一轮仍在进行中（等它结束，或 Ctrl+C 退出）"` |
+| **服务端** | ❌ 一请求一回合 | `/agent/run`、`/agent/stream` 都是"进来跑完整个回合" |
+| **对比：子 agent** | ✅ **有** | `agent/subagent.cj:65` 的 `LinkedBlockingQueue<AgentMail> inbox`；`respond` 在回合中未等待时仍能投递（`:103-111`） |
+
+**所以最有意思的一条：atelier 在子 agent 上已经在实现类似机制，主 agent 上没有。**
+子 agent 的 `inbox` 正是 dsh 那套的雏形（投递 / 串行消费 / 回合内外分派），**只是没推广到主循环**。
+
+### 11.2 参照：dsh 的四档投递
+
+`dsh-agent/lib/types/runtime-types.d.ts` 把"往运行中的 agent 送消息"拆成四个 API：
+
+| API | 语义（注释原文要点） |
+|---|---|
+| **`steer(msg)`** | 「An idle driver starts a turn; **a running driver consumes it at its next step boundary**」—— 插话，最近一个 step 边界消费 |
+| `followup(msg)` | 「The item becomes the **sole ordinary message of its own turn**」—— 排队成新的一轮 |
+| `inject(msg)` | 「Queue model-facing context for the next pre-step **without waking** the driver」—— 注入，不唤醒 |
+| `send(msg, target, wakeup)` | 底层，`target: 'next-turn' | 'next-step'` |
+
+**dsh 的 `step` = 一次模型调用 + 它的工具执行**（`turn` 下一级）。
+所以 `steer` 的准确语义是「**下一次模型调用就能看到**」，而不是「打断当前动作」。
+
+`inbox` 另有 `nextStep` / `nextTurn` 两个列表与 `clear()`，且 `cancel(keepInbox: true)` 能**保留待办插话**。
+
+### 11.3 本设计的选择：**A + C**
+
+| 维度 | 选择 | 理由 |
+|---|---|---|
+| **A. 生效时机** | **下一次模型调用**（不打断正在跑的工具） | starline 里 agent 正在**写面板**；打断工具会留下半写状态。需要"停下来"的场景已有 `cancelSession` |
+| **C. 消息形态** | **带显式标注** `[User interjection]` | 模型默认把"最后一条用户消息"当**最新指令**。裸插会让它以为你**推翻了**原任务，而非**补充** |
+
+**明确不做 B（立刻打断工具批次）**：与 `cancel` 语义重叠，且副作用不可控。
+
+### 11.4 ⚠️ 历史可变性核查（**这是能不能安全插话的前提**）
+
+`currentMessages` 在主循环里有 **5 处被整体替换**。逐条判定「插话会不会被冲掉」：
+
+| # | 位置 | 操作 | 会丢插话吗 | 说明 |
+|---|---|---|---|---|
+| 1 | `runtime.cj:637-638` | `applyArchiveMarks` / `applyArchives` | ⚠️ **未见实现细节，需在 C-2 切分时确认** | 是转换函数，需确认是否原样保留 `UserMessage` |
+| 2 | `:675` | `compactBracketed`（压力压缩） | ✅ **不会** | `compactWithSummary`（`compaction.cj:361-371`）明确：头部换成检查点，**`cut` 之后的消息全部原样保留** |
+| 3 | `:696` | `currentMessages = chatReq.messages`（hook 改写后收编） | ✅ **不会** | 请求是从 `currentMessages` 构建的；插话若已在其中，收编时自然还在 |
+| 4 | `:763` | `recoverFromOverflow` 的 `nextMsgs`（溢出恢复） | ⚠️ **会** | 该路径只保"最后一条用户消息起"——插话落在其之前就丢。**可接受**（最后手段），但**必须记日志** |
+| 5 | `:1074` | `afterTurn` hook 改写 `messages` | ⚠️ 取决于 hook 实现 | hook 拿到全量历史，正常实现不丢；**文档要写出这条契约** |
+
+**一个正面的关键发现**：压缩是"最危险"的一环，但它恰好是安全的——
+`retainTokens` 保证「最近一段逐字保留」，**插话天然落在保留区**。
+这是现有压缩策略白送的性质，不需要额外设计。
+
+### 11.5 三条实现纪律
+
+| # | 纪律 | 依据 |
+|---|---|---|
+| **1** | **只在循环顶部（step 边界）插入，追加到 `currentMessages` 尾部** | 尾部是压缩的保留区（`retainTokens`），插在那里不会被压掉 |
+| **2** | **插入必须发生在 `applyArchiveMarks` 之前** | 它是每轮的转换步骤；插话应先落地再被这轮转换处理 |
+| **3** | **溢出恢复路径丢插话时必须留痕** | 那条路径是"救不了就失败"，丢是预期内的，但**不能静默** |
+
+### 11.6 实现方案
+
+**照现有 `cancels` 的形状加一个按会话的队列**：
+
+```cangjie
+// 现有（runtime.cj:599 附近）
+private let cancels = HashMap<String, AtomicBool>()
+
+// 新增：同形状
+private let steerQueues = HashMap<String, LinkedBlockingQueue<Message>>()
+private let steerLock = Mutex()
+```
+
+**循环顶部**（`while` 体第一件事）：
+
+```cangjie
+while (!finished && !cancelFlag.load() && turnCount < Int64(this.config.maxTurns)) {
+    // ① 插话先落地（纪律 2：在 applyArchiveMarks 之前）
+    let queue = this.steerQueueOf(sessionId)
+    while (true) {
+        match (queue.tryRemove()) {
+            case Some(m) => currentMessages.add(withInterjectionMark(m))
+            case None => break
+        }
+    }
+    // ② 原有的每轮转换
+    currentMessages = ctxBuilder.applyArchiveMarks(currentMessages)
+    currentMessages = ctxBuilder.applyArchives(currentMessages)
+    ...
+}
+```
+
+**C 语义的标注**：
+
+```cangjie
+func withInterjectionMark(m: Message): Message {
+    match (m) {
+        case um: UserMessage =>
+            UserMessage(ContentList.ofText("[User interjection] " + plainTextOf(um)), 0)
+        case _ => m
+    }
+}
+```
+
+**`steer` / `inject` 的差别只在"要不要唤醒"**：
+
+| 方法 | 行为 |
+|---|---|
+| `steer` | 入队 + **若 loop 当前 idle 则启动一轮**（dsh 语义："An idle driver starts a turn"） |
+| `inject` | 入队，**不唤醒**；已在跑的 loop 在下一个 step 边界取走，idle 就一直挂着 |
+
+### 11.7 边界：`steer` 解决不了什么
+
+starline 那条需求还有一半不在这里：
+
+| 需求 | 归属 | 现状 |
+|---|---|---|
+| 用户能插话 | **atelier（本节）** | 本文档补齐 |
+| **对话不被面板操作卡住** | **starline** | ❌ **现在是坏的**：`atelier-starline/src/core/runtime.cj` 用 `board.withWrite { => toolExecutor.execute(...) }` 把工具执行包在**面板写锁**里 |
+| **两个对话循环并行** | **starline** | ❌ `handlers.cj:191` 的 `spawn { rt.chat(...) }` **无并发闸门**，连发两条会跑两个循环，逐轮交错写同一块板 |
+
+> **结论**：**atelier 补 `steer` + starline 修锁粒度与并发闸门，两件事都要做。**
+> 只做前者，插话还是会被面板写锁卡住——**这不属于 SDK 的职责**。
+
+### 11.8 与接口判据的关系（§4.2 又被验证一次）
+
+`steer` / `inject` 要往**队列**里投，队列就是**跨调用保留的状态**。
+
+**函数类型做不了这个**（除非闭包捕获队列，那正是 §4.2 明确否掉的形态）。
+**所以它们必须是 `AgentLoop` interface 的方法**，这印证了「有状态 → interface」的判据。
+
+---
