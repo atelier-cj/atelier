@@ -758,48 +758,39 @@ public open class AgentRuntime <: AgentLoop {
                 // PTC 的 SDK 段随「本轮可见工具」变化，因此在循环内拼接（见下）。
                 let baseSystemText = ctxBuilder.buildSystemText(
                     this.config.systemPrompt, this.config.skills)
-                var currentMessages = ArrayList<Message>()
-                for (m in messages) { currentMessages.add(m) }
-                var turnCount: Int64 = 0
-                var toolCallCount: Int64 = 0
-                // 本回合内因输出被 token 上限截断而自动续跑的次数（每次续跑仍算同一个循环轮次）
-                var lengthContinuations: Int64 = 0
-                // 收尾前自验已用次数（每次自验按一个新回合计，受 maxTurns 约束）
-                var verifyPasses: Int64 = 0
-                // 本次迭代是「上一回合因截断而续跑」：不计新回合、不重置续跑预算、
-                // 不推进 MCP 冷却回合（continue 会重新走一遍循环体顶部，副作用必须在这里挡住）
-                var resumingSameTurn = false
-                var lastToolTime: MonoTime = MonoTime.now()
-                var finished = false
+                let initial = ArrayList<Message>()
+                for (m in messages) { initial.add(m) }
+                // 循环级可变状态收进 RunScope：阶段方法只收一个引用，不必逐个传 8 个标量
+                let scope = RunScope(initial)
 
-                while (!finished && !cancelFlag.load() && turnCount < Int64(this.config.maxTurns)) {
-                    if (!resumingSameTurn) {
+                while (!scope.finished && !cancelFlag.load() && scope.turnCount < Int64(this.config.maxTurns)) {
+                    if (!scope.resumingSameTurn) {
                         this.emit(stream, TurnStartEvent())
-                        turnCount++
+                        scope.turnCount++
                         // 续跑预算按回合重置：每回合最多因截断续跑 maxLengthContinuations 次
-                        lengthContinuations = 0
+                        scope.lengthContinuations = 0
                         this.mcpManager.advanceTurn()
-                        log.info("turn ${turnCount} start", Array<Attr>())
+                        log.info("turn ${scope.turnCount} start", Array<Attr>())
                     }
-                    resumingSameTurn = false
+                    scope.resumingSameTurn = false
                     // 插话先落地（纪律：必须在 archive 转换之前，见 AgentLoop.steer 的约定）。
                     // 追加到尾部而不是插进历史中部：尾部是压缩的保留区（retainTokens），
                     // 插在那里不会被下一轮压缩掉。
                     for (m in this.drainSteers(sessionId)) {
-                        currentMessages.add(withInterjectionMark(m))
+                        scope.messages.add(withInterjectionMark(m))
                     }
                     // 顺序：历史归档标记在前（处理 store 加载的历史 ArchiveMessage），
                     // 本轮调用对在后（产生的 ArchiveMessage 位于 index==startIndex，不能被标记跳过）
-                    currentMessages = ctxBuilder.applyArchiveMarks(currentMessages)
-                    currentMessages = ctxBuilder.applyArchives(currentMessages)
+                    scope.messages = ctxBuilder.applyArchiveMarks(scope.messages)
+                    scope.messages = ctxBuilder.applyArchives(scope.messages)
 
-                    this.emit(stream, MessageStartEvent(currentMessages[0]))
+                    this.emit(stream, MessageStartEvent(scope.messages[0]))
                     let actualModel = this.pickModel(this.config.model)
                     // 先解析可见工具，再据此生成 SDK 段：两处必须来自同一次解析，
                     // 否则模型看到的绑定会与程序实际能调用的能力分叉
                     let visible = this.resolveVisibleTools()
                     let tools = this.resolveTools(visible, ctx, stream, cancelFlag,
-                        hookState, turnCount)
+                        hookState, scope.turnCount)
                     let systemText = if (this.config.toolPresentation == ToolPresentationMode.Native) {
                         baseSystemText
                     } else {
@@ -811,7 +802,7 @@ public open class AgentRuntime <: AgentLoop {
                     // 注意：这里算出的修剪版**只用于测量与决策**。真正发出去的请求在
                     // wireRequest() 里再修剪一次 —— 因为下面 `currentMessages = chatReq.messages`
                     // 会把请求的消息表收编为历史，若在这里就把修剪版写回去，修剪会落进落库历史。
-                    var measureMessages = currentMessages
+                    var measureMessages = scope.messages
                     if (this.compactionEnabledFor()) {
                         let cc = this.compactionConfig()
                         let route = CompactRoute(actualModel,
@@ -821,7 +812,7 @@ public open class AgentRuntime <: AgentLoop {
                         //  在这里写回修剪版会让修剪流进落库历史）
                         match (cc.prune) {
                             case Some(pruneCfg) =>
-                                measureMessages = this.compactor.pruneForRequest(currentMessages, pruneCfg)
+                                measureMessages = this.compactor.pruneForRequest(scope.messages, pruneCfg)
                             case None => ()
                         }
                         // 决策交给 compactor：它回答"压不压、切哪、预算多少"，
@@ -844,31 +835,31 @@ public open class AgentRuntime <: AgentLoop {
                                 let compactor = this.compactor
                                 let compactionRuntime = CompactionRuntime(this.provider, actualModel,
                                     systemText, tools, cc)
-                                currentMessages = this.compactBracketed(plan.trigger, sessionId,
-                                    currentMessages, total, log, { msgs, _ =>
+                                scope.messages = this.compactBracketed(plan.trigger, sessionId,
+                                    scope.messages, total, log, { msgs, _ =>
                                     compactor.compact(msgs, plan, compactionRuntime)
                                 })
                         }
                     }
-                    var chatReq = ctxBuilder.buildChatRequest(actualModel, systemText, currentMessages,
+                    var chatReq = ctxBuilder.buildChatRequest(actualModel, systemText, scope.messages,
                         Float64(this.config.temperature), this.maxOutputTokensInUse(),
                         this.config.thinkingLevel, tools)
-                    match (runBeforeTurnHooks(hookState, turnCount, chatReq)) {
+                    match (runBeforeTurnHooks(hookState, scope.turnCount, chatReq)) {
                         case Some(r) =>
                             chatReq = r
                             if (chatReq.model != actualModel) {
                                 log.info("model routed: ${actualModel} -> ${chatReq.model}", Array<Attr>())
                             }
                             // 若 hook 改写了请求的 messages，同步回运行时上下文，避免分叉
-                            currentMessages = chatReq.messages
+                            scope.messages = chatReq.messages
                         case None =>
                             log.info("beforeTurn hook short-circuited run", Array<Attr>())
                             let shortCircuitMsg = AssistantMessage(ContentList.ofText("[Run short-circuited by hook]"), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0)
                             // 必须同时进消息列表：消费端只从 result() 读消息，仅 emit 事件
                             // 等于什么都没发生（交互前端表现为「跑完界面上没有任何输出」）
-                            currentMessages.add(shortCircuitMsg)
+                            scope.messages.add(shortCircuitMsg)
                             this.emit(stream, TurnEndEvent(shortCircuitMsg, ArrayList<ToolResultMessage>()))
-                            finished = true
+                            scope.finished = true
                             break
                     }
 
@@ -923,13 +914,13 @@ public open class AgentRuntime <: AgentLoop {
                             // 用 toString() 而不是 message：Socket/FS 这类异常的 message 常为空，
                             // 只打 message 在日志里就是一行「provider error: 」，等于没有信息
                             let errText = e.toString()
-                            match (this.recoverFromOverflow(errText, currentMessages, overflowRetries,
+                            match (this.recoverFromOverflow(errText, scope.messages, overflowRetries,
                                 ccForOverflow, chatReq, actualModel, systemText, tools, sessionId, log)) {
                                 case Some(nextMsgs) =>
                                     overflowRetries++
-                                    currentMessages = nextMsgs
+                                    scope.messages = nextMsgs
                                     // 用同一套参数重建请求（保留可能已被 hook 改过的 model）
-                                    chatReq = ctxBuilder.buildChatRequest(chatReq.model, systemText, currentMessages,
+                                    chatReq = ctxBuilder.buildChatRequest(chatReq.model, systemText, scope.messages,
                                         Float64(this.config.temperature), this.maxOutputTokensInUse(),
                                         this.config.thinkingLevel, tools)
                                     continue
@@ -937,7 +928,7 @@ public open class AgentRuntime <: AgentLoop {
                                     log.error("provider error: ${errText}", Array<Attr>())
                                     let failureMsg = AssistantMessage(ContentList.ofText("[provider error] ${errText}"), "", "", StopReason.Error, TokenUsage(0, 0), 0)
                                     // 同短路分支：错误必须进消息列表，否则消费端与界面都看不到它
-                                    currentMessages.add(failureMsg)
+                                    scope.messages.add(failureMsg)
                                     this.emit(stream, TurnEndEvent(failureMsg, ArrayList<ToolResultMessage>()))
                                     requestFailed = true
                             }
@@ -945,12 +936,12 @@ public open class AgentRuntime <: AgentLoop {
                         if (requestFailed || attemptOk) { break }
                     }
                     if (requestFailed) {
-                        finished = true
+                        scope.finished = true
                         break
                     }
                     log.info("provider response received", Array<Attr>())
                     this.emit(stream, MessageEndEvent(assistantMsg))
-                    currentMessages.add(assistantMsg)
+                    scope.messages.add(assistantMsg)
 
                     match (assistantMsg.stopReason) {
                         case StopReason.ToolUse =>
@@ -958,7 +949,7 @@ public open class AgentRuntime <: AgentLoop {
                                 // 取消：不再发起工具批次，直接收尾
                                 log.info("run cancelled at tool boundary", Array<Attr>())
                                 this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
-                                finished = true
+                                scope.finished = true
                                 break
                             }
                             let toolCalls = assistantMsg.toolCalls()
@@ -967,19 +958,19 @@ public open class AgentRuntime <: AgentLoop {
                                 // （每轮请求都一样），按回合结束收尾
                                 log.warn("stop reason is ToolUse but the message carries no tool call; finish the turn", Array<Attr>())
                                 this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
-                                finished = true
+                                scope.finished = true
                                 break
                             }
                             log.info("tool calls: ${toolCalls.size}", Array<Attr>())
                             let maxCalls = Int64(this.config.maxToolCalls)
                             // 预算裁决交给纯函数（可单测）：三种走向语义不同，埋在这里看不出边界
-                            match (decideToolBudget(toolCallCount, toolCalls.size, maxCalls)) {
+                            match (decideToolBudget(scope.toolCallCount, toolCalls.size, maxCalls)) {
                                 case ToolBudgetVerdict.Exhausted =>
                                     log.warn("max tool calls (${maxCalls}) reached", Array<Attr>())
-                                    currentMessages.add(ToolResultMessage("", "",
+                                    scope.messages.add(ToolResultMessage("", "",
                                         ContentList.ofText("Max tool calls (${maxCalls}) reached, skipping"), true, 0))
                                     this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
-                                    finished = true
+                                    scope.finished = true
                                     break
                                 case ToolBudgetVerdict.AllAllowed => ()
                                 case ToolBudgetVerdict.Trimmed(allowed) =>
@@ -991,7 +982,7 @@ public open class AgentRuntime <: AgentLoop {
                                     // 下一次请求直接被判 400
                                     var skipIdx = allowed
                                     while (skipIdx < original.size) {
-                                        currentMessages.add(ToolResultMessage(original[Int64(skipIdx)].id,
+                                        scope.messages.add(ToolResultMessage(original[Int64(skipIdx)].id,
                                             original[Int64(skipIdx)].name,
                                             ContentList.ofText("Skipped: max tool calls limit"), true, 0))
                                         skipIdx++
@@ -1012,7 +1003,7 @@ public open class AgentRuntime <: AgentLoop {
                                     case Some(t) =>
                                         match (this.trustGate(t, ctx.workDir, sessionId)) {
                                             case TrustDecision.Allowed =>
-                                                let (args, skipMsg) = decideToolCall(hookState, turnCount, tc)
+                                                let (args, skipMsg) = decideToolCall(hookState, scope.turnCount, tc)
                                                 match (args) {
                                                     case Some(a) =>
                                                         batch.add((tc.name, this.callContext(ctx, tc.id), a))
@@ -1028,7 +1019,7 @@ public open class AgentRuntime <: AgentLoop {
                                                 // 参数原样带上：审批的全部意义是让人看清「要执行什么」，
                                                 // 只给工具名等于让人盲签（钩子改写前的原始参数）
                                                 let gateReq = approvalRequest(
-                                                    "ask:${sessionId}:${turnCount}:${tc.id}:approval",
+                                                    "ask:${sessionId}:${scope.turnCount}:${tc.id}:approval",
                                                     tc.name, tc.args,
                                                     "Tool '" + tc.name + "' needs your approval.",
                                                     toolCallId: tc.id)
@@ -1058,7 +1049,7 @@ public open class AgentRuntime <: AgentLoop {
                                                 if (!gateInvalid && gateAns.isAllowAlways()) {
                                                     this.trustManager.setTrust(ctx.workDir, TrustState.Trusted)
                                                     log.info("tool ${tc.name} always approved for ${ctx.workDir}", Array<Attr>())
-                                                    let (args, skipMsg) = decideToolCall(hookState, turnCount, tc)
+                                                    let (args, skipMsg) = decideToolCall(hookState, scope.turnCount, tc)
                                                     match (args) {
                                                         case Some(a) =>
                                                             batch.add((tc.name, this.callContext(ctx, tc.id), a))
@@ -1071,7 +1062,7 @@ public open class AgentRuntime <: AgentLoop {
                                                 } else if (!gateInvalid && gateAns.isAllowOnce()) {
                                                     this.trustManager.setSessionTrust(sessionId, ctx.workDir, TrustState.Trusted)
                                                     log.info("tool ${tc.name} approved for session", Array<Attr>())
-                                                    let (args, skipMsg) = decideToolCall(hookState, turnCount, tc)
+                                                    let (args, skipMsg) = decideToolCall(hookState, scope.turnCount, tc)
                                                     match (args) {
                                                         case Some(a) =>
                                                             batch.add((tc.name, this.callContext(ctx, tc.id), a))
@@ -1096,7 +1087,7 @@ public open class AgentRuntime <: AgentLoop {
                             }
                             let minIntervalMs = Int64(this.config.minToolInterval)
                             if (minIntervalMs > 0) {
-                                let elapsed = (MonoTime.now() - lastToolTime).toMilliseconds()
+                                let elapsed = (MonoTime.now() - scope.lastToolTime).toMilliseconds()
                                 if (elapsed < minIntervalMs) {
                                     sleep(Duration.millisecond * (minIntervalMs - elapsed))
                                 }
@@ -1106,7 +1097,7 @@ public open class AgentRuntime <: AgentLoop {
                                 // 恢复后同一批一次做完（而不是逐个挂起、逐个恢复）
                                 this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
                                 this.emit(stream, SuspendEvent(pendingAsks))
-                                finished = true
+                                scope.finished = true
                                 continue
                             }
                             // 工具执行开始事件（供流式消费方展示工具进度；被跳过/拦截的工具不发）
@@ -1126,7 +1117,7 @@ public open class AgentRuntime <: AgentLoop {
                                         case Some(msg) => msg
                                         case None => "[Tool error: ${e.message}]"
                                     }
-                                    currentMessages.add(ToolResultMessage(tc.id, tc.name,
+                                    scope.messages.add(ToolResultMessage(tc.id, tc.name,
                                         ContentList.ofText(text), true, 0))
                                 }
                                 this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
@@ -1141,7 +1132,7 @@ public open class AgentRuntime <: AgentLoop {
                                 match (skipResults.get(Int64(i))) {
                                     case Some(msg) =>
                                         let tr = ToolResultMessage(tc.id, tc.name, ContentList.ofText(msg), false, 0)
-                                        currentMessages.add(tr)
+                                        scope.messages.add(tr)
                                     case None =>
                                         if (resIdx < results.size) {
                                             let r = results[Int64(resIdx)]
@@ -1159,26 +1150,26 @@ public open class AgentRuntime <: AgentLoop {
                                             // 工具执行结束事件（与开始事件一一对应）
                                             this.emit(stream, ToolExecutionEndEvent(tc.id, r.text, r.isError))
                                             let tr = ToolResultMessage(tc.id, tc.name, ContentList.ofText(r.text), r.isError, 0)
-                                            currentMessages.add(tr)
-                                            callAfterToolHooks(hookState, turnCount, tc, tr)
+                                            scope.messages.add(tr)
+                                            callAfterToolHooks(hookState, scope.turnCount, tc, tr)
                                             resIdx++
                                         } else {
                                             // 执行器少给了结果：静默跳过会让这条 call 永远没有配对结果，
                                             // 下一次请求直接被判 400 —— 宁可回一条显式失败
                                             log.error("tool executor returned ${results.size} result(s) for ${batch.size} call(s); '${tc.name}' has no result", Array<Attr>())
-                                            currentMessages.add(ToolResultMessage(tc.id, tc.name,
+                                            scope.messages.add(ToolResultMessage(tc.id, tc.name,
                                                 ContentList.ofText("[Tool error: no result returned by executor]"), true, 0))
                                         }
                                 }
                             }
-                            toolCallCount += toolCalls.size
-                            lastToolTime = MonoTime.now()
+                            scope.toolCallCount += toolCalls.size
+                            scope.lastToolTime = MonoTime.now()
                             this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
                             if (pendingExternal.size > 0) {
                                 // 中止本次 run：历史已落在 assistant(tool_calls)，
                                 // 下一次 run 带结果即可继续（见 SuspendEvent 注释）
                                 this.emit(stream, SuspendEvent(pendingExternal))
-                                finished = true
+                                scope.finished = true
                                 continue
                             }
 
@@ -1187,7 +1178,7 @@ public open class AgentRuntime <: AgentLoop {
                                 // 取消：跳过 afterTurn 改写与压缩等后续处理，直接收尾
                                 log.info("run cancelled at turn end", Array<Attr>())
                                 this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
-                                finished = true
+                                scope.finished = true
                                 break
                             }
                             // 带 tool_call 却又不是工具回合（输出被截断、终止原因缺失/未识别、
@@ -1198,51 +1189,51 @@ public open class AgentRuntime <: AgentLoop {
                             if (prematureCalls.size > 0) {
                                 log.warn("non-tool stop reason carries ${prematureCalls.size} tool call(s); recording them as not executed", Array<Attr>())
                                 for (tc in prematureCalls) {
-                                    currentMessages.add(ToolResultMessage(tc.id, tc.name,
+                                    scope.messages.add(ToolResultMessage(tc.id, tc.name,
                                         ContentList.ofText(unansweredToolCallNote(tc.name)), true, 0))
                                 }
                             }
                             // 回合收尾的三种走向交给纯函数判定（可单测，见 turn_policy.cj）：
                             // 截断续跑 / 收尾前自验 / 正常收尾。这里只负责按判定执行副作用。
-                            match (decideTurnVerdict(assistantMsg.stopReason, lengthContinuations,
-                                Int64(this.config.maxLengthContinuations), toolCallCount,
-                                verifyPasses, Int64(this.config.maxVerifyPasses))) {
+                            match (decideTurnVerdict(assistantMsg.stopReason, scope.lengthContinuations,
+                                Int64(this.config.maxLengthContinuations), scope.toolCallCount,
+                                scope.verifyPasses, Int64(this.config.maxVerifyPasses))) {
                                 case TurnVerdict.ContinueAfterTruncation =>
-                                    lengthContinuations++
-                                    log.warn("response truncated by token limit, continue in same turn (${lengthContinuations}/${this.config.maxLengthContinuations})", Array<Attr>())
-                                    currentMessages.add(UserMessage(ContentList.ofText(lengthContinuationPrompt()), 0))
-                                    resumingSameTurn = true
+                                    scope.lengthContinuations++
+                                    log.warn("response truncated by token limit, continue in same turn (${scope.lengthContinuations}/${this.config.maxLengthContinuations})", Array<Attr>())
+                                    scope.messages.add(UserMessage(ContentList.ofText(lengthContinuationPrompt()), 0))
+                                    scope.resumingSameTurn = true
                                     continue
                                 case TurnVerdict.VerifyBeforeFinish =>
-                                    verifyPasses++
-                                    log.warn("agent announced completion, run verify pass (${verifyPasses}/${this.config.maxVerifyPasses})", Array<Attr>())
-                                    currentMessages.add(UserMessage(ContentList.ofText(verifyBeforeFinishPrompt()), 0))
+                                    scope.verifyPasses++
+                                    log.warn("agent announced completion, run verify pass (${scope.verifyPasses}/${this.config.maxVerifyPasses})", Array<Attr>())
+                                    scope.messages.add(UserMessage(ContentList.ofText(verifyBeforeFinishPrompt()), 0))
                                     continue
                                 case TurnVerdict.End => ()
                             }
                             log.info("turn finished", Array<Attr>())
-                            let turnUpdate = runAfterTurnHooks(hookState, turnCount)
+                            let turnUpdate = runAfterTurnHooks(hookState, scope.turnCount)
                             match (turnUpdate.messages) {
                                 case Some(msgs) =>
-                                    currentMessages = msgs
+                                    scope.messages = msgs
                                     log.info("afterTurn hook rewrote messages to ${msgs.size}", Array<Attr>())
                                 case None => ()
                             }
                             if (turnUpdate.shortCircuit) {
                                 log.info("afterTurn hook short-circuited run", Array<Attr>())
                                 this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
-                                finished = true
+                                scope.finished = true
                                 break
                             }
                             this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
-                            finished = true
+                            scope.finished = true
                     }
                 }
 
-                log.info("agent end, total turns=${turnCount}", Array<Attr>())
-                callHooks("afterRun", turnCount, hookState)
-                stream.setResult(currentMessages)
-                this.emit(stream, AgentEndEvent(currentMessages))
+                log.info("agent end, total turns=${scope.turnCount}", Array<Attr>())
+                callHooks("afterRun", scope.turnCount, hookState)
+                stream.setResult(scope.messages)
+                this.emit(stream, AgentEndEvent(scope.messages))
             } catch (e: Exception) {
                 log.error("unhandled error: ${e.message}", Array<Attr>())
                 // 先发结束事件（携带错误说明），再置错误信号：流消费者按 AgentEndEvent 收敛，
