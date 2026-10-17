@@ -727,6 +727,92 @@ public open class AgentRuntime <: AgentLoop {
         }
     }
 
+    /**
+     * 请求派发前的上下文压力处理（dsh 的 pre-step 位置）。
+     *
+     * 先修剪（只影响本次请求，不落库），修剪后仍在阈值之上才摘要 + 替换历史。
+     * 放在请求前而不是回合结束后：回合结束后再压，本轮该发的请求早就发出去了。
+     *
+     * 决策交给 `Compactor`（它回答"压不压、切哪、预算多少"），
+     * 而时序（括弧/台账/互斥）留在运行时保证跨实现一致。
+     */
+    private func compactBeforeRequest(scope: RunScope, sessionId: String,
+        actualModel: String, systemText: String, tools: ArrayList<OpenAITool>,
+        log: Logger): Unit {
+        var measureMessages = scope.messages
+        if (this.compactionEnabledFor()) {
+            let cc = this.compactionConfig()
+            let route = CompactRoute(actualModel,
+                this.modelInfoInUse().info.contextWindow, this.maxOutputTokensInUse())
+            // 修剪版只用于测量：真正发出去的请求由 wireRequest 再修剪一次
+            // （下面 `currentMessages = chatReq.messages` 会把请求表收编为历史，
+            //  在这里写回修剪版会让修剪流进落库历史）
+            match (cc.prune) {
+                case Some(pruneCfg) =>
+                    measureMessages = this.compactor.pruneForRequest(scope.messages, pruneCfg)
+                case None => ()
+            }
+            // 决策交给 compactor：它回答"压不压、切哪、预算多少"，
+            // 而时序（括弧/台账/互斥）留在运行时保证跨实现一致
+            let decision = match (this.compactor) {
+                case bc: BasicCompactor => bc.shouldCompactWith(measureMessages, route, cc)
+                case other => other.shouldCompact(measureMessages, route)
+            }
+            match (decision) {
+                case CompactDecision.Skip(reason) =>
+                    // 只在"算不出预算"这类配置问题上留痕一次；
+                    // 未达阈值是常态，不刷日志
+                    if (!reason.startsWith("under threshold")) {
+                        this.warnCompactionSpecOnce(reason, log)
+                    }
+                case CompactDecision.Proceed(plan) =>
+                    // 报告给事件与台账的 token 数沿用运行时口径（provider 用量锚），
+                    // 与 compactor 内部的判定口径可以不同：前者是"这次压之前有多大"
+                    let total = this.pressureForNextRequest(measureMessages)
+                    let compactor = this.compactor
+                    let compactionRuntime = CompactionRuntime(this.provider, actualModel,
+                        systemText, tools, cc)
+                    scope.messages = this.compactBracketed(plan.trigger, sessionId,
+                        scope.messages, total, log, { msgs, _ =>
+                        compactor.compact(msgs, plan, compactionRuntime)
+                    })
+            }
+        }
+    }
+
+    /**
+     * 回合开场：推进回合计数 + 插话落地 + 历史归档转换。
+     *
+     * 三件事放一处的原因：它们有**固定的先后顺序**，而这个顺序本身是契约
+     * （插话必须在归档转换之前落地，否则会被当轮转换处理掉）。
+     *
+     * 续跑（`resumingSameTurn`）不重复推进回合计数：截断续跑是同一回合的延续，
+     * 每次续跑都计数会让 `maxTurns` 被快速吃光，表现为「任务莫名被截断」。
+     */
+    private func openTurn(scope: RunScope, sessionId: String,
+        stream: EventStream<AgentEvent, ArrayList<Message>>,
+        ctxBuilder: ContextBuilder, log: Logger): Unit {
+        if (!scope.resumingSameTurn) {
+            this.emit(stream, TurnStartEvent())
+            scope.turnCount++
+            // 续跑预算按回合重置：每回合最多因截断续跑 maxLengthContinuations 次
+            scope.lengthContinuations = 0
+            this.mcpManager.advanceTurn()
+            log.info("turn ${scope.turnCount} start", Array<Attr>())
+        }
+        scope.resumingSameTurn = false
+        // 插话先落地（纪律：必须在 archive 转换之前，见 AgentLoop.steer 的约定）。
+        // 追加到尾部而不是插进历史中部：尾部是压缩的保留区（retainTokens），
+        // 插在那里不会被下一轮压缩掉。
+        for (m in this.drainSteers(sessionId)) {
+            scope.messages.add(withInterjectionMark(m))
+        }
+        // 顺序：历史归档标记在前（处理 store 加载的历史 ArchiveMessage），
+        // 本轮调用对在后（产生的 ArchiveMessage 位于 index==startIndex，不能被标记跳过）
+        scope.messages = ctxBuilder.applyArchiveMarks(scope.messages)
+        scope.messages = ctxBuilder.applyArchives(scope.messages)
+    }
+
     private func chatWithEnv(sessionId: String, messages: ArrayList<Message>, sessionEnv: SessionEnvironment): EventStream<AgentEvent, ArrayList<Message>> {
         let stream = EventStream<AgentEvent, ArrayList<Message>>()
         let se = sessionEnv
@@ -764,25 +850,7 @@ public open class AgentRuntime <: AgentLoop {
                 let scope = RunScope(initial)
 
                 while (!scope.finished && !cancelFlag.load() && scope.turnCount < Int64(this.config.maxTurns)) {
-                    if (!scope.resumingSameTurn) {
-                        this.emit(stream, TurnStartEvent())
-                        scope.turnCount++
-                        // 续跑预算按回合重置：每回合最多因截断续跑 maxLengthContinuations 次
-                        scope.lengthContinuations = 0
-                        this.mcpManager.advanceTurn()
-                        log.info("turn ${scope.turnCount} start", Array<Attr>())
-                    }
-                    scope.resumingSameTurn = false
-                    // 插话先落地（纪律：必须在 archive 转换之前，见 AgentLoop.steer 的约定）。
-                    // 追加到尾部而不是插进历史中部：尾部是压缩的保留区（retainTokens），
-                    // 插在那里不会被下一轮压缩掉。
-                    for (m in this.drainSteers(sessionId)) {
-                        scope.messages.add(withInterjectionMark(m))
-                    }
-                    // 顺序：历史归档标记在前（处理 store 加载的历史 ArchiveMessage），
-                    // 本轮调用对在后（产生的 ArchiveMessage 位于 index==startIndex，不能被标记跳过）
-                    scope.messages = ctxBuilder.applyArchiveMarks(scope.messages)
-                    scope.messages = ctxBuilder.applyArchives(scope.messages)
+                    this.openTurn(scope, sessionId, stream, ctxBuilder, log)
 
                     this.emit(stream, MessageStartEvent(scope.messages[0]))
                     let actualModel = this.pickModel(this.config.model)
@@ -796,51 +864,7 @@ public open class AgentRuntime <: AgentLoop {
                     } else {
                         baseSystemText + "\n\n" + PtcSdkRenderer.render(visible)
                     }
-                    // —— 请求派发前的上下文压力处理（dsh 的 pre-step 位置）——
-                    // 先修剪（只影响本次请求，不落库），修剪后仍在阈值之上才摘要 + 替换历史。
-                    // 放在请求前而不是回合结束后：回合结束后再压，本轮该发的请求早就发出去了。
-                    // 注意：这里算出的修剪版**只用于测量与决策**。真正发出去的请求在
-                    // wireRequest() 里再修剪一次 —— 因为下面 `currentMessages = chatReq.messages`
-                    // 会把请求的消息表收编为历史，若在这里就把修剪版写回去，修剪会落进落库历史。
-                    var measureMessages = scope.messages
-                    if (this.compactionEnabledFor()) {
-                        let cc = this.compactionConfig()
-                        let route = CompactRoute(actualModel,
-                            this.modelInfoInUse().info.contextWindow, this.maxOutputTokensInUse())
-                        // 修剪版只用于测量：真正发出去的请求由 wireRequest 再修剪一次
-                        // （下面 `currentMessages = chatReq.messages` 会把请求表收编为历史，
-                        //  在这里写回修剪版会让修剪流进落库历史）
-                        match (cc.prune) {
-                            case Some(pruneCfg) =>
-                                measureMessages = this.compactor.pruneForRequest(scope.messages, pruneCfg)
-                            case None => ()
-                        }
-                        // 决策交给 compactor：它回答"压不压、切哪、预算多少"，
-                        // 而时序（括弧/台账/互斥）留在运行时保证跨实现一致
-                        let decision = match (this.compactor) {
-                            case bc: BasicCompactor => bc.shouldCompactWith(measureMessages, route, cc)
-                            case other => other.shouldCompact(measureMessages, route)
-                        }
-                        match (decision) {
-                            case CompactDecision.Skip(reason) =>
-                                // 只在"算不出预算"这类配置问题上留痕一次；
-                                // 未达阈值是常态，不刷日志
-                                if (!reason.startsWith("under threshold")) {
-                                    this.warnCompactionSpecOnce(reason, log)
-                                }
-                            case CompactDecision.Proceed(plan) =>
-                                // 报告给事件与台账的 token 数沿用运行时口径（provider 用量锚），
-                                // 与 compactor 内部的判定口径可以不同：前者是"这次压之前有多大"
-                                let total = this.pressureForNextRequest(measureMessages)
-                                let compactor = this.compactor
-                                let compactionRuntime = CompactionRuntime(this.provider, actualModel,
-                                    systemText, tools, cc)
-                                scope.messages = this.compactBracketed(plan.trigger, sessionId,
-                                    scope.messages, total, log, { msgs, _ =>
-                                    compactor.compact(msgs, plan, compactionRuntime)
-                                })
-                        }
-                    }
+                    this.compactBeforeRequest(scope, sessionId, actualModel, systemText, tools, log)
                     var chatReq = ctxBuilder.buildChatRequest(actualModel, systemText, scope.messages,
                         Float64(this.config.temperature), this.maxOutputTokensInUse(),
                         this.config.thinkingLevel, tools)
