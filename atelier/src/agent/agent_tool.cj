@@ -58,7 +58,7 @@ public class AgentTool <: Tool {
                 return ToolResult("Missing required parameter: prompt", None, true, false)
         }
         log.info("agent:${this.agentName} start", Array<Attr>())
-        let runtime = AgentRuntime(this.spec, this.config)
+        let runtime = this.spec.createLoop(this.config)
         let msgs = ArrayList<Message>()
         msgs.add(UserMessage(ContentList.ofText(prompt), 0))
         let stream = runtime.chat(msgs)

@@ -219,7 +219,7 @@ public class AgUiHandler {
             .withToolsView(this.clientToolOverlay(input.tools))
             .withAsk({ req: UserRequest => UserAnswer.pending(req.id) })
             .withContributors(this.contributorsFor(input))
-        let runtime = AgentRuntime(runSpec, cfg)
+        let runtime = runSpec.createLoop(cfg)
 
         let translator = AgUiTranslator(threadId, runId, clientTools: clientToolNames)
         let snapshot = AgUiStateSnapshot(agentName, cfg.model, threadId,
