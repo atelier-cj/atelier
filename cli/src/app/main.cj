@@ -195,7 +195,7 @@ main(): Int64 {
                     agentReg.create("default", c)
                     c
             }
-            let runtime = AgentRuntime(spec, cfg)
+            let runtime = spec.createLoop(cfg)
             let msgs = ArrayList<Message>()
             msgs.add(UserMessage(ContentList.ofText(prompt), 0))
             let stream = runtime.chat(msgs)

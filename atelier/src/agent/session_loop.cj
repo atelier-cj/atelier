@@ -74,7 +74,7 @@ public class SessionLoop {
             case Some(f) => turnSpec = turnSpec.withAsk(f)
             case None => ()
         }
-        let runtime = AgentRuntime(turnSpec, config, sessionEnv: env)
+        let runtime = turnSpec.createLoop(config, sessionEnv: env)
         let stream = runtime.chatWithSessionId(sessionId, msgs, env)
         // 事件消费 + 控制轮询收敛成一个独立函数（便于用构造出来的流单测：见
         // session_loop_test 的 consumeTurnStream 用例）

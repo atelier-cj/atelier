@@ -9,6 +9,7 @@ import atelier.session.*
 import atelier.trust.*
 import atelier.session.CompactionRecord
 import std.time.DateTime
+import std.collection.concurrent.*
 import atelier.context.{resolveCompactSpec, CompactSpec, compactFrom, retainedCutIndex,
     lastUserIndex, isContextOverflowError, pruneToolResults, ToolResultPruneConfig,
     checkpointBody, globalCompactionLedger, Compactor, BasicCompactor, CompactRoute,
@@ -99,7 +100,7 @@ public struct CompactionReport {
     }
 }
 
-public open class AgentRuntime {
+public open class AgentRuntime <: AgentLoop {
     // 装配束：组件与派生能力都从这里来（子 agent 复用同一份，不再逐个穿参数）
     private let spec: HarnessSpec
     private let config: AgentConfig
@@ -138,6 +139,10 @@ public open class AgentRuntime {
     // 会话级取消：sessionId → 取消标志（chat 开始注册，收尾统一清理）
     private let cancels = HashMap<String, AtomicBool>()
     private let cancelLock = Mutex()
+    // 插话队列：sessionId → 待插入的消息（循环顶部取走，见 steer/inject）
+    private let steers = HashMap<String, LinkedBlockingQueue<Message>>()
+    // 生命周期状态的持有者（比 run 长寿；由装配束传入，None = 临时自建一个）
+    private let statusRegistry: AgentStatusRegistry
 
     /**
      * 唯一构造：装配束 + agent 配置。
@@ -168,6 +173,10 @@ public open class AgentRuntime {
         this.mcpManager = spec.mcp
         this.promptContributors = spec.contributors
         this.eventBus = spec.eventBus
+        this.statusRegistry = match (spec.statusRegistry) {
+            case Some(r) => r
+            case None => AgentStatusRegistry()
+        }
         // 请求级中间件链 wrap（先注入者最外层；委托链末端为原始 provider）
         var p = spec.resolveProvider(config)
         for (m in spec.middlewares) { p = m.wrap(p) }
@@ -538,6 +547,107 @@ public open class AgentRuntime {
         resolved
     }
 
+    // ==================== AgentLoop 接口实现 ====================
+
+    /**
+     * 生命周期状态：`idle`（无执行中回合）/ `running`（有）。
+     *
+     * 查询的是**共享的状态持有者**（装配束传入），因此 run 结束后它回答 `Idle`——
+     * 这正是 runtime 自身做不到的（每次 run 新建一个实例）。
+     * 无会话方案（空 sessionId）用一个固定键位记录。
+     */
+    public func status(): AgentStatus {
+        this.statusRegistry.statusOf(this.config.name)
+    }
+
+    /**
+     * 一次执行。`sessionId` 可空（面板/一次性执行）；空串时循环内部生成一个临时 id，
+     * 只用于事件与取消登记的关联，**不代表落库会话**。
+     */
+    public func drive(input: RunInput): EventStream<AgentEvent, ArrayList<Message>> {
+        let sid = if (input.sessionId != "") { input.sessionId } else { "run_" + nextId() }
+        this.statusRegistry.transition(this.config.name, AgentStatus.Running)
+        let stream = this.chatWithSessionId(sid, input.messages, input.env)
+        return stream
+    }
+
+    /** 取消：与既有 [cancelSession] 同一语义（协作式，不强制中断工具）。 */
+    public func cancel(sessionId: String): Unit {
+        let sid = if (sessionId != "") { sessionId } else { this.config.name }
+        this.cancelSession(sid)
+    }
+
+    /**
+     * 插话：投给正在跑的 run，下一次模型调用可见。
+     *
+     * 队列按会话键分区，由循环顶部取走（`drainSteers`）；目标 run 结束后消息仍在队列里，
+     * 下次 `drive` 取用——不丢失。
+     */
+    public func steer(sessionId: String, message: Message): Unit {
+        this.enqueueSteer(sessionId, message)
+    }
+
+    /** 注入上下文：与 [steer] 同一队列，区别只在语义（不唤醒由调用方决定）。 */
+    public func inject(sessionId: String, message: Message): Unit {
+        this.enqueueSteer(sessionId, message)
+    }
+
+    // 入队：只收用户消息（其它类型对"中途补充"没有意义，静默忽略好过塞进去让模型困惑）
+    private func enqueueSteer(sessionId: String, message: Message): Unit {
+        match (message) {
+            case um: UserMessage =>
+                let key = if (sessionId != "") { sessionId } else { this.config.name }
+                let q = synchronized(this.cancelLock) {
+                    match (this.steers.get(key)) {
+                        case Some(existing) => existing
+                        case None =>
+                            let q = LinkedBlockingQueue<Message>()
+                            this.steers[key] = q
+                            q
+                    }
+                }
+                q.add(um)
+            case _ => ()
+        }
+    }
+
+    /**
+     * 取走本回合待插入的消息（循环顶部调用）。
+     *
+     * **必须在 `applyArchiveMarks` 之前**：插话先落地，再被每轮的转换处理。
+     * 非阻塞取尽；队列不存在视为空。
+     */
+    private func drainSteers(sessionId: String): ArrayList<Message> {
+        let out = ArrayList<Message>()
+        let q = synchronized(this.cancelLock) {
+            match (this.steers.get(sessionId)) {
+                case Some(existing) => existing
+                case None => LinkedBlockingQueue<Message>()
+            }
+        }
+        while (true) {
+            match (q.tryRemove()) {
+                case Some(m) => out.add(m)
+                case None => break
+            }
+        }
+        out
+    }
+
+    /**
+     * 本回合待取的插话条数（**仅供测试与诊断**：正常路径由 `drainSteers` 取走）。
+     *
+     * 单列一个查询而不是把队列暴露出去，是为了让"投递了没有"这件事可断言。
+     */
+    public func pendingSteerCount(sessionId: String): Int64 {
+        synchronized(this.cancelLock) {
+            match (this.steers.get(sessionId)) {
+                case Some(q) => q.size
+                case None => 0
+            }
+        }
+    }
+
     // 取消进行中的会话回合（幂等：未知/已结束会话为 no-op）。
     // 取消后 runtime 在当前检查点尽快收敛并按正常路径收尾（AgentEndEvent + result），
     // 不再发起新的 provider 请求与工具批次；正在执行的工具不强制中断。
@@ -642,6 +752,12 @@ public open class AgentRuntime {
                         log.info("turn ${turnCount} start", Array<Attr>())
                     }
                     resumingSameTurn = false
+                    // 插话先落地（纪律：必须在 archive 转换之前，见 AgentLoop.steer 的约定）。
+                    // 追加到尾部而不是插进历史中部：尾部是压缩的保留区（retainTokens），
+                    // 插在那里不会被下一轮压缩掉。
+                    for (m in this.drainSteers(sessionId)) {
+                        currentMessages.add(withInterjectionMark(m))
+                    }
                     // 顺序：历史归档标记在前（处理 store 加载的历史 ArchiveMessage），
                     // 本轮调用对在后（产生的 ArchiveMessage 位于 index==startIndex，不能被标记跳过）
                     currentMessages = ctxBuilder.applyArchiveMarks(currentMessages)
@@ -1109,6 +1225,9 @@ public open class AgentRuntime {
 
                 log.info("agent end, total turns=${turnCount}", Array<Attr>())
                 callHooks("afterRun", turnCount, hookState)
+                // 生命周期：本次执行收敛（含挂起）→ 回到 idle。
+                // 挂起同样落到这里：它结束的是"这次执行"，等待方由上层状态表达。
+                this.statusRegistry.transition(this.config.name, AgentStatus.Idle)
                 stream.setResult(currentMessages)
                 this.emit(stream, AgentEndEvent(currentMessages))
             } catch (e: Exception) {
@@ -1423,4 +1542,16 @@ func verifyBeforeFinishPrompt(): String {
     "（系统提示）在宣布任务完成之前，请对着任务要求逐条自验：" +
     "重新读取或运行你产出的文件与命令，核对是否真的满足每条约束（格式、路径、输出内容、" +
     "边界情况），而不是凭记忆断言。发现不符就先修正，全部确认无误后再给出结论。"
+}
+
+/**
+ * 给插话消息加标注：模型默认把「最后一条用户消息」当**最新指令**，裸插会让它以为
+ * 用户推翻了原任务。标注明确这是「中途补充」，语义与替代指令区分开。
+ */
+func withInterjectionMark(m: Message): Message {
+    match (m) {
+        case um: UserMessage =>
+            UserMessage(ContentList.ofText("[用户中途补充] " + plainTextOf(um)), 0)
+        case other => other
+    }
 }

@@ -67,6 +67,20 @@ public class HarnessSpec {
      * 换策略时注入自己的实现：产物不该为压不压、怎么压写死在内核里。
      */
     public let compactor: ?Compactor
+    /**
+     * 循环工厂：决定「用哪个 AgentLoop 实现」。
+     *
+     * None = 用 [AgentRuntime]（默认实现）。宿主换循环时注入自己的工厂，
+     * 这样不必改动散落在各处的构造点。
+     */
+    public let loopFactory: ?AgentLoopFactory
+    /**
+     * 生命周期状态持有者（`idle`/`running`）。
+     *
+     * **必须由宿主在多个 runtime 之间共享**才有意义：runtime 是 per-run 创建的，
+     * 它自己记不住 `Idle`。None = 每个 runtime 自建一个（此时状态不跨 run，仅供单次观测）。
+     */
+    public let statusRegistry: ?AgentStatusRegistry
     /** 进程级事件总线（None = 不发布） */
     public let eventBus: ?EventBus
     // provider 叠加表：注册表是宿主共享的（且是外部类型、没有派生语义），
@@ -88,6 +102,8 @@ public class HarnessSpec {
         middlewares!: ArrayList<ProviderMiddleware> = ArrayList<ProviderMiddleware>(),
         contributors!: ArrayList<PromptSegmentContributor> = ArrayList<PromptSegmentContributor>(),
         compactor!: ?Compactor = None,
+        loopFactory!: ?AgentLoopFactory = None,
+        statusRegistry!: ?AgentStatusRegistry = None,
         eventBus!: ?EventBus = None
     ) {
         this.tools = tools
@@ -104,6 +120,8 @@ public class HarnessSpec {
         this.middlewares = middlewares
         this.contributors = contributors
         this.compactor = compactor
+        this.loopFactory = loopFactory
+        this.statusRegistry = statusRegistry
         this.eventBus = eventBus
         this.providerOverlay = HashMap<String, Provider>()
     }
@@ -124,6 +142,8 @@ public class HarnessSpec {
         middlewares!: ?ArrayList<ProviderMiddleware> = None,
         contributors!: ?ArrayList<PromptSegmentContributor> = None,
         compactor!: ?Option<Compactor> = None,
+        loopFactory!: ?Option<AgentLoopFactory> = None,
+        statusRegistry!: ?Option<AgentStatusRegistry> = None,
         overlay!: ?HashMap<String, Provider> = None
     ) {
         this.tools = match (tools) { case Some(v) => v; case None => from.tools }
@@ -140,6 +160,8 @@ public class HarnessSpec {
         this.middlewares = match (middlewares) { case Some(v) => v; case None => from.middlewares }
         this.contributors = match (contributors) { case Some(v) => v; case None => from.contributors }
         this.compactor = match (compactor) { case Some(v) => v; case None => from.compactor }
+        this.loopFactory = match (loopFactory) { case Some(v) => v; case None => from.loopFactory }
+        this.statusRegistry = match (statusRegistry) { case Some(v) => v; case None => from.statusRegistry }
         this.eventBus = from.eventBus
         this.providerOverlay = match (overlay) { case Some(v) => v; case None => from.providerOverlay }
     }
@@ -225,6 +247,36 @@ public class HarnessSpec {
      */
     public func withCompactor(c: Compactor): HarnessSpec {
         HarnessSpec(this, compactor: Some(c))
+    }
+
+    /**
+     * 共享生命周期状态持有者。
+     *
+     * 宿主应当**一份装配只设一个**：runtime 每次 run 新建，状态要跨 run 才看得到 `Idle`。
+     */
+    public func withStatusRegistry(r: AgentStatusRegistry): HarnessSpec {
+        HarnessSpec(this, statusRegistry: Some(r))
+    }
+
+    /**
+     * 换循环实现（绕开散落在各处的 `AgentRuntime(...)` 构造点）。
+     */
+    public func withLoopFactory(f: AgentLoopFactory): HarnessSpec {
+        HarnessSpec(this, loopFactory: Some(f))
+    }
+
+    /**
+     * 按装配束造一个 loop：注入了工厂就用它，否则用默认的 [AgentRuntime]。
+     *
+     * **新代码应走这里**，不要直接 `AgentRuntime(spec, cfg)`——后者会让"换循环"
+     * 又变成逐个改调用点。
+     */
+    public func createLoop(config: AgentConfig,
+        sessionEnv!: SessionEnvironment = SessionEnvironment()): AgentLoop {
+        match (this.loopFactory) {
+            case Some(f) => f(this, config)
+            case None => AgentRuntime(this, config, sessionEnv: sessionEnv)
+        }
     }
 
     /**
@@ -470,11 +522,11 @@ public class Harness {
         }
     }
 
-    public func runtimeOf(cfg: AgentConfig): AgentRuntime {
-        AgentRuntime(this.spec, cfg)
+    public func runtimeOf(cfg: AgentConfig): AgentLoop {
+        this.spec.createLoop(cfg)
     }
 
-    public func runtime(agent: String): AgentRuntime {
+    public func runtime(agent: String): AgentLoop {
         this.runtimeOf(this.configOf(agent))
     }
 

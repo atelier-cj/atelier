@@ -120,7 +120,7 @@ public class AtelierHttpHandler {
             if (m.role == "user") { msgs.add(UserMessage(ContentList.ofText(m.content), 0)) }
         }
         // 一次性端点没有回传通道：不带 ask（提问即取消，工具会如实回报"没问到"）
-        let runtime = AgentRuntime(this.spec, agentCfg)
+        let runtime = this.spec.createLoop(agentCfg)
         // sessionId 透传：请求带 sessionId 时事件与请求一致（否则随机 ulid）
         let eventStream = match (dto.sessionId) {
             case Some(sid) => runtime.chatWithSessionId(sid, msgs, SessionEnvironment())
@@ -170,7 +170,7 @@ public class AtelierHttpHandler {
             log.info("user request answered: ${req.id}", Array<Attr>())
             ans
         }
-        let runtime = AgentRuntime(this.spec.withAsk(askFn), agentCfg)
+        let runtime = this.spec.withAsk(askFn).createLoop(agentCfg)
         // sessionId 透传：请求带 sessionId 时事件与请求一致（否则随机 ulid）
         let eventStream = match (dto.sessionId) {
             case Some(sid) => runtime.chatWithSessionId(sid, msgs, SessionEnvironment())
@@ -344,7 +344,7 @@ public class AtelierHttpHandler {
             }
         }
 
-        let runtime = AgentRuntime(this.spec, agentCfg)
+        let runtime = this.spec.createLoop(agentCfg)
 
         if (dto.stream) {
             doV1ChatStream(ctx, runtime, msgs, dto.model, dto.sessionId)
@@ -353,7 +353,7 @@ public class AtelierHttpHandler {
         }
     }
 
-    private func doV1ChatSync(ctx: HttpContext, runtime: AgentRuntime,
+    private func doV1ChatSync(ctx: HttpContext, runtime: AgentLoop,
         msgs: ArrayList<Message>, model: String, sessionId: Option<String>): Unit {
         // sessionId 透传：请求带 sessionId 时事件与请求一致（否则随机 ulid）
         let eventStream = match (sessionId) {
@@ -374,7 +374,7 @@ public class AtelierHttpHandler {
         jsonResponse(ctx, 200, toJsonString(resp))
     }
 
-    private func doV1ChatStream(ctx: HttpContext, runtime: AgentRuntime,
+    private func doV1ChatStream(ctx: HttpContext, runtime: AgentLoop,
         msgs: ArrayList<Message>, model: String, sessionId: Option<String>): Unit {
         let b = ctx.responseBuilder
         b.status(UInt16(200))

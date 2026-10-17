@@ -813,13 +813,13 @@ public class ChatTui {
         }
     }
 
-    private func makeRuntime(t: Terminal): AgentRuntime {
+    private func makeRuntime(t: Terminal): AgentLoop {
         let model = if (this.modelOverride != "") { this.modelOverride } else { this.agentConfig.model }
         // 模型切换走配置派生：手工重建会漏带末尾可选参数（上下文窗口等），丢了不报错
         let cfg = this.agentConfig.withModel(model)
         // 提问全部走结构化通道：信任闸门审批、ask_user 的问答都在这里收按键
         let runSpec = this.spec.withAsk({ req: UserRequest => this.askHost(t, req) })
-        AgentRuntime(runSpec, cfg)
+        runSpec.createLoop(cfg)
     }
 
     /**
@@ -1060,7 +1060,7 @@ public class ChatTui {
         }
         let model = if (this.modelOverride != "") { this.modelOverride } else { this.agentConfig.model }
         // 不挂提问通道：压缩不向用户提问
-        let runtime = AgentRuntime(this.spec, this.agentConfig.withModel(model))
+        let runtime = this.spec.createLoop(this.agentConfig.withModel(model))
         let report = runtime.compactNow(this.sessionId, this.messages, SessionEnvironment())
         if (!report.compacted) {
             let why = if (report.reason == "") { "无可压缩的头部" } else { report.reason }
