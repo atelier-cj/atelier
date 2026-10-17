@@ -143,6 +143,8 @@ public open class AgentRuntime <: AgentLoop {
     private let steers = HashMap<String, LinkedBlockingQueue<Message>>()
     // 生命周期状态的持有者（比 run 长寿；由装配束传入，None = 临时自建一个）
     private let statusRegistry: AgentStatusRegistry
+    // 本实例最近一次执行的会话键位（status() 无参查询要用）。未执行过为空串。
+    private var statusKey: String = ""
 
     /**
      * 唯一构造：装配束 + agent 配置。
@@ -554,21 +556,44 @@ public open class AgentRuntime <: AgentLoop {
      *
      * 查询的是**共享的状态持有者**（装配束传入），因此 run 结束后它回答 `Idle`——
      * 这正是 runtime 自身做不到的（每次 run 新建一个实例）。
-     * 无会话方案（空 sessionId）用一个固定键位记录。
+     *
+     * **键位是会话 id，不是 agent 名**：同一个 agent 可以同时服务多个会话，
+     * 按 agent 名记录会让并发会话互相覆盖（A 在跑、B 收尾 → A 也显示 Idle）。
+     * 本实例尚未执行过任何一次时用 agent 名占位，此时读到的就是 `Idle`。
      */
     public func status(): AgentStatus {
-        this.statusRegistry.statusOf(this.config.name)
+        let key = if (this.statusKey != "") { this.statusKey } else { this.config.name }
+        this.statusRegistry.statusOf(key)
+    }
+
+    /**
+     * 按会话查询状态（并发会话各查各的；未登记视为 `Idle`）。
+     *
+     * 无参的 [status] 只能回答「本实例最近为哪个会话执行」——它服务单实例单会话的
+     * 场景；多会话并发要按 id 查，否则拿到的永远是最后那一个。
+     */
+    public func statusOf(sessionId: String): AgentStatus {
+        this.statusRegistry.statusOf(sessionId)
+    }
+
+    /**
+     * 本实例最近一次执行所用的会话键位（**诊断用**：`status()` 就是拿它去查的）。
+     *
+     * 单列一个查询是为了让「status() 查的是哪个键」可被断言，而不是靠推断。
+     */
+    public func recentStatusKey(): String {
+        if (this.statusKey != "") { this.statusKey } else { this.config.name }
     }
 
     /**
      * 一次执行。`sessionId` 可空（面板/一次性执行）；空串时循环内部生成一个临时 id，
      * 只用于事件与取消登记的关联，**不代表落库会话**。
+     *
+     * 生命周期状态由 [chatWithEnv]（所有入口的唯一主干）推进，本方法不重复设置。
      */
     public func drive(input: RunInput): EventStream<AgentEvent, ArrayList<Message>> {
         let sid = if (input.sessionId != "") { input.sessionId } else { "run_" + nextId() }
-        this.statusRegistry.transition(this.config.name, AgentStatus.Running)
-        let stream = this.chatWithSessionId(sid, input.messages, input.env)
-        return stream
+        this.chatWithSessionId(sid, input.messages, input.env)
     }
 
     /** 取消：与既有 [cancelSession] 同一语义（协作式，不强制中断工具）。 */
@@ -718,6 +743,11 @@ public open class AgentRuntime <: AgentLoop {
             // 会话级取消标志：chat 期间注册，收尾统一清理
             let cancelFlag = AtomicBool(false)
             synchronized(this.cancelLock) { this.cancels[sessionId] = cancelFlag }
+            // 生命周期状态在这里推进（而不是在某个具体入口里）：chat / chatWithEnv /
+            // drive / chatWithSessionId 全部收敛到本函数，只有在此设置才能保证
+            // 「任何入口跑起来，status() 都真的回答 Running」。
+            this.statusKey = sessionId
+            this.statusRegistry.transition(sessionId, AgentStatus.Running)
             try {
                 this.emit(stream, AgentStartEvent(sessionId))
                 log.info("agent start: ${this.config.name}", Array<Attr>())
@@ -1211,9 +1241,6 @@ public open class AgentRuntime <: AgentLoop {
 
                 log.info("agent end, total turns=${turnCount}", Array<Attr>())
                 callHooks("afterRun", turnCount, hookState)
-                // 生命周期：本次执行收敛（含挂起）→ 回到 idle。
-                // 挂起同样落到这里：它结束的是"这次执行"，等待方由上层状态表达。
-                this.statusRegistry.transition(this.config.name, AgentStatus.Idle)
                 stream.setResult(currentMessages)
                 this.emit(stream, AgentEndEvent(currentMessages))
             } catch (e: Exception) {
@@ -1222,19 +1249,28 @@ public open class AgentRuntime <: AgentLoop {
                 // 随后 result() 抛错由调用方决定策略
                 this.emit(stream, AgentEndEvent(ArrayList<Message>([UserMessage(ContentList.ofText("[Runtime error: ${e.message}]"), 0)])))
                 stream.setError(e)
+                ()   // 有无 finally 时的分支类型统一：catch 段以 Unit 收尾
             } catch (e: Error) {
                 // Error（OOM 等）此前会带着 produce 线程一起走掉：既不 emit AgentEndEvent，
                 // 也不 setError —— 消费端（SessionLoop）便永远每 200ms 空转一轮，result()
                 // 也永久阻塞。这里兜住，维持「生产端一定会收尾」这一不变量。
                 eprintln("[atelier] runtime system error: " + e.toString())
-                this.emit(stream, AgentEndEvent(ArrayList<Message>([UserMessage(ContentList.ofText("[Runtime system error: ${e.toString()}]"), 0)])))
+                this.emit(stream, AgentEndEvent(ArrayList<Message>([UserMessage(ContentList.ofText("[Runtime system error: " + e.toString() + "]"), 0)])))
                 stream.setError(Exception("runtime system error: " + e.toString()))
+                ()   // 同上：catch 段以 Unit 收尾
+            } finally {
+                // 生命周期：本次执行收敛（含挂起、取消、异常）→ 回到 idle。
+                // 放在 finally 而不是正常路径尾部：退出只能是「本次执行结束」这一种含义，
+                // 而正常/取消/异常三条路径都会走到这里，漏掉任一条都会让 status() 卡在 Running
+                // （宿主据此判断「能不能再派活」，卡住等于 agent 永久不可用）。
+                // 挂起同样落到这里：它结束的是「这次执行」，等待方由上层状态表达。
+                this.statusRegistry.transition(sessionId, AgentStatus.Idle)
+                // 收尾哨兵：无论如何都标记「生产端已结束」。消费端据此判断循环是否该收敛，
+                // 而不是无限等一个可能永远不会到来的 AgentEndEvent（close 不影响已排队事件）。
+                stream.close()
+                // 会话结束（正常/取消/异常统一路径）后清理取消标志
+                synchronized(this.cancelLock) { this.cancels.remove(sessionId) }
             }
-            // 收尾哨兵：无论如何都标记「生产端已结束」。消费端据此判断循环是否该收敛，
-            // 而不是无限等一个可能永远不会到来的 AgentEndEvent（close 不影响已排队事件）。
-            stream.close()
-            // 会话结束（正常/取消/异常统一路径）后清理取消标志
-            synchronized(this.cancelLock) { this.cancels.remove(sessionId) }
         }
 
         stream
