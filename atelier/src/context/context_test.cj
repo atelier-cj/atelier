@@ -3,6 +3,8 @@ package atelier.context
 import atelier.message.*
 import std.collection.*
 import atelier.provider.ModelInfo
+import atelier.session.SessionEnvironment
+import atelier.skill.SkillRegistry
 import jsonvalue.*
 
 func msg(text: String): Message {
@@ -577,4 +579,115 @@ func compactionLedger_mutualExclusionPerSession() {
     ledger.end("s1")
     @Expect(ledger.isOpen("s1"), false)
     @Expect(ledger.begin("s1", "c4"), true)
+}
+
+
+// indexOf 返回 Option<Int64>：不存在时给 -1，便于直接做位置比较
+func posOf(hay: String, needle: String): Int64 {
+    match (hay.indexOf(needle)) {
+        case Some(i) => i
+        case None => -1
+    }
+}
+
+// ==================== 提示段稳定性（SegmentStability） ====================
+
+class StableSeg <: PromptSegmentContributor {
+    private let text: String
+    public init(t: String) { this.text = t }
+    public func render(env: SessionEnvironment): String { this.text }
+}
+
+class DynamicSeg <: PromptSegmentContributor {
+    private let text: String
+    public init(t: String) { this.text = t }
+    public func render(env: SessionEnvironment): String { this.text }
+    public func stability(): SegmentStability { SegmentStability.Dynamic }
+}
+
+func emptyEnv(): SessionEnvironment { SessionEnvironment() }
+
+func buildWith(cs: ArrayList<PromptSegmentContributor>): String {
+    SystemPromptBuilder().build("", ArrayList<String>(), SkillRegistry(), emptyEnv(),
+        contributors: cs)
+}
+
+// 默认（不覆写 stability）= Stable：既有实现的相对次序完全不变
+@Test
+func promptSegments_defaultIsStable() {
+    let cs = ArrayList<PromptSegmentContributor>()
+    cs.add(StableSeg("[A]\n"))
+    cs.add(StableSeg("[B]\n"))
+    let out = buildWith(cs)
+    @Expect(posOf(out, "[A]") < posOf(out, "[B]"), true)
+}
+
+// 动态段被排到所有稳定段之后（即便注入顺序在前面）
+@Test
+func promptSegments_dynamicOrderedAfterStable() {
+    let cs = ArrayList<PromptSegmentContributor>()
+    cs.add(DynamicSeg("[DYN]\n"))   // 先注入动态
+    cs.add(StableSeg("[STABLE]\n"))
+    let out = buildWith(cs)
+    @Expect(posOf(out, "[STABLE]") >= 0, true)
+    @Expect(posOf(out, "[DYN]") >= 0, true)
+    @Expect(posOf(out, "[STABLE]") < posOf(out, "[DYN]"), true)
+}
+
+// 同类之间保持注入顺序（稳定排序）：多个动态段不被打乱
+@Test
+func promptSegments_sameKindKeepsInjectionOrder() {
+    let cs = ArrayList<PromptSegmentContributor>()
+    cs.add(StableSeg("[S1]\n"))
+    cs.add(DynamicSeg("[D1]\n"))
+    cs.add(StableSeg("[S2]\n"))
+    cs.add(DynamicSeg("[D2]\n"))
+    let out = buildWith(cs)
+    // 稳定段全在前，且 S1 在 S2 前
+    @Expect(posOf(out, "[S1]") < posOf(out, "[S2]"), true)
+    @Expect(posOf(out, "[S2]") < posOf(out, "[D1]"), true)
+    // 动态段 D1 在 D2 前
+    @Expect(posOf(out, "[D1]") < posOf(out, "[D2]"), true)
+}
+
+// 空段跳过（既有语义不变）
+@Test
+func promptSegments_emptySkipped() {
+    let cs = ArrayList<PromptSegmentContributor>()
+    cs.add(StableSeg(""))
+    cs.add(StableSeg("[ONLY]\n"))
+    let out = buildWith(cs)
+    @Expect(out.contains("[ONLY]"), true)
+    @Expect(out.startsWith("\n\n"), false)
+}
+
+// 缓存友好的核心性质：稳定部分逐字可复现，且动态内容排在它之后
+@Test
+func promptSegments_stablePrefixIsReproducible() {
+    let cs = ArrayList<PromptSegmentContributor>()
+    cs.add(StableSeg("[S]\n"))
+    cs.add(DynamicSeg("[D]\n"))
+    let first = buildWith(cs)
+    let second = buildWith(cs)
+    // 两次构建完全相同（本例动态段内容其实是常量，故整串可比）
+    @Expect(first == second, true)
+    // 且稳定段确实在动态段之前 —— 这就是"稳定前缀"成立的条件
+    @Expect(posOf(first, "[S]") < posOf(first, "[D]"), true)
+}
+
+// 动态段内容变化时，稳定段位置不变（缓存前缀不被它推动）
+@Test
+func promptSegments_dynamicContentDoesNotMoveStablePart() {
+    let cs1 = ArrayList<PromptSegmentContributor>()
+    cs1.add(StableSeg("[S]\n"))
+    cs1.add(DynamicSeg("[TIME 100]\n"))
+    let cs2 = ArrayList<PromptSegmentContributor>()
+    cs2.add(StableSeg("[S]\n"))
+    cs2.add(DynamicSeg("[TIME 200]\n"))
+    let a = buildWith(cs1)
+    let b = buildWith(cs2)
+    // 稳定段的起始位置在两次之间相同（动态内容变了，但没插到稳定段之前）
+    @Expect(posOf(a, "[S]"), posOf(b, "[S]"))
+    // 动态段本身不同 —— 证明它确实是变量部分
+    @Expect(a == b, false)
 }

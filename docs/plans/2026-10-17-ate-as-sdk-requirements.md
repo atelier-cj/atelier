@@ -27,29 +27,34 @@
 
 ---
 
-## 1. 需求来源一：三个产品的真实诉求（已核实）
+## 1. 需求来源一：下游要换什么（按能力分类，不按产品）
 
-### 1.1 lumine —— 要换存储（**A 类，其实早就可行，只是没标准化**）
+> **本节只记「atelier 需要提供哪几类可替换点」，不记任何下游产品的实现细节或取舍**。
+> 某个产品用不用、为什么不用，是它自己文档里的事，写在这里会把通用库绑在消费方身上。
 
-**核实结果**：
+### 1.1 存储（已有接口，无需新增）
 
-| 事实 | 证据 |
+`SessionStore`（`atelier/src/session/store.cj`）**已存在且已有一个以上实现**：
+
+| 实现 | 位置 |
 |---|---|
-| lumine 有**自己的 jsonl 会话存储** | `atelier-lumine/src/model/session_store.cj`（`<存档目录>/sessions/<id>.jsonl`） |
-| 它**没有实现 `SessionStore` 接口** | 该文件里只有 `class SessionLine <: JsonSerializable...`，无 `<: SessionStore` |
-| 它装配时注入的是 **`MemorySessionStore()`** | `src/ai/harness.cj:441` |
+| `StormSessionStore`（bstorm 后端） | `atelier/src/session/file_store.cj:36` |
+| `MemorySessionStore`（内存后端） | `atelier/src/session/memory_store.cj:6` |
 
-**结论**：`SessionStore` 接口**存在且可用**（`atelier/src/session/store.cj`），但 lumine 自己写了一份**没接上接口**的实现。
+**判据：接口是否需要新增能力？** 现有方法集（`save` / `appendBranch` / `load` / `loadEntries` /
+`list` / `delete` / `fork` / `appendCompaction` / `loadCompactions` / `close`）覆盖了
+会话持久化的完整面。**本档不需要动它。**
 
-> **这是本设计最重要的一条经验**：**接口存在不等于被使用**。标准化要包含"让消费者知道该用它"。
+> **一条对外契约（写给所有下游）**：`SessionStore` 的模型是「**agent 会话**」——
+> `SessionHeader` + 树形 `Entry` + 密封 `Message`（User/Assistant/ToolResult/Compaction）。
+> **产品侧的聊天记录若与这个模型不同构，就不该硬接这层**：写适配层换来的是
+> 双向转换 + 字段丢失，比不接更糟。是否需要「产品聊天记录」这类存储，属于产品自己的设计。
 
-### 1.2 世界树 —— 要复刻 dsh，**需要换整个循环**（C 类）
+### 1.2 循环（缺失，本设计要补）
 
-**定位（用户原话）**：「世界树的设计思路其实就是 **dsh 复刻**，暂时没自己的想法。」
+下游需要能**换掉整个 agent 循环**。
 
-**核实**：yggdrasil 的 4 个插件全部 `"atelier" = { path = ... }`，`cjpm.toml` 注释写明「**对标 dsh 的 core 包**」「**对标 dsh core/api**」。
-
-**dsh 的实际分层（290 个包）**：
+**dsh 的分层可作参照（290 个包）**：
 
 ```
 dsh-agent          → Agent 接口 + AgentRegistry + AgentFactory（只管"是什么"）
@@ -66,9 +71,13 @@ dsh-compaction-tool-result-pruner → 工具结果修剪
 
 **即：`Agent` 接口只管身份（`readonly id: SessionId`），行为约束在 `AgentHandle`（`status`/`cancel`/`send`/`whenIdle`），真正的循环是 `loop` 这个可替换实现。**
 
-### 1.3 starline —— 要换压缩策略（B 类）
+**atelier 现状**：`AgentRuntime`（1455 行）是**具体类**，主循环在 `private func chatWithEnv`，
+`HarnessSpec` 无 `loop` 字段 —— 详见 §2.4。
 
-**理由**（来自 always-on 需求 §D3）：记忆层与上下文压缩**触发条件不同**（token 用量 vs 分段信号），混成一根管子会"调窗口参数莫名改动记忆质量"。
+### 1.3 压缩（缺失，本设计要补）
+
+**下游为什么需要换压缩策略**（来自 always-on 需求 §D3）：记忆层与上下文压缩
+**触发条件不同**（token 用量 vs 分段信号），混成一根管子会"调窗口参数莫名改动记忆质量"。
 
 **现状**：压缩代码分两处——
 
@@ -78,6 +87,15 @@ dsh-compaction-tool-result-pruner → 工具结果修剪
 | `atelier/src/agent/runtime.cj`（1455 行）**里的调用逻辑** | 请求前压力检测、溢出恢复、括弧事件、台账写入、`retry` 路径 |
 
 **所以压缩现在既不是接口，也没独立成包。**
+
+### 1.4 四类可替换点的小结
+
+| 能力 | 现状 | 本设计要做的 |
+|---|---|---|
+| **存储**（`SessionStore`） | ✅ 接口 + 两个实现 | 不动 |
+| **信任判定**（`TrustGate`） | ⚠️ 自由函数、策略焊死 | **提为函数类型**（A-1，✅ 已完成） |
+| **压缩**（`Compactor`） | ❌ 非接口、未独立成包 | **提为 interface + 默认实现独立**（档 B） |
+| **循环**（`AgentLoop`） | ❌ 具体类、10 处硬编码 | **提为 interface + 工厂**（档 C） |
 
 ---
 
@@ -269,18 +287,21 @@ export type AgentStatus = 'idle' | 'running';
 
 > 用户决定：**不考虑工期，夯实 SDK 优先。** 以下三档按依赖顺序排列，但都要完成。
 
-### 档 A —— 标准化已有能力（**不是新功能，是让它们真被用起来**）
+### 档 A —— 标准化已有能力
 
-| # | 做什么 | 现状问题 | 验收 |
-|---|---|---|---|
-| **A-1** | `trust` 提接口 | `shouldAllowFor` 是自由函数 + 具体类参数 | `TrustGate` 接口 + 默认实现 `PathTrustGate`；`shouldAllowFor` 保留为兼容包装 |
-| **A-2** | **`SessionStore` 的消费者迁移** | lumine 有自己的 jsonl 实现**但没接接口** | lumine 的 `session_store.cj` 实现 `SessionStore`，装配处替换 `MemorySessionStore()` |
-| **A-3** | `context` 的装配面标准化 | `ContextBuilder`/`SystemPromptBuilder` 是具体类 | 是否接口化**待定**（见 §7 待决 1） |
-| **A-4** | 补 `HarnessSpec` 的缺失派生 | —— | 每个新增接口都有对应 `with*` |
+| # | 做什么 | 现状问题 | 验收 | 状态 |
+|---|---|---|---|---|
+| **A-1** | 信任判定提为可注入闸门 | `shouldAllowFor` 是自由函数、策略焊在函数体 | `type TrustGate = (Tool, String, String) -> TrustDecision` + `pathTrustGate` 工厂 + `HarnessSpec.withTrustGate`；旧函数保留兼容包装 | ✅ **已完成**（2026-10-17，912 用例绿） |
+| **A-2** | **提示段稳定性标记**（原 A-3） | 所有 `PromptSegmentContributor` 一律当稳定段排在前面；动态段（时间戳、面板渲染）会打掉缓存前缀 | `PromptSegmentContributor.stability(): SegmentStability`（默认 `Stable`）；`ContextBuilder` 按稳定性排序 | 待做（小） |
+| **A-3** | 补 `HarnessSpec` 派生（原 A-4） | 新增字段要有对应 `with*` | `withTrustGate` 已加；后续新增接口逐个补 | 随各档进行 |
 
-**A-2 是本档的重点**：它证明「接口存在 ≠ 被使用」，标准化必须包含迁移指南。
+**关于 `ContextBuilder` / `SystemPromptBuilder` 要不要接口化**（原待决 1）：**不做**。核实结论见 §7 已决第 1 条。
 
-### 档 B —— 压缩可替换（starline 需要）
+> **A-2 为什么不是「让某个下游接上 SessionStore」**：那是产品自己的决策，写进 SDK 文档会
+> 把通用库绑在消费方身上（仓库 AGENTS.md 的注释规范同理）。SDK 侧只负责
+> **把契约说清**（见 §1.1 的对外契约），用不用是下游自己的事。
+
+### 档 B —— 压缩可替换
 
 | # | 做什么 | 拆解 |
 |---|---|---|
@@ -292,7 +313,7 @@ export type AgentStatus = 'idle' | 'running';
 
 **B-3 是本档的真难点**：压缩不只在 `compaction.cj`，主循环里还有一大坨调用与事件编排。
 
-### 档 C —— 循环可替换（世界树需要）
+### 档 C —— 循环可替换
 
 | # | 做什么 | 拆解 |
 |---|---|---|
@@ -303,7 +324,7 @@ export type AgentStatus = 'idle' | 'running';
 | **C-5** | **`AgentStatus` 生命周期** | `idle`/`running` + 事件（解决 always-on B 组） |
 | **C-6** | 迁移 `SessionLoop` | 它现在是"加载历史→调 runtime→落库"，抽接口后要重新定位（动 acp/a2a/subagent 三处） |
 | **C-7** | **`steer` / `inject` 插话** | 按会话的 `steerQueues` + 循环顶部 drain + `[User interjection]` 标注（见 §11） |
-| **C-8** | `applyArchiveMarks` / `applyArchives` 保插话验证 | 它们是否原样保留 `UserMessage` 未核实（§11.4 第 1 行），切分时必须确认 |
+| **C-8** | ~~`applyArchiveMarks` / `applyArchives` 保插话验证~~ | ✅ **已核实安全**：两者只处理 `ArchiveMessage`（按 index 裁剪）与 `toolName == "archive_history"` 的 `ToolResultMessage`，`UserMessage` 原样保留（§11.4 第 1 行已更新） |
 
 **C-2 与 C-6 是本档的真难点。**
 
@@ -408,8 +429,15 @@ spec.withTrustGate({ tool, wd, sid =>
 
 ## 7. 待决问题
 
-1. **`ContextBuilder` / `SystemPromptBuilder` 要不要接口化？**
-   它们现在是具体类。always-on D1 要求"能分清稳定前缀与动态段"——这可以通过 `PromptSegmentContributor` 扩展（加一个 `isDynamic()` 或分段顺序），**不一定需要把整个 builder 接口化**。建议：**先不接口化**，用 contributor 补齐；真需要再抽。
+1. ~~**`ContextBuilder` / `SystemPromptBuilder` 要不要接口化？**~~
+   **已决（2026-10-17）：不接口化。** 核实结论：
+   - `ContextBuilder` **是 runtime 内部 new 出来的**（`runtime.cj:598`），`HarnessSpec` 没有它的字段——
+     也就是说它**本来就不是"外部注入的组件"，而是循环内部的装配细节**；
+   - 它的四个方法里，`buildChatRequest` / `applyArchives` / `applyArchiveMarks` 是**既定语义的胶水**，
+     换掉等于换语义，不该开放；
+   - 唯一需要扩展的是 `buildSystemText`（提示装配），而那个能力**已有官方扩展点**
+     `PromptSegmentContributor`。
+   **所以要做的是给 contributor 加稳定性标记（A-2），不是把 builder 接口化。**
 
 2. **`Compactor` 的方法集边界在哪？**
    - 只给 `compact(messages) -> messages`？那"该不该压"的判断留在循环里（压缩策略不完整可换）。
@@ -522,7 +550,7 @@ spec.withTrustGate({ tool, wd, sid =>
 
 | # | 位置 | 操作 | 会丢插话吗 | 说明 |
 |---|---|---|---|---|
-| 1 | `runtime.cj:637-638` | `applyArchiveMarks` / `applyArchives` | ⚠️ **未见实现细节，需在 C-2 切分时确认** | 是转换函数，需确认是否原样保留 `UserMessage` |
+| 1 | `runtime.cj:637-638` | `applyArchiveMarks` / `applyArchives` | ✅ **不会（已核实）** | `applyArchives`（`builder.cj:61`）只处理 `toolName == "archive_history"` 的 `ToolResultMessage`；`applyArchiveMarks`（`builder.cj:131`）只按 `ArchiveMessage` 的 `(startIndex, endIndex)` 裁剪。**两者都不碰 `UserMessage`** |
 | 2 | `:675` | `compactBracketed`（压力压缩） | ✅ **不会** | `compactWithSummary`（`compaction.cj:361-371`）明确：头部换成检查点，**`cut` 之后的消息全部原样保留** |
 | 3 | `:696` | `currentMessages = chatReq.messages`（hook 改写后收编） | ✅ **不会** | 请求是从 `currentMessages` 构建的；插话若已在其中，收编时自然还在 |
 | 4 | `:763` | `recoverFromOverflow` 的 `nextMsgs`（溢出恢复） | ⚠️ **会** | 该路径只保"最后一条用户消息起"——插话落在其之前就丢。**可接受**（最后手段），但**必须记日志** |
