@@ -55,3 +55,31 @@ public func decideTurnVerdict(stopReason: StopReason, lengthContinuations: Int64
     }
     TurnVerdict.End
 }
+
+/**
+ * 工具调用预算的裁决结果。
+ *
+ * 两种情况必须分开：**一个都不许执行**（预算已用完）与**只允许前 N 个**（本批超了）。
+ * 前者要结束回合，后者要裁剪后继续——混在一起会导致「超了还照跑」或「明明还能跑却停」。
+ */
+public enum ToolBudgetVerdict {
+    /** 预算已用完：本批一个都不执行，结束回合 */
+    | Exhausted
+    /** 本批全部在预算内 */
+    | AllAllowed
+    /** 本批超预算：只允许前 [allowed] 个，其余跳过 */
+    | Trimmed(Int64)
+}
+
+/**
+ * 工具调用预算裁决。
+ *
+ * @param used 整个 run 已用掉的工具调用次数
+ * @param requested 本批请求的调用个数
+ * @param maxAllowed 预算上限（`AgentConfig.maxToolCalls`）
+ */
+public func decideToolBudget(used: Int64, requested: Int64, maxAllowed: Int64): ToolBudgetVerdict {
+    if (used >= maxAllowed) { return ToolBudgetVerdict.Exhausted }
+    if (used + requested > maxAllowed) { return ToolBudgetVerdict.Trimmed(maxAllowed - used) }
+    ToolBudgetVerdict.AllAllowed
+}
