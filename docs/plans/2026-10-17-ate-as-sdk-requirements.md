@@ -101,7 +101,7 @@ dsh-compaction-tool-result-pruner → 工具结果修剪
 | **存储**（`SessionStore`） | ✅ 接口 + 两个实现 | 不动 |
 | **信任判定**（`TrustGate`） | ✅ **已提为函数类型**（A-1 完成） | 无 |
 | **压缩**（`Compactor`） | ✅ **已提为 interface**（`BasicCompactor` / `NoopCompactor`） | 剩 B-2：默认实现独立成包（当前与接口同包不同文件） |
-| **循环**（`AgentLoop`） | ✅ **已提为 interface + 工厂**，硬编码构造点已全部改走 `createLoop` | 剩 C-2：主循环内部再拆（已完成 2 步） |
+| **循环**（`AgentLoop`） | ✅ **已提为 interface + 工厂**，硬编码构造点已全部改走 `createLoop` | 剩 C-2：主循环内部再拆（✅ 已完成，见下文） |
 
 ---
 
@@ -324,7 +324,7 @@ export type AgentStatus = 'idle' | 'running';
 | # | 做什么 | 拆解 |
 |---|---|---|
 | **C-1** | 抽 `AgentLoop` 接口 | ✅ **已完成**：`loop_interface.cj`，9 个方法 |
-| **C-2** | **切分 `AgentRuntime` 主循环** | ⚠️ **部分完成（2 步）**：回合收尾判定、工具预算裁决已抽为纯函数；剩余候选边际收益递减，暂缓 |
+| **C-2** | **切分 `AgentRuntime` 主循环** | ✅ **已完成**：`chatWithEnv` 548 → 270 行，抽成 7 个阶段方法（`openTurn` / `compactBeforeRequest` / `invokeProvider` / `executeToolBatch` / `admitToolCall` 系列）+ `RunScope`。详见 [`2026-10-17-c2-loop-decomposition.md`](./2026-10-17-c2-loop-decomposition.md) |
 | **C-3** | 默认实现改名 | ✅ **已决策不做**：保留 `AgentRuntime`，它 `<: AgentLoop`。零改名 |
 | **C-4** | `HarnessSpec.loop` + 工厂 | ✅ **已完成**：`withLoopFactory` + `createLoop`，硬编码构造点已全部改走 |
 | **C-5** | **`AgentStatus` 生命周期** | ✅ **已完成并修缺陷**：状态推进下沉到 `chatWithEnv`（四个入口真实生效）、按会话而非 agent 名记录、异常路径经 `finally` 回 `Idle` |
@@ -332,13 +332,15 @@ export type AgentStatus = 'idle' | 'running';
 | **C-7** | **`steer` / `inject` 插话** | ✅ **已完成**（入队 + 循环顶部 drain + 标注）；⚠️ "idle 时唤醒"未做（属 A1） |
 | **C-8** | ~~`applyArchiveMarks` / `applyArchives` 保插话验证~~ | ✅ **已核实安全**：两者只处理 `ArchiveMessage`（按 index 裁剪）与 `toolName == "archive_history"` 的 `ToolResultMessage`，`UserMessage` 原样保留（§11.4 第 1 行已更新） |
 
-**进度小结（2026-10-17 核）**：三档的**接口层已全部就位**——`TrustGate`（函数类型）、
-`Compactor`（interface + 2 实现）、`AgentLoop`（interface + 工厂 + 状态 + 插话）。
-剩余项都不是"接口没做"，而是**实现内部再拆**（C-2 剩余）与**包结构**（B-2），
-两者收益都在递减。测试基线：**951 用例全绿**。
+**进度小结（2026-10-18 核）**：三档**全部完成**——`TrustGate`（函数类型）、
+`Compactor`（interface + 2 实现）、`AgentLoop`（interface + 工厂 + 状态 + 插话），
+且 C-2 已把主循环从 548 行整理到 270 行。测试基线：**951 用例全绿**。
 
-**C-2 与 C-6 是两个未收口项，但性质不同**：C-2 是"可以继续、但没有强理由"；
-C-6 是"看过之后判定不该做"（`SessionLoop` 是宿主封装，不是循环实现）。
+唯一遗留是 B-2（默认实现拆成独立成员包）：接口与新实现已在独立文件
+`context/compactor.cj`，只是没拆成 `atelier/src/compaction/` 成员包，收益不大。
+
+**C-6 是唯一未收口项，且已判定不该做**：`SessionLoop` 是宿主封装（加载历史 → 调 runtime →
+收事件 → 落库），与 `AgentLoop` 不同层。C-2 已完成（见上文链接）。
 
 ---
 
