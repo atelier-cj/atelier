@@ -75,3 +75,50 @@ func turnVerdict_toolUseIsNotTerminal() {
     @Expect(isVerdict(decideTurnVerdict(StopReason.ToolUse, 0, 3, 0, 0, 2),
         TurnVerdict.End), true)
 }
+
+// ==================== 工具调用预算（decideToolBudget） ====================
+
+func isBudget(v: ToolBudgetVerdict, expected: ToolBudgetVerdict): Bool {
+    match (v) {
+        case expected => true
+        case _ => false
+    }
+}
+
+// 预算远未用完：全部允许
+@Test
+func toolBudget_allAllowed() {
+    @Expect(isBudget(decideToolBudget(0, 3, 50), ToolBudgetVerdict.AllAllowed), true)
+    @Expect(isBudget(decideToolBudget(47, 3, 50), ToolBudgetVerdict.AllAllowed), true)  // 恰好用满
+}
+
+// 已用完：一个都不许（要结束回合，不是"跑完整批再说"）
+@Test
+func toolBudget_exhausted() {
+    @Expect(isBudget(decideToolBudget(50, 1, 50), ToolBudgetVerdict.Exhausted), true)
+    @Expect(isBudget(decideToolBudget(60, 1, 50), ToolBudgetVerdict.Exhausted), true)
+}
+
+// 本批超了：只允许剩余额度
+@Test
+func toolBudget_trimmed() {
+    match (decideToolBudget(48, 5, 50)) {
+        case Trimmed(allowed) => @Expect(allowed, Int64(2))
+        case _ => @Fail("expected Trimmed(2)")
+    }
+}
+
+// 边界：剩余额度刚好等于本批 → 不裁剪
+@Test
+func toolBudget_exactFitIsNotTrimmed() {
+    @Expect(isBudget(decideToolBudget(45, 5, 50), ToolBudgetVerdict.AllAllowed), true)
+}
+
+// 裁剪时 allowed 必须为正：否则 Exhausted 与 Trimmed 的边界会重叠
+@Test
+func toolBudget_trimmedIsAlwaysPositive() {
+    match (decideToolBudget(49, 5, 50)) {
+        case Trimmed(allowed) => @Expect(allowed > 0, true)
+        case _ => @Fail("expected Trimmed with positive allowance")
+    }
+}

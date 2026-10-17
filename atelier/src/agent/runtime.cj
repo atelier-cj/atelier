@@ -942,29 +942,30 @@ public open class AgentRuntime <: AgentLoop {
                             }
                             log.info("tool calls: ${toolCalls.size}", Array<Attr>())
                             let maxCalls = Int64(this.config.maxToolCalls)
-                            if (toolCallCount >= maxCalls) {
-                                log.warn("max tool calls (${maxCalls}) reached", Array<Attr>())
-                                currentMessages.add(ToolResultMessage("", "", ContentList.ofText("Max tool calls (${maxCalls}) reached, skipping"), true, 0))
-                                this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
-                                finished = true
-                                break
-                            }
-                            if (toolCallCount + toolCalls.size > maxCalls) {
-                                let allowed = maxCalls - toolCallCount
-                                log.warn("tool calls ${toolCalls.size} exceeds remaining ${allowed}", Array<Attr>())
-                                // Only allow up to the limit
-                                let trimmed = ArrayList<ToolCallBlock>()
-                                for (j in 0..allowed) { trimmed.add(toolCalls[Int64(j)]) }
-                                // Replace full list with trimmed
-                                let original = ArrayList<ToolCallBlock>(toolCalls)
-                                toolCalls.clear()
-                                for (j in 0..allowed) { toolCalls.add(trimmed[Int64(j)]) }
-                                // Store skipped tool names for rejection
-                                var skipIdx = allowed
-                                while (skipIdx < original.size) {
-                                    currentMessages.add(ToolResultMessage(original[Int64(skipIdx)].id, original[Int64(skipIdx)].name, ContentList.ofText("Skipped: max tool calls limit"), true, 0))
-                                    skipIdx++
-                                }
+                            // 预算裁决交给纯函数（可单测）：三种走向语义不同，埋在这里看不出边界
+                            match (decideToolBudget(toolCallCount, toolCalls.size, maxCalls)) {
+                                case ToolBudgetVerdict.Exhausted =>
+                                    log.warn("max tool calls (${maxCalls}) reached", Array<Attr>())
+                                    currentMessages.add(ToolResultMessage("", "",
+                                        ContentList.ofText("Max tool calls (${maxCalls}) reached, skipping"), true, 0))
+                                    this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
+                                    finished = true
+                                    break
+                                case ToolBudgetVerdict.AllAllowed => ()
+                                case ToolBudgetVerdict.Trimmed(allowed) =>
+                                    log.warn("tool calls ${toolCalls.size} exceeds remaining ${allowed}", Array<Attr>())
+                                    let original = ArrayList<ToolCallBlock>(toolCalls)
+                                    toolCalls.clear()
+                                    for (j in 0..allowed) { toolCalls.add(original[Int64(j)]) }
+                                    // 被裁掉的每一个都要有明确结果：否则这条 call 永远没有配对结果，
+                                    // 下一次请求直接被判 400
+                                    var skipIdx = allowed
+                                    while (skipIdx < original.size) {
+                                        currentMessages.add(ToolResultMessage(original[Int64(skipIdx)].id,
+                                            original[Int64(skipIdx)].name,
+                                            ContentList.ofText("Skipped: max tool calls limit"), true, 0))
+                                        skipIdx++
+                                    }
                             }
                             // 本轮闸门里"宿主要求挂起"的请求（审批 = confirmation；
                             // 选择/表单由工具内的提问走 ToolResult.external，不在此列）
