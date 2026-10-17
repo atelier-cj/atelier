@@ -367,9 +367,9 @@ public interface AgentLoop {
 }
 ```
 
-### 6.1.1 落地后收回的两处设计假设（2026-10-17 补）
+### 6.1.1 落地后收回的设计假设（2026-10-17 补）
 
-**① `attention` / `trigger` / `policy` 三个字段没有落进 `RunInput`。**
+**`attention` / `trigger` / `policy` 三个字段没有落进 `RunInput`。**
 
 草案里 `RunInput` 装的是「注意力快照 + 触发源 + 运行模式」，落地时只保留了
 `messages` / `sessionId` / `env`。理由不是"以后再说"，而是**没有依据支撑那三个字段**：
@@ -386,12 +386,16 @@ public interface AgentLoop {
 > 先落 `messages`（唯一每个宿主都真有的东西），等 A1 真正落地时再加字段——
 > `RunInput` 用字段而非位置参数，加字段本来就不改签名（见下方 §6.1 语言约束）。
 
-**② `drive` / `RunInput` 目前没有生产调用点，且不承载「面板模式」的期待。**
+**「面板模式的 run 入口」这份设计已迁出本文档** → 见
+`atelier-starline/docs/2026-10-17-panel-mode-run-entry.md`（状态：挂起）。
 
-全部 `chat*` 入口（`chat` / `chatWithEnv` / `drive` / `chatWithSessionId`）已经收敛到
-同一份实现，`drive` 只是「`sessionId` 可空」的语义化包装。它的价值是**语义清晰**
-（宿主不必自造一个空会话 id），而不是"为面板模式准备的入口"——**面板模式不走 atelier 循环**。
-写文档时不要把未兑现的产品形态挂在它名下。
+它是**产品形态的设计**，归属 starline；atelier 侧没有任何消费者。留在 SDK 需求里会让
+下一个维护者以为它是既定方向。**SDK 只承载已被验证的需求，产品形态留在产品仓。**
+
+**现状备忘**：`drive` / `RunInput` 目前没有生产调用点（唯一调用在测试）。`chat` /
+`chatWithEnv` / `drive` / `chatWithSessionId` 已收敛到同一份实现，`drive` 只是
+「`sessionId` 可空」的语义化包装，价值是**语义清晰**（宿主不必自造空会话 id）。
+**它不是"为面板模式准备的入口"**——面板模式不走 atelier 循环。
 
 **✅ 已探针验证的语言约束（2026-10-17 实测，cjc 1.2.0）**：
 
