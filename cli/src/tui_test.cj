@@ -1035,3 +1035,113 @@ func chatTui_compactCommandOnEmptySessionIsNoop() {
     tui.runCommand("/compact")
     @Expect(store.loadCompactions("sess_test_compact_empty").size, 0)
 }
+
+// ==================== 插话（steer）：回合进行中投递而非拒绝 ====================
+
+/**
+ * 卡住第一轮、记下它看到的最后一条用户消息的 Provider。
+ *
+ * 用途：给主线程留出「回合进行中」的窗口去投插话，并在第二轮验证
+ * 插话真的进了上下文（带「用户中途补充」标注）。
+ */
+class RecordingSteerProvider <: Provider {
+    // 每次调用收到的最后一条用户消息文本
+    let seen = ArrayList<String>()
+    private let gate = AtomicBool(false)
+    private let firstCallGate = AtomicBool(false)
+
+    public func name(): String { "recording-steer" }
+
+    private func lastUser(req: ChatRequest): String {
+        var t = ""
+        for (m in req.messages) {
+            match (m) {
+                case um: UserMessage => t = contentText(um.content)
+                case _ => ()
+            }
+        }
+        t
+    }
+
+    public func chat(req: ChatRequest): ChatResponse {
+        ChatResponse(AssistantMessage(ContentList.ofText("ok"), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0))
+    }
+
+    public func chatStreaming(req: ChatRequest): EventStream<ChatDelta, AssistantMessage> {
+        let stream = EventStream<ChatDelta, AssistantMessage>()
+        let text = this.lastUser(req)
+        this.seen.add(text)
+        let first = !this.firstCallGate.load()
+        this.firstCallGate.store(true)
+        spawn {
+            if (first) {
+                // 第一轮卡住：等测试投完插话再放行
+                var guard = 0
+                while (!this.gate.load() && guard < 400) {
+                    sleep(Duration.millisecond * 10)
+                    guard = guard + 1
+                }
+            }
+            let msg = AssistantMessage(ContentList.ofText("ok"), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0)
+            stream.emit(ChatDelta("", "", Some(msg.stopReason)))
+            stream.setResult(msg)
+        }
+        stream
+    }
+
+    public func release(): Unit { this.gate.store(true) }
+}
+
+// 回合进行中提交 → 进插话队列（而不是被拒绝），且下一轮模型调用能看到它
+@Test
+func chatTui_steerWhileBusyReachesNextModelCall() {
+    let provider = RecordingSteerProvider()
+    let store = MemorySessionStore()
+    let trustMgr = TrustManager()
+    let fake = FakeTerminal(ArrayList<KeyEvent>())
+    let tui = ChatTui("default", SlashCommandRegistry(trustMgr), AgentConfig.default(),
+        cliTestSpec(ToolRegistry(), store, trustMgr, SkillRegistry(), AgentRegistry(),
+            ProviderRegistry(), McpManager(), provider),
+        "sess_steer", "/tmp/atelier-tui-test-steer")
+
+    // 起一个回合（会被 provider 卡住）
+    tui.input = toRunes("第一句")
+    tui.submit(fake)
+    // 等回合真的起来（loop 登记 + busy 置位）
+    var guard = 0
+    while (!tui.busy.load() && guard < 200) {
+        sleep(Duration.millisecond * 10)
+        guard = guard + 1
+    }
+    @Expect(tui.busy.load(), true)
+
+    // 回合进行中再提交：应当进队列，而不是被拒绝
+    @Expect(tui.steerRunning("补充一句"), true)
+
+    provider.release()
+    var g2 = 0
+    while (tui.busy.load() && g2 < 500) {
+        sleep(Duration.millisecond * 10)
+        g2 = g2 + 1
+    }
+
+    // 插话必须真的到达模型：第二次调用看到的历史里应含「用户中途补充」
+    var found = false
+    for (t in provider.seen) {
+        if (t.contains("[用户中途补充]") && t.contains("补充一句")) {
+            found = true
+        }
+    }
+    @Expect(found, true)
+}
+
+// 没有进行中的回合时，steerRunning 必须如实返回 false（不能假装投递）
+@Test
+func chatTui_steerWithoutRunningTurnReturnsFalse() {
+    let trustMgr = TrustManager()
+    let tui = ChatTui("default", SlashCommandRegistry(trustMgr), AgentConfig.default(),
+        cliTestSpec(ToolRegistry(), MemorySessionStore(), trustMgr, SkillRegistry(),
+            AgentRegistry(), ProviderRegistry(), McpManager(), StubProvider()),
+        "sess_idle", "/tmp/atelier-tui-test-idle")
+    @Expect(tui.steerRunning("没人收"), false)
+}

@@ -443,6 +443,19 @@ public class ChatTui {
     private let askLock = Mutex()
     /** 回合是否在后台线程里进行中（防止并发提交写同一份历史）。 */
     let busy = AtomicBool(false)
+    /**
+     * 本回合正在跑的循环（回合开始时登记，结束时清空）。
+     *
+     * 为什么要留一个引用：插话（`steer`）的队列挂在 **loop 实例**上，
+     * 而 loop 原本是 `runTurn` 里的局部变量——主线程的 `submit` 拿不到它，
+     * 就没法在回合进行中投递。
+     *
+     * 用 `Mutex` 而不是 `AtomicBool` 一类：读写的是引用且要判空，
+     * 需要和 `busy` 的置位在同一临界区里，否则「busy 为真但 loop 还没登记」
+     * 那一瞬间的插话会静默丢失。
+     */
+    private let loopLock = Mutex()
+    private var loop: ?AgentLoop = None
     /** 本回合的实时活动（工具/子调用/脚本输出），只在回合进行中显示。 */
     private let activity = TurnActivity()
 
@@ -723,27 +736,41 @@ public class ChatTui {
             return
         }
         if (this.busy.load()) {
-            // 回合仍在进行：并发提交会让两个回合写同一份历史
-            this.status = "上一轮仍在进行中（等它结束，或 Ctrl+C 退出）"
+            // 回合进行中：**不新开回合**（那会让两个回合写同一份历史），
+            // 而是把这句话投给正在跑的循环，下一次模型调用时可见。
+            // 语义见 AgentLoop.steer：不打断正在执行的工具，带「用户中途补充」标注。
+            match (this.steerRunning(line)) {
+                case true =>
+                    this.status = "已插话（下一步模型调用时生效）"
+                case false =>
+                    // 循环尚未登记（回合刚启动的极短窗口）或已结束：
+                    // 不能假装投递成功，如实告知
+                    this.status = "上一轮仍在进行中，插话未投递（稍后重试）"
+            }
             this.render(t)
             return
         }
 
         this.messages.add(UserMessage(ContentList.ofText(line), 0))
         this.status = "生成中…"
+        // runtime 在**主线程**建并登记，然后才置 busy 与 spawn。
+        // 顺序很重要：反过来（先置 busy 再由后台线程登记 loop）会留一个窗口——
+        // 那一刻 busy 已为真、loop 还是空，插话进来就会静默丢掉。
+        let runtime = this.makeRuntime(t)
+        synchronized(this.loopLock) { this.loop = runtime }
         this.busy.store(true)
         this.render(t)
         let oldMsgs = this.messages
         let sessionId = this.sessionId
         // 回合跑在后台线程：主线程必须继续读键盘，否则信任闸门的询问永远等不到回答
         // （readKey 是阻塞读，主线程一旦进入等待循环就再也不处理输入）
-        spawn { this.runTurn(t, sessionId, oldMsgs) }
+        spawn { this.runTurn(t, sessionId, oldMsgs, runtime) }
     }
 
     /** 后台回合：等待流收敛、收尾、落库、重绘。 */
-    private func runTurn(t: Terminal, sessionId: String, oldMsgs: ArrayList<Message>): Unit {
+    private func runTurn(t: Terminal, sessionId: String, oldMsgs: ArrayList<Message>,
+        runtime: AgentLoop): Unit {
         try {
-            let runtime = this.makeRuntime(t)
             let stream = runtime.chatWithSessionId(sessionId, oldMsgs, SessionEnvironment())
             var waited: Int64 = 0
             var lastPaint = MonoTime.now()
@@ -809,7 +836,25 @@ public class ChatTui {
             }
             this.render(t)
         } finally {
+            // 先清 loop 再清 busy：反过来的话，介于两者之间的插话会投给已结束的循环
+            synchronized(this.loopLock) { this.loop = None }
             this.busy.store(false)
+        }
+    }
+
+    /**
+     * 把一句话投给正在跑的回合（不新开回合）。
+     *
+     * @return 真的投递了才 true。拿不到循环时返回 false——
+     *         不能假装成功，否则用户以为插上了其实没上。
+     */
+    func steerRunning(text: String): Bool {
+        let target = synchronized(this.loopLock) { this.loop }
+        match (target) {
+            case Some(l) =>
+                l.steer(this.sessionId, UserMessage(ContentList.ofText(text), 0))
+                true
+            case None => false
         }
     }
 
