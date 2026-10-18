@@ -22,10 +22,11 @@
 | 文档 | 说明 |
 |------|------|
 | [消息模型](messages.md) | Message 密封接口 + 4 种角色 + ContentBlock |
-| [事件流](events.md) | AgentEvent 密封接口 + 12 种事件（含 Suspend 挂起）+ EventStream |
+| [事件流](events.md) | AgentEvent 密封接口 + 14 种事件（含 Suspend 挂起）+ EventStream |
 | [工具](tools.md) | Tool 接口 + 内置工具 + 自定义 + MCP + Agent-as-Tool |
 | [Provider](providers.md) | Provider 接口 + OpenAI/Anthropic/Ollama + 上下文窗口 |
 | [Hook](hooks.md) | 决策型拦截器：观察/改写/短路 Agent 生命周期 |
+| [SDK 可替换点](extensibility.md) | 换掉整套策略：信任判定 / 压缩 / Agent 循环 |
 
 ## 进阶功能
 

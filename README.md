@@ -173,7 +173,7 @@ command = "npx @playwright/mcp"
 | [集成指南](docs/integration.md) | 库模式 / HTTP 挂载 / CLI / Docker |
 | [配置参考](docs/configuration.md) | TOML 配置 + AgentConfig 字段 |
 | [消息模型](docs/messages.md) | 4 种角色 + ContentBlock |
-| [事件流](docs/events.md) | 12 种事件（含 Suspend 挂起）+ EventStream |
+| [事件流](docs/events.md) | 14 种事件（含 Suspend 挂起）+ EventStream |
 | [工具开发](docs/tools.md) | 内置工具 + 自定义 + MCP |
 | [Provider](docs/providers.md) | OpenAI / 自定义 Provider |
 | [会话管理](docs/sessions.md) | 树模型 + 持久化 |

@@ -149,3 +149,18 @@ let hooks = ArrayList<Hook>([
 - [集成指南](integration.md) —— 库模式 / HTTP / CLI 中的完整用法
 - [架构设计 8.4 节](design.md) —— 接口定义与融合顺序
 - [信任闸门](trust.md) —— beforeTool 与信任判定的先后关系
+
+## 与「可替换点」的区别
+
+Hook 是**生命周期拦截**（观察 / 改写 / 短路），每次调用都会过一遍；
+另有一类是**契约级替换**（把整个策略换掉），装配时注入一次即可：
+
+| 类型 | 例子 | 装配 |
+|---|---|---|
+| Hook（本文） | `beforeTool` 拦截某类操作 | 构造时注入 `ArrayList<Hook>` |
+| 可替换点 | `TrustGate` / `Compactor` / `AgentLoop` | `HarnessSpec.with*` |
+
+**判据**：需要"每次调用都参与判断"用 Hook；需要"换掉一整套策略"用可替换点。
+两者不冲突——例如信任判定可换成 `TrustGate`，同时在 `beforeTool` 里做审计。
+
+详见 [extensibility.md](extensibility.md)。

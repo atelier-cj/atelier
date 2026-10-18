@@ -227,7 +227,7 @@ interface AgentEvent {
 }
 ```
 
-**12 种事件**，按层级嵌套组织：
+**14 种事件**，按层级嵌套组织：
 
 ```
 Agent (start / end)
@@ -236,6 +236,8 @@ Agent (start / end)
        └── ToolExecution (start / update / end)
 Suspend (挂起：本次 run 到此为止，等外部结果)
 Compaction (独立事件)
+  ├── CompactionStart / CompactionEnd  (事务括弧，成对)
+  └── Compaction                       (一次压缩的汇总)
 ```
 
 **事件层级**：一次 `Run` 由 `AgentStart`/`AgentEnd` 包住，中间是若干 `Turn`（`TurnStart`/`TurnEnd`），每个 Turn 里有一条流式消息（`MessageStart` → 若干 `MessageUpdate` → `MessageEnd`）和随后的工具执行（`ToolExecutionStart` → `ToolExecutionUpdate` → `ToolExecutionEnd`）。`Compaction` 在上下文压缩发生时独立发出。
@@ -253,7 +255,9 @@ Compaction (独立事件)
 | `ToolExecutionUpdateEvent` | `toolCallId`, `progress` | 工具执行进度 |
 | `ToolExecutionEndEvent` | `toolCallId`, `result`, `isError` | 工具执行完成 |
 | `SuspendEvent` | `requests`（`ExternalRequest` 列表） | 本次 run 挂起，等外部结果；带结果发起下一次 run 继续 |
-| `CompactionEvent` | `reason`, `tokensBefore`, `tokensAfter` | 上下文压缩已发生 |
+| `CompactionStartEvent` | `compactionId`, `trigger`, `tokensBefore` | 压缩事务开始 |
+| `CompactionEndEvent` | `compactionId`, `trigger`, `messagesBefore`, `messagesAfter`, `tokensAfter` | 压缩事务结束（与 Start 成对；`before==after` 表示尝试过但没替换） |
+| `CompactionEvent` | `reason`, `tokensBefore`, `tokensAfter` | 上下文压缩已发生（展示用汇总） |
 
 **EventStream 泛型**：事件通过 `EventStream<T, R>` 传递，T 是事件类型，R 是流终结时的结果：
 
@@ -885,7 +889,10 @@ struct ToolResult {
 | `bash` | 串行 | 过闸 | 流式输出、超时、取消 |
 | `grep` | 并行 | 放行 | 正则搜索 |
 | `glob` | 并行 | 放行 | 文件模式匹配 |
+| `paths` | 并行 | 放行 | 路径解析辅助（绝对化 / 通配展开） |
 | `todo` | 串行 | 放行 | 待办列表管理（有状态） |
+| `ask_user` | 串行 | 放行 | 结构化提问（审批 / 选择 / 表单） |
+| `use_skills` | 并行 | 放行 | 按需加载技能完整指令（渐进披露） |
 
 MCP 工具通过 `MCPToolWrapper` 适配 `Tool` 接口，运行时动态发现。
 
@@ -1314,12 +1321,18 @@ Atelier 是一个**面向业务集成的 Agent Harness**，其核心价值在于
 | 扩展面 | 接口/类型 | 注入方式 | 官方实现 |
 |---|---|---|---|
 | LLM Provider | `llm_api.provider.Provider` | `ProviderRegistry.register` | OpenAI/Anthropic/Ollama/Echo |
-| 工具 | `Tool`（name/schema/execute/模式） | `ToolRegistry.register`（同名覆盖/remove） | 内置 8 + ask_user/send_message/父端调度 |
+| 工具 | `Tool`（name/schema/execute/模式） | `ToolRegistry.register`（同名覆盖/remove） | 内置 10 + send_message/父端调度 |
 | 会话存储 | `SessionStore` | 自写实现 | Memory / Storm(bstorm) |
 | 横切 Hook | `Hook`（6 相位，全默认实现） | AgentRuntime 构造注入 | — |
+| **信任判定** | `type TrustGate`（函数类型） | `HarnessSpec.withTrustGate` | `pathTrustGate(trustManager)` |
+| **压缩策略** | `interface Compactor` | `HarnessSpec.withCompactor` | `BasicCompactor` / `NoopCompactor` |
+| **Agent 循环** | `interface AgentLoop` | `HarnessSpec.withLoopFactory` + `createLoop` | `AgentRuntime` |
 | Agent 定义 | `AgentConfig` + `AgentRegistry` | 代码/TOML 注册 | — |
 | Skill | `Skill` + `SkillRegistry` | `loadDirectory` | — |
 | MCP 服务 | `McpServerConfig` | `McpManager.addServer`（运行时） | stdio/http |
+
+> 三个加粗项是**契约级替换**（整个策略/循环换掉），与 Hook 的**生命周期拦截**不同。
+> 详细边界与选择判据见 [extensibility.md](extensibility.md)。
 
 ### 注入点（函数/回调）
 
@@ -1343,8 +1356,10 @@ Atelier 是一个**面向业务集成的 Agent Harness**，其核心价值在于
   先查它、命中就不再问宿主——因此不必改 llm_api 的密封 `Message` 接口
 - `PromptSegmentContributor`（atelier.context）：自定义系统提示段（租户/合规/元数据），
   追加于 [Session Context] 后；AgentRuntime/SessionLoop 构造注入
-- `ProviderMiddleware`（atelier.agent）：请求级中间件链包 Provider（重试/路由/限流/观测），
-  按序 wrap 先注入者最外层；Hook 是 run/turn/tool 粒度，管不到单次模型请求
+- `ProviderMiddleware`（atelier.agent）：请求级中间件链包 Provider（路由/限流/观测），
+  按序 wrap 先注入者最外层；Hook 是 run/turn/tool 粒度，管不到单次模型请求。
+  ⚠️ **只包 `Provider.chat()`（非流式）**：`chatStreaming()` 走 provider 内部自己的
+  spawn 路径，不经过中间件链——想在流式上做重试/观测需改 provider 实现
 - `EventBus`（atelier.agent）：进程级事件发布/订阅（跨会话审计/监控/UI 聚合）；
   订阅 filter 谓词 + 退订 + 订阅者异常逐个容错；AgentRuntime/SessionLoop 构造挂载
 
@@ -1352,7 +1367,8 @@ Atelier 是一个**面向业务集成的 Agent Harness**，其核心价值在于
 
 - Message/ContentBlock 密封：新消息角色需改 llm_api core（勿扩；metadata 通道已覆盖
   「随消息携带业务数据」需求）
-- 信任策略内嵌 `TrustManager`/`gate.cj`：策略级替换未抽象——需要时用 `beforeTool` hook
-  整体拦截（Deny/ShortCircuit/Modify）
+- ~~信任策略内嵌 `TrustManager`/`gate.cj`：策略级替换未抽象~~ **已抽象**：
+  用 `HarnessSpec.withTrustGate(g)` 注入任意 `(Tool, String, String) -> TrustDecision`；
+  不注入时走默认工厂 `pathTrustGate(trustManager)`（等价于旧行为）
 - 跨进程子传输绑定 `SubprocessTransport` 具体类：等 ACP v2 稳定后抽象（候选清单挂起项）
 - 审计等横切建议用 EventBus 订阅而非 hook（hook 无跨会话全局视角）

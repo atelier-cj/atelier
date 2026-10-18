@@ -114,3 +114,35 @@ curl -X POST http://localhost:8080/trust \
 ## 钩子联动
 
 信任检查发生在 `beforeTool` 钩子之前。即使钩子通过，信任闸门仍可拦截。
+
+## 替换判定策略（`TrustGate`）
+
+路径判定是**默认策略**，不是硬编码。整块判定可以换掉：
+
+```cangjie
+// 契约：函数类型，三个入参一个决策
+public type TrustGate = (Tool, String, String) -> TrustDecision
+//                        tool  workDir sessionId
+
+public enum TrustDecision { | Allowed | NeedsApproval | Denied }
+```
+
+```cangjie
+// 装配时注入（不注入则走默认 pathTrustGate(trustManager)）
+let spec = HarnessSpec(...).withTrustGate({ tool, workDir, sessionId =>
+    if (tool.executionMode() == ToolExecutionMode.Parallel) {
+        TrustDecision.Allowed          // 只读工具一律放行
+    } else {
+        TrustDecision.NeedsApproval
+    }
+})
+```
+
+**为什么是函数类型而不是 interface**：它无状态、单方法。
+（有状态的扩展点——如 `Compactor` / `AgentLoop`——才用 interface，
+理由不是语言限制，而是状态藏在闭包里对开发者不友好。）
+
+**边界**：`TrustGate` 只回答"该不该问"，**不负责问**。
+提问由运行时经 `askFn` 通道发出（结构化提问），与本文上文的审批流程是同一套。
+
+完整说明见 [extensibility.md](extensibility.md)。

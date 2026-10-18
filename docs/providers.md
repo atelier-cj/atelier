@@ -362,3 +362,25 @@ thinkingLevel = "high"
 ```
 
 `thinkingLevel` 可选值：`low` / `medium` / `high`。运行时透传给 OpenAI `reasoning_effort` 参数。
+
+## 重试归谁（重要）
+
+传输级重试**不在 atelier**，而在 `llm_api` 的 `ResilientHttpClient`：
+
+| 错误类型 | 处理 |
+|---|---|
+| 连接级失败（`SocketException` / `ConnectionException`） | 换新连接重试 **1** 次 |
+| 429 / 瞬时 5xx | 退避重试 **3** 次（默认，`statusRetries`） |
+| `400` / 解析失败 / auth 失败 | **不重试**，直接抛出（应用级错误重试无意义） |
+
+三个内置 provider（OpenAI / Anthropic / Ollama）的 `chatStreaming()` 都走
+`ResilientHttpClient.send`，因此**流式调用也享受上述重试**。
+
+**atelier 侧只处理另一种失败**：超上下文窗口 —— 那时压掉历史头部再重试，
+次数受 `CompactionConfig.maxOverflowRetries` 限制。因为只有循环知道怎么压消息。
+
+> ⚠️ **`ProviderMiddleware` 只包 `chat()`（非流式）**，`chatStreaming()` 不经过
+> 中间件链。想在流式上做重试/观测，需改 provider 实现而非加 middleware。
+
+> ⚠️ **契约缺口**：`Provider` 接口本身没有声明"重试归实现负责"这条归属，
+> 自实现的 Provider 默认**没有**传输级重试。

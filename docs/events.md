@@ -12,7 +12,7 @@ interface AgentEvent {
 }
 ```
 
-## 12 种事件
+## 14 种事件
 
 ```
 Agent (start / end)
@@ -21,7 +21,14 @@ Agent (start / end)
        └── ToolExecution (start / update / end)
 Suspend (挂起：本次 run 到此为止，等外部结果)
 Compaction (独立事件)
+  ├── CompactionStart  (事务开始)
+  ├── CompactionEnd    (事务结束，与 Start 成对)
+  └── Compaction       (一次压缩的汇总，用于展示)
 ```
+
+> **`CompactionStart` / `CompactionEnd` 必须成对**：同一 `compactionId` 的括弧要闭合。
+> 消费端据此显示"正在压缩"的进度态。`messagesBefore == messagesAfter` 表示
+> "尝试过但没替换"——括弧照样闭合，不留悬挂状态。
 
 ### AgentStartEvent
 
@@ -112,6 +119,24 @@ Compaction (独立事件)
 本次运行挂起：需要外部结果（前端执行工具、用户确认/作答）才能继续。**挂起不是失败**——
 历史停在 `assistant(tool_calls)`，调用方带上结果发起下一次 run 即可继续（本次 run 的答复随
 消息 `metadata` 回传，见 [消息模型](messages.md)）；见到本事件后不应再期待后续回合。
+
+### CompactionStartEvent
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `compactionId` | `String` | 本次压缩的事务 id（与 End 配对用） |
+| `trigger` | `String` | 触发原因（`pressure` / `overflow` / `manual`） |
+| `tokensBefore` | `Int64` | 压缩前 Token |
+
+### CompactionEndEvent
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `compactionId` | `String` | 与 Start 相同 |
+| `trigger` | `String` | 同上 |
+| `messagesBefore` | `Int64` | 压缩前消息条数 |
+| `messagesAfter` | `Int64` | 压缩后消息条数（== before 表示没替换） |
+| `tokensAfter` | `Int64` | 压缩后 Token |
 
 ### CompactionEvent
 
