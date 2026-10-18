@@ -4,7 +4,7 @@ Atelier 实现 [A2A (Agent2Agent) v1.0](https://a2a-protocol.org/) 的 **Agent �
 **Client 侧（远端子代理）**：协议层复用 `a2a` 包（[a2a-cj](../a2a-cj)），Atelier 侧负责把
 AgentRuntime / 会话持久化 / 信任闸门 / 提问通道接入其执行器与流式事件。
 
-- 服务端：`atelier a2a [agent] [port]` 起一个 A2A Agent（Agent Card 发现 + JSON-RPC 绑定 + SSE 流式），
+- 服务端：`atelier a2a [agent] [port]` 起一个 A2A Agent（Agent Card 发现 + **JSON-RPC 与 HTTP+JSON 双绑定** + SSE 流式 + 推通知），
   实现 `a2a.A2aExecutor`（`src/a2a/bridge.cj`）；
 - 客户端：把远端 A2A agent 当作可持续子代理驱动（`src/agent/remote_a2a_subagent.cj`），
   父侧既有 `subagent_*` 工具零改动可用。
@@ -19,7 +19,7 @@ cjpm build -j 16
 # 2. 起服务（默认端口 8931；工作目录 = 当前目录）
 cli.app a2a [agent] [port]
 
-# 3. 发现 + 调用（JSON-RPC 绑定，流式为 SSE）
+# 3. 发现 + 调用（JSON-RPC 绑定；HTTP+JSON 亦支持，见「能力矩阵」的传输绑定行）
 curl -s http://127.0.0.1:8931/.well-known/agent-card.json
 curl -sN -H 'Content-Type: application/json' -H 'A2A-Version: 1.0' \
   -d '{"jsonrpc":"2.0","id":1,"method":"SendStreamingMessage","params":{"message":{"messageId":"m1","role":"ROLE_USER","parts":[{"text":"你好"}]}}}' \
@@ -42,7 +42,8 @@ curl -sN -H 'Content-Type: application/json' -H 'A2A-Version: 1.0' \
 | `SubscribeToTask` | ✅ | 任务级订阅：中断态后继续挂流，终态关流 |
 | `PushNotificationConfig` 系列 | ❌ | 未声明（`pushNotifications=false`），a2a-cj 已有 HTTP 投递器可后续开启 |
 | `GetExtendedAgentCard` / 认证 | ❌ | 未声明（无鉴权场景） |
-| gRPC 绑定 | ❌ | 仅 JSON-RPC（`a2a` 包另有 HTTP+JSON，可按 `bindings` 开启） |
+| **传输绑定** | JSON-RPC ✅ + HTTP+JSON ✅ | CLI 同时声明两种（`cli/src/a2a_cmd.cj` 的 `bindings`），客户端按 `supportedInterfaces` 偏好自选（JSON-RPC 在前）；库层（`a2a-cj`）两者都实现，语义收敛到同一处 |
+| gRPC 绑定 | ❌ | 规范 §1.3 把传输绑定列为并列的可选项（JSON-RPC / gRPC / HTTP+JSON / 自定义），**不要求全实现**；未实现不影响合规 |
 
 ## 概念映射（A2A ↔ Atelier）
 
