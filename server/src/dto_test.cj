@@ -3,6 +3,13 @@ package server
 import std.collection.*
 import atelier.util.{toJsonString, fromJsonString}
 import atelier.interaction.*
+import atelier.agent.*
+import atelier.tool.ToolRegistry
+import atelier.tool.McpManager
+import atelier.trust.TrustManager
+import atelier.skill.SkillRegistry
+import atelier.provider.ProviderRegistry
+import atelier.session.MemorySessionStore
 import jsonvalue.*
 
 func chatMsg(role: String, content: String): MessageDTO { MessageDTO(role, content) }
@@ -144,3 +151,65 @@ func inputFrame_carriesWholeRequest() {
     @Assert(json.contains("\"prod\""))
 }
 
+
+// ==================== 运行时状态：handler 必须让所有请求共享同一张状态表 ====================
+//
+// 背景：/agent/run 这类端点每次请求都新建 loop。若状态表随 loop 新建，
+// status 永远是 Idle —— 客户端刷新或切换会话后无法知道"这个会话还在跑吗"。
+// 所以状态表必须由 handler 持有，并在建 handler 时就注入装配束。
+
+@Test
+func handler_sharesOneStatusRegistryAcrossRequests() {
+    let spec = HarnessSpec(tools: ToolRegistry(), store: MemorySessionStore(),
+        trust: TrustManager(), skills: SkillRegistry(), agents: AgentRegistry(),
+        providers: ProviderRegistry(), mcp: McpManager())
+    let h1 = AtelierHttpHandler(spec)
+    let h2 = AtelierHttpHandler(h1.components())   // 模拟"从已有 handler 派生"
+    // 两个 handler 看到的必须是同一张表（否则状态各记各的）
+    let r1 = match (h1.components().statusRegistry) {
+        case Some(x) => x
+        case None => return @Fail("handler1 未注入 statusRegistry")
+    }
+    let r2 = match (h2.components().statusRegistry) {
+        case Some(x) => x
+        case None => return @Fail("handler2 未注入 statusRegistry")
+    }
+    // 同一张表的判据：在 r1 上标记，r2 必须看得到
+    r1.transition("probe", AgentStatus.Running)
+    match (r2.statusOf("probe")) {
+        case AgentStatus.Running => @Expect(true, true)
+        case AgentStatus.Idle => @Fail("两个 handler 用的不是同一张状态表")
+    }
+}
+
+@Test
+func handler_reusesRegistryProvidedByHost() {
+    let mine = AgentStatusRegistry()
+    let spec = HarnessSpec(tools: ToolRegistry(), store: MemorySessionStore(),
+        trust: TrustManager(), skills: SkillRegistry(), agents: AgentRegistry(),
+        providers: ProviderRegistry(), mcp: McpManager())
+        .withStatusRegistry(mine)
+    let h = AtelierHttpHandler(spec)
+    let got = match (h.components().statusRegistry) {
+        case Some(r) => r
+        case None => return @Fail("registry 丢失")
+    }
+    // 宿主注入的那张表必须被复用：在 mine 上标记，got 要能看到
+    mine.transition("probe2", AgentStatus.Running)
+    match (got.statusOf("probe2")) {
+        case AgentStatus.Running => @Expect(true, true)
+        case AgentStatus.Idle => @Fail("宿主注入的 registry 被替换了")
+    }
+}
+
+// 状态 DTO 的 JSON 形状（客户端按 running[] 解析）
+@Test
+func sessionStatusResponse_serializesRunningList() {
+    let resp = SessionStatusResponse(ArrayList<SessionStatusItem>([
+        SessionStatusItem("s1", "running"),
+        SessionStatusItem("s2", "running")]))
+    let json = toJsonString(resp)
+    @Expect(json.contains("\"running\""), true)
+    @Expect(json.contains("\"s1\""), true)
+    @Expect(json.contains("\"s2\""), true)
+}

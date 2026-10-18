@@ -91,6 +91,25 @@ public class AgentStatusRegistry {
         changed
     }
 
+    /**
+     * 当前处于 `Running` 的会话 id 列表（顺序不保证）。
+     *
+     * 宿主用它回答「现在有哪些会话在跑」——刷新页面后恢复指示、
+     * 或切换会话前判断目标是否正忙。
+     */
+    public func runningSessions(): ArrayList<String> {
+        synchronized(this.lock) {
+            let out = ArrayList<String>()
+            for ((sid, st) in this.statuses) {
+                match (st) {
+                    case AgentStatus.Running => out.add(sid)
+                    case AgentStatus.Idle => ()
+                }
+            }
+            out
+        }
+    }
+
     /** 忘记某个会话（会话被删除/回收时调，避免表无限增长） */
     public func forget(sessionId: String): Unit {
         synchronized(this.lock) {

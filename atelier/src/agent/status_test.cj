@@ -337,3 +337,27 @@ class ThrowingProvider <: Provider {
         throw Exception("provider boom")
     }
 }
+
+// runningSessions 只列运行中的（宿主据此回答"现在有哪些会话在跑"）
+@Test
+func registry_runningSessionsListsOnlyRunning() {
+    let r = AgentStatusRegistry()
+    r.transition("a", AgentStatus.Running)
+    r.transition("b", AgentStatus.Running)
+    r.transition("c", AgentStatus.Running)
+    r.transition("b", AgentStatus.Idle)      // b 收尾
+    let got = r.runningSessions()
+    @Expect(got.size, Int64(2))
+    @Expect(got.contains("a"), true)
+    @Expect(got.contains("c"), true)
+    @Expect(got.contains("b"), false)
+}
+
+// 全部空闲时返回空表（不是 null、不抛异常）
+@Test
+func registry_runningSessionsEmptyWhenAllIdle() {
+    let r = AgentStatusRegistry()
+    r.transition("x", AgentStatus.Running)
+    r.transition("x", AgentStatus.Idle)
+    @Expect(r.runningSessions().size, Int64(0))
+}

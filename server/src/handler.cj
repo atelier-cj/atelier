@@ -38,9 +38,22 @@ public class AtelierHttpHandler {
     private let spec: HarnessSpec
     // 待答提问：key = UserRequest.id（确定性），答复按 id 精确投递 —— 并发请求下不能"投给任意一个"
     let pendingAsks = HashMap<String, PendingAsk>()
+    /**
+     * 运行时状态持有者：**比单次请求长寿**，故由 handler 持有并注入每个请求新建的 loop。
+     *
+     * 为什么必须在 handler 层：`/agent/run` 这类一次性端点每次请求都新建 runtime，
+     * 若 registry 随 runtime 新建，状态就永远是 Idle——这也正是此前 status 失效的原因。
+     * 现在同一 handler 的所有请求共享一张状态表，客户端据此知道"这个会话还在跑吗"。
+     */
+    private let statusRegistry: AgentStatusRegistry
 
     public init(spec: HarnessSpec) {
-        this.spec = spec
+        // 宿主已注入则复用之（同一进程里多个 handler 共享同一张表）
+        this.statusRegistry = match (spec.statusRegistry) {
+            case Some(r) => r
+            case None => AgentStatusRegistry()
+        }
+        this.spec = spec.withStatusRegistry(this.statusRegistry)
     }
 
     /** 本次装配（宿主想换组件时先派生新的装配束，再建 handler） */
@@ -58,6 +71,7 @@ public class AtelierHttpHandler {
         distributor.register("/session/fork", { ctx => h.handleSessionFork(ctx) })
         distributor.register("/session/export", { ctx => h.handleSessionExport(ctx) })
         distributor.register("/sessions", { ctx => h.handleSessionList(ctx) })
+        distributor.register("/sessions/running", { ctx => h.handleSessionsRunning(ctx) })
         distributor.register("/trust", { ctx => h.handleTrust(ctx) })
         distributor.register("/health", { ctx => h.handleHealth(ctx) })
         distributor.register("/v1/chat/completions", { ctx => h.handleV1Chat(ctx) })
@@ -235,6 +249,20 @@ public class AtelierHttpHandler {
         let items = ArrayList<SessionItem>()
         for (s in sessions) { items.add(SessionItem(s.id, s.model)) }
         jsonResponse(ctx, 200, toJsonString(SessionListResponse(items)))
+    }
+
+    /**
+     * 当前正在跑的会话列表（**瞬时事实，重启即空**）。
+     *
+     * 客户端用它做两件事：① 刷新页面后恢复"哪个会话还在生成"的指示；
+     * ② 切换会话前判断目标是否正忙（正忙时再发 `/agent/run` 会与进行中的回合抢历史）。
+     */
+    private func handleSessionsRunning(ctx: HttpContext): Unit {
+        let items = ArrayList<SessionStatusItem>()
+        for (sid in this.statusRegistry.runningSessions()) {
+            items.add(SessionStatusItem(sid, "running"))
+        }
+        jsonResponse(ctx, 200, toJsonString(SessionStatusResponse(items)))
     }
 
     private func handleSessionFork(ctx: HttpContext): Unit {

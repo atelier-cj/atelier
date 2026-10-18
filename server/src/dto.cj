@@ -663,3 +663,38 @@ func fieldValueOf(f: UserField, raw: String): JsonValue {
         case _ => JsonValue.String(raw)
     }
 }
+
+/**
+ * 单个会话的运行时状态。
+ *
+ * 为什么单独给一个端点而不是塞进 `/sessions`：`/sessions` 是**落库的会话列表**
+ * （持久事实，机器重启后仍在），而状态是**内存中的瞬时事实**（重启即回到 Idle）。
+ * 混在一起会让客户端误以为"落盘了但显示运行中"是异常。
+ */
+public struct SessionStatusItem <: JsonSerializable {
+    public let id: String
+    /** `running` / `idle` */
+    public let status: String
+
+    public init(id: String, status: String) { this.id = id; this.status = status }
+
+    public func toJson(w: JsonWriter): Unit {
+        w.startObject()
+        w.writeName("id").writeValue(this.id)
+        w.writeName("status").writeValue(this.status)
+        w.endObject()
+    }
+}
+
+/** 一批会话的运行时状态（只含**当前在跑**的会话）。 */
+public struct SessionStatusResponse <: JsonSerializable {
+    public let running: ArrayList<SessionStatusItem>
+
+    public init(running: ArrayList<SessionStatusItem>) { this.running = running }
+
+    public func toJson(w: JsonWriter): Unit {
+        w.startObject()
+        w.writeName("running").writeValue(this.running)
+        w.endObject()
+    }
+}
