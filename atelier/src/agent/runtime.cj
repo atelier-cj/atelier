@@ -1457,6 +1457,16 @@ public open class AgentRuntime <: AgentLoop {
                                     scope.verifyPasses++
                                     log.warn("agent announced completion, run verify pass (${scope.verifyPasses}/${this.config.maxVerifyPasses})", Array<Attr>())
                                     scope.messages.add(UserMessage(ContentList.ofText(verifyBeforeFinishPrompt()), 0))
+                                    // **刻意不设 resumingSameTurn**：自验是"模型已宣布完成、
+                                    // 现在进入核对阶段"，那是一次新的推理任务（新提示、新产出
+                                    // 目标），按新回合计 —— 于是下一轮会正常推进 turnCount、
+                                    // 重置本回合的续跑预算。
+                                    // 对照截断续跑：那是"同一条回复没写完"，模型仍在产出同一份
+                                    // 内容，所以不推进回合计数、不重置续跑预算（否则
+                                    // maxLengthContinuations 形同虚设）。
+                                    // 两者语义不同，因此**不对称是对的**；整轮上界由 maxTurns 兜住。
+                                    // 见 RunScope.lengthContinuations 的注释与
+                                    // runtime_verify_turn_semantics 的锁定用例。
                                     continue
                                 case TurnVerdict.End => ()
                             }
