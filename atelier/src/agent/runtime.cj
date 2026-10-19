@@ -768,9 +768,22 @@ public open class AgentRuntime <: AgentLoop {
      * 决策交给 `Compactor`（它回答"压不压、切哪、预算多少"），
      * 而时序（括弧/台账/互斥）留在运行时保证跨实现一致。
      */
+    /**
+     * 请求前的上下文压缩。
+     *
+     * **必须检查取消标志**：压缩内部是一次**同步**的摘要子调用（provider 往返，
+     * 几十秒量级），期间没有任何检查点。取消在语义上是"在当前检查点尽快收敛"，
+     * 若压缩不检查，用户按下取消后仍要等完整一轮摘要往返 —— 表现为"取消没反应"。
+     *
+     * 两个检查点：
+     * - 进入前：已取消就整段跳过（连摘要都不发，省一次计费往返）；
+     * - 摘要返回后：压缩结果不再写回历史（历史保持原样，按已取消收尾）。
+     *
+     * 跳过压缩不等于跳过错觉：历史没有被改写，请求照常按原历史发出/收尾。
+     */
     private func compactBeforeRequest(scope: RunScope, sessionId: String,
         requestModel: String, systemText: String, tools: ArrayList<OpenAITool>,
-        log: Logger): Unit {
+        cancelFlag: AtomicBool, log: Logger): Unit {
         var measureMessages = scope.messages
         if (this.compactionEnabledFor()) {
             let cc = this.compactionConfig()
@@ -792,6 +805,11 @@ public open class AgentRuntime <: AgentLoop {
                 case bc: BasicCompactor => bc.shouldCompactWith(measureMessages, route, cc)
                 case other => other.shouldCompact(measureMessages, route)
             }
+            // 已取消：不再发起摘要往返
+            if (cancelFlag.load()) {
+                log.info("compaction skipped: run cancelled before summary call", Array<Attr>())
+                return
+            }
             match (decision) {
                 case CompactDecision.Skip(reason) =>
                     // 只在"算不出预算"这类配置问题上留痕一次；
@@ -806,10 +824,17 @@ public open class AgentRuntime <: AgentLoop {
                     let compactor = this.compactor
                     let compactionRuntime = CompactionRuntime(this.provider, requestModel,
                         systemText, tools, cc)
-                    scope.messages = this.compactBracketed(plan.trigger, sessionId,
+                    let compacted = this.compactBracketed(plan.trigger, sessionId,
                         scope.messages, total, log, { msgs, _ =>
                         compactor.compact(msgs, plan, compactionRuntime)
                     })
+                    // 摘要期间被取消：结果不写回历史（保持原样），随后的取消检查点
+                    // 会按"已取消"收尾 —— 免得把一次没人要的压缩结果留在历史里
+                    if (cancelFlag.load()) {
+                        log.info("compaction result discarded: run cancelled during summary call", Array<Attr>())
+                        return
+                    }
+                    scope.messages = compacted
             }
         }
     }
@@ -1256,7 +1281,7 @@ public open class AgentRuntime <: AgentLoop {
                             // 钩子改写的 messages 才是本次请求的真实输入，压缩必须针对它判定。
                             // 窗口按 chatReq.model 算：钩子可能把请求路由到另一个（可能更小的）模型。
                             this.compactBeforeRequest(scope, sessionId, chatReq.model,
-                                chatReq.systemPrompt, chatReq.tools, log)
+                                chatReq.systemPrompt, chatReq.tools, cancelFlag, log)
                             // 压缩改写的是 scope.messages；请求必须一并跟上，否则发出去的仍是长历史
                             chatReq = ChatRequest(chatReq.model, scope.messages, chatReq.temperature,
                                 chatReq.maxTokens, chatReq.reasoningEffort, chatReq.tools, chatReq.extra,
