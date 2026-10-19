@@ -142,10 +142,6 @@ public open class AgentRuntime <: AgentLoop {
     private let hooks: ArrayList<Hook>
     // 结构化提问（None = 该宿主没有交互通道，提问即取消）；用它可以返回 Pending 让 run 挂起
     private let askFn: Option<AskFn>
-    // 本次 run 的恢复答复（chatWithEnv 开跑时设置）。运行时不跨 run 复用：
-    // 现有宿主（CLI 每回合、ACP 每会话、server 每请求）都是新建实例，子 agent 亦各自持有一份。
-    // PTC 子调用授权在深层调用栈里，拿不到开跑时的局部变量，故用瞬态字段传递。
-    private var resumedAnswersForSub: HashMap<String, UserAnswer> = HashMap()
     private let modelRegistry: ModelContextRegistry
     // 未命中模型表只提醒一次（每回合一条会把日志淹掉）
     private let warnedModels = HashSet<String>()
@@ -1218,7 +1214,6 @@ public open class AgentRuntime <: AgentLoop {
         let ctx = ToolContext(workDir, se.context, sessionId, ask: this.askFn)
         // 恢复：宿主随消息带回的答复（重放同一回合时要先查它，命中就不再问宿主）
         let resumedAnswers = collectResumedAnswers(messages)
-        this.resumedAnswersForSub = resumedAnswers
         // 每次工具调用单独一份上下文（带该次调用的 id）：工具要把自己与协议/UI 上的同一次调用对上时用
         let ctxBuilder = ContextBuilder(this.skillRegistry, se, contributors: this.promptContributors)
 
@@ -1259,8 +1254,9 @@ public open class AgentRuntime <: AgentLoop {
                     // 先解析可见工具，再据此生成 SDK 段：两处必须来自同一次解析，
                     // 否则模型看到的绑定会与程序实际能调用的能力分叉
                     let visible = this.resolveVisibleTools(scope.tools)
-                    let tools = this.resolveTools(scope.tools, scope.ptcRunSeq, visible, ctx,
-                        stream, cancelFlag, hookState, scope.turnCount)
+                    let tools = this.resolveTools(scope.tools, scope.ptcRunSeq,
+                        resumedAnswers, visible, ctx, stream, cancelFlag, hookState,
+                        scope.turnCount)
                     let systemText = if (this.config.toolPresentation == ToolPresentationMode.Native) {
                         baseSystemText
                     } else {
@@ -1614,6 +1610,7 @@ public open class AgentRuntime <: AgentLoop {
     private func resolveTools(
         registry: ToolRegistry,
         ptcRunSeq: PtcRunSeq,
+        resumedAnswers: HashMap<String, UserAnswer>,
         visible: ArrayList<Tool>,
         ctx: ToolContext,
         stream: EventStream<AgentEvent, ArrayList<Message>>,
@@ -1632,7 +1629,8 @@ public open class AgentRuntime <: AgentLoop {
         }
         if (programmatic) {
             let authorizer: PtcAuthorizer = { tool, args =>
-                this.authorizeSubCall(tool, args, ctx, hookState, turnCount, registry)
+                this.authorizeSubCall(tool, args, ctx, hookState, turnCount, registry,
+                    resumedAnswers)
             }
             let emit: (PtcEvent) -> Unit = { event => this.emitPtcEvent(stream, event) }
             let env = PtcRunEnv(ctx.workDir, ctx.sessionId,
@@ -1664,13 +1662,14 @@ public open class AgentRuntime <: AgentLoop {
         ctx: ToolContext,
         hookState: HookState,
         turnCount: Int64,
-        registry: ToolRegistry
+        registry: ToolRegistry,
+        resumed: HashMap<String, UserAnswer>
     ): PtcAuthDecision {
         match (this.trustGate(tool, ctx.workDir, ctx.sessionId)) {
             case TrustDecision.Denied =>
                 return PtcAuthDecision.Deny("Tool not allowed: workDir is untrusted")
             case TrustDecision.NeedsApproval =>
-                if (!this.approveSubCall(tool, args, ctx)) {
+                if (!this.approveSubCall(tool, args, ctx, resumed)) {
                     return PtcAuthDecision.Deny("Tool not allowed: user denied approval")
                 }
             case TrustDecision.Allowed => ()
@@ -1685,13 +1684,16 @@ public open class AgentRuntime <: AgentLoop {
     }
 
     /** 交互审批；与模型直调的审批分支保持同样的回答语义。 */
-    private func approveSubCall(tool: Tool, args: JsonValue, ctx: ToolContext): Bool {
+    private func approveSubCall(tool: Tool, args: JsonValue, ctx: ToolContext,
+        resumed: HashMap<String, UserAnswer>): Bool {
         let log = getGlobalLogger([("name", "AgentRuntime")])
         // 与模型直调的审批同一条路径（同一套选项、同一套判定）
         let subReq = approvalRequest(
             "ask:${ctx.sessionId}:sub:${tool.name()}:approval",
             tool.name(), args, "Tool '" + tool.name() + "' needs your approval.")
-        let subAns = this.askHost(subReq, this.resumedAnswersForSub)
+        // 恢复答复来自**本次 run** 的局部变量（随参数链传入），不是实例字段：
+        // 实例一旦被复用，字段里可能留着另一个会话的答复 —— 命中即等于跳过用户审批
+        let subAns = this.askHost(subReq, resumed)
         let subInvalid = match (validateAnswer(subReq, subAns)) {
             case Some(err) =>
                 log.warn("invalid approval answer (${err}); treating as deny", Array<Attr>())
