@@ -110,6 +110,8 @@ public class AgUiTranslator {
     private var lastAssistantId: String = ""
     private var toolArgs: HashMap<String, String> = HashMap<String, String>()
     private var stopReason: String = "end_turn"
+    // 是否收到过 TurnEndEvent（用于 AgentEnd 时区分"正常收尾"与"崩溃收尾"）
+    private var sawTurnEnd: Bool = false
     private var finished: Bool = false
     // 运行挂起时收集的中断：RUN_FINISHED 需要以 interrupt 收尾而不是 success
     private var interrupts: ArrayList<AgUiInterrupt> = ArrayList()
@@ -210,25 +212,43 @@ public class AgUiTranslator {
             case e: TurnEndEvent =>
                 this.closeText(out)
                 this.closeStep(out)
-                match (e.message.stopReason) {
-                    case StopReason.ToolUse => this.stopReason = "tool_use"
-                    case StopReason.Length => this.stopReason = "length"
-                    case StopReason.Aborted => this.stopReason = "aborted"
-                    case StopReason.Error => this.stopReason = "error"
-                    case _ => this.stopReason = "end_turn"
+                // 协议层的 stopReason 是**自由字符串**（AG-UI 只约定几个惯用值，
+                // 不强求封闭枚举），因此这里按 `reason` 给出更准的值，
+                // 同时也保留 `StopReason` 能表达的"回合内还会继续"信息。
+                //
+                // 映射决策（详见 `agUiStopReason` 的注释）：
+                //   Completed           → end_turn
+                //   ToolBudgetExhausted → tool_budget_exhausted  ← 不用 end_turn！
+                //   BlockedByHook       → blocked_by_hook
+                //   Suspended           → suspended
+                //   Cancelled           → aborted
+                //   Failed              → error
+                //   MaxTurnsReached     → max_turns_reached
+                //
+                // 关键：**不把非成功原因压成 `end_turn`**。前端拿 `end_turn` 会显示
+                // "任务完成"，而预算耗尽/被钩子拦/达到回合上限都不是完成 ——
+                // 那正是这次改造要消除的信息丢失。
+                this.sawTurnEnd = true
+                this.stopReason = agUiStopReason(e.reason, e.message)
+                if (isFailureReason(e.reason)) {
+                    // 失败：以 RUN_ERROR 收尾，之后不再发 RUN_FINISHED
+                    this.finished = true
+                    out.add(RunErrorEvent(this.errorText(e.message), agUiErrorCode(e.reason)))
                 }
-                match (e.message.stopReason) {
-                    case StopReason.Error =>
-                        // provider 失败：以 RUN_ERROR 收尾，之后不再发 RUN_FINISHED
-                        this.finished = true
-                        out.add(RunErrorEvent(this.errorText(e.message), "provider_error"))
-                    case _ => ()
-                }
-            case _: AgentEndEvent =>
+            case ae: AgentEndEvent =>
                 this.closeText(out)
                 this.closeStep(out)
                 this.finished = true
-                out.add(RunFinishedEvent(this.threadId, this.runId, this.stopReason, this.turn,
+                // 崩溃收尾没有 TurnEndEvent：此时 stopReason 取 AgentEndEvent.reason
+                // （此前只能靠消息文本前缀识别崩溃）。
+                // 用显式标志而不是比较 stopReason 初值 —— 初值是 "end_turn"（有效的
+                // 保守值），拿它当"未设置"的哨兵会漏判。
+                let endStop = if (this.sawTurnEnd) {
+                    this.stopReason
+                } else {
+                    agUiStopReason(ae.reason, None)
+                }
+                out.add(RunFinishedEvent(this.threadId, this.runId, endStop, this.turn,
                     interrupts: this.interrupts))
             case _ => ()
         }
@@ -287,6 +307,66 @@ public class AgUiTranslator {
     }
 
     // 失败回合：优先用已被截断/失败的正文，空则给出可读的兜底文本
+    /**
+     * `TurnEndReason` → 协议层 stopReason 字符串。
+     *
+     * AG-UI 的 `RunFinishedEvent.stopReason` 是**自由字符串**，只约定几个惯用值
+     * （`tool_use` / `length` / `aborted` / `error` / `end_turn`），不强求封闭枚举。
+     * 因此这里直接用更有信息量的名字，而不是把所有非成功原因压成 `end_turn`。
+     *
+     * **为什么不能压**：前端拿 `end_turn` 会显示"任务完成"。而预算耗尽、被钩子拦截、
+     * 达到回合上限都**不是**完成 —— 若压成 `end_turn`，用户会以为任务做完了，
+     * 这恰好是 `TurnEndReason` 要消除的信息丢失。宁可给一个前端暂时不认识的字符串
+     * （它仍能显示原因），也不要给一个**意思错误**的字符串。
+     *
+     * `ToolBudgetExhausted` 为什么不用 `error`：它不是错误（工具没失败、模型没报错），
+     * 而是"额度用完、任务没跑完"。归成 error 会让上层误判为可重试的故障。
+     *
+     * 两条"回合内还会继续"的情形仍要看 `StopReason`（`reason` 表达不了）：
+     * - `ToolUse`：模型要求继续调工具
+     * - `Length` ：输出被截断，运行时会接着写（同一回合续跑）
+     * 它们只在 `Completed` 下才出现，因此只影响 `end_turn` 这一分支。
+     */
+    private func agUiStopReason(reason: TurnEndReason, am: ?AssistantMessage): String {
+        match (reason) {
+            case TurnEndReason.Completed =>
+                match (am) {
+                    case Some(m) =>
+                        match (m.stopReason) {
+                            case StopReason.ToolUse => "tool_use"
+                            case StopReason.Length => "length"
+                            case _ => "end_turn"
+                        }
+                    case None => "end_turn"
+                }
+            case TurnEndReason.ToolBudgetExhausted => "tool_budget_exhausted"
+            case TurnEndReason.BlockedByHook => "blocked_by_hook"
+            case TurnEndReason.Suspended => "suspended"
+            case TurnEndReason.Cancelled => "aborted"
+            case TurnEndReason.Failed => "error"
+            case TurnEndReason.MaxTurnsReached => "max_turns_reached"
+        }
+    }
+
+    /** 是否以 RUN_ERROR 收尾（只有 Failed；取消是正常收敛，不是错误）。 */
+    private func isFailureReason(reason: TurnEndReason): Bool {
+        match (reason) {
+            case TurnEndReason.Failed => true
+            case _ => false
+        }
+    }
+
+    /**
+     * RUN_ERROR 的 code。
+     *
+     * 沿用既有的 `"provider_error"`：前端/日志已有按它分流的地方，
+     * 改字符串属于无收益的破坏性变更。崩溃收尾与 provider 失败共用 `Failed`
+     * （应对方式相同），因此也不区分 code；真要分辨时看 `message` 里的文本。
+     */
+    private func agUiErrorCode(reason: TurnEndReason): String {
+        "provider_error"
+    }
+
     private func errorText(am: AssistantMessage): String {
         let text = toText(am.content)
         if (text != "") { return text }

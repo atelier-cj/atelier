@@ -251,7 +251,7 @@ func translator_providerErrorEndsRunWithoutFinished() {
     let tr = newTranslator()
     tr.translate(TurnStartEvent())
     let failed = asstMsg("", StopReason.Error)
-    let out = tr.translate(TurnEndEvent(failed, ArrayList<ToolResultMessage>(), TurnEndReason.Completed))
+    let out = tr.translate(TurnEndEvent(failed, ArrayList<ToolResultMessage>(), TurnEndReason.Failed))
     @Expect(kinds(out), "STEP_FINISHED,RUN_ERROR")
     match (out[1]) {
         case e: RunErrorEvent => @Expect(e.code, "provider_error")
@@ -482,4 +482,62 @@ func translator_toolCallInterruptHasNoResponseSchema() {
         case None => ()
         case Some(_) => @Fail("外部执行工具的中断不应带 schema")
     }
+}
+
+// 非成功原因**不能**压成 end_turn —— 前端拿 end_turn 会显示"任务完成"，
+// 而预算耗尽/被钩子拦截/达到回合上限都不是完成。宁可给前端暂时不认识的字符串
+// （它至少能显示原因），也不要给一个意思错误的值。
+@Test
+func translator_nonSuccessReasonsAreNotReportedAsEndTurn() {
+    let cases: Array<(TurnEndReason, String)> = [
+        (TurnEndReason.ToolBudgetExhausted, "tool_budget_exhausted"),
+        (TurnEndReason.BlockedByHook, "blocked_by_hook"),
+        (TurnEndReason.Suspended, "suspended"),
+        (TurnEndReason.Cancelled, "aborted"),
+        (TurnEndReason.MaxTurnsReached, "max_turns_reached"),
+    ]
+    for ((reason, expected) in cases) {
+        let tr = newTranslator()
+        tr.translate(TurnStartEvent())
+        let msg = asstMsg("半截", StopReason.EndTurn)
+        tr.translate(TurnEndEvent(msg, ArrayList<ToolResultMessage>(), reason))
+        // 用 AgentEndEvent 收尾（Cancelled 等不会触发 RUN_ERROR）
+        let out = tr.translate(AgentEndEvent(ArrayList<Message>(), reason))
+        var got = ""
+        for (e in out) {
+            match (e) {
+                case fe: RunFinishedEvent => got = fe.stopReason
+                case _ => ()
+            }
+        }
+        @Expect(got, expected)
+        // 明确不是 end_turn
+        @Expect(got == "end_turn", false)
+    }
+}
+
+// Failed → RUN_ERROR（不是 RUN_FINISHED），与既有的 provider 错误路径一致
+@Test
+func translator_failedReasonEndsWithRunError() {
+    let tr = newTranslator()
+    tr.translate(TurnStartEvent())
+    let failed = asstMsg("[provider error] boom", StopReason.Error)
+    let out = tr.translate(TurnEndEvent(failed, ArrayList<ToolResultMessage>(), TurnEndReason.Failed))
+    @Expect(kinds(out).contains("RUN_ERROR"), true)
+}
+
+// 崩溃路径（没有 TurnEndEvent）：AgentEndEvent.reason 决定收尾
+@Test
+func translator_crashEndUsesAgentEndReason() {
+    let tr = newTranslator()
+    tr.translate(TurnStartEvent())
+    let out = tr.translate(AgentEndEvent(ArrayList<Message>(), TurnEndReason.Failed))
+    var got = ""
+    for (e in out) {
+        match (e) {
+            case fe: RunFinishedEvent => got = fe.stopReason
+            case _ => ()
+        }
+    }
+    @Expect(got, "error")
 }
