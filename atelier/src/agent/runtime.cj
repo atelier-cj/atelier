@@ -1101,6 +1101,25 @@ public open class AgentRuntime <: AgentLoop {
         scope.messages = ctxBuilder.applyArchives(scope.messages)
     }
 
+    /**
+     * 回合开场时通告「本回合正在处理的首条消息」。
+     *
+     * **空历史时不发**，这本身是契约的一部分，不是省略：`MessageStartEvent` 的载荷是
+     * **一条具体消息**（[docs/events.md]），语义是「这条消息开始播放」。历史为空时不存在
+     * 这条消息，也就没有可通告的对象 —— 伪造一条占位消息会让协议适配层（AG-UI / ACP / A2A
+     * 均按 `role` 分派）以为真有一条新消息开始，开出消息 id 并等一个永远不会到来的正文。
+     * 回合本身由 `TurnStart` / `TurnEnd` 括起，不依赖这条事件表达「有回合在跑」。
+     *
+     * 而**空历史是合法输入**：`chatWithEnv(sessionId, messages, env)` 的契约是接收调用方
+     * 给出的历史，新会话首轮、历史被归档或压缩清空之后都可能传空列表。此时运行时照常发请求
+     * （系统提示词走独立通道，不依赖历史非空），不能因为取首条而抛越界、把整轮变成错误收尾。
+     */
+    private func announceTurnMessage(scope: RunScope,
+        stream: EventStream<AgentEvent, ArrayList<Message>>): Unit {
+        if (scope.messages.size == 0) { return }
+        this.emit(stream, MessageStartEvent(scope.messages[0]))
+    }
+
     private func chatWithEnv(sessionId: String, messages: ArrayList<Message>, sessionEnv: SessionEnvironment): EventStream<AgentEvent, ArrayList<Message>> {
         let stream = EventStream<AgentEvent, ArrayList<Message>>()
         let se = sessionEnv
@@ -1140,7 +1159,7 @@ public open class AgentRuntime <: AgentLoop {
                 while (!scope.finished && !cancelFlag.load() && scope.turnCount < Int64(this.config.maxTurns)) {
                     this.openTurn(scope, sessionId, stream, ctxBuilder, log)
 
-                    this.emit(stream, MessageStartEvent(scope.messages[0]))
+                    this.announceTurnMessage(scope, stream)
                     let actualModel = this.pickModel(this.config.model)
                     // 先解析可见工具，再据此生成 SDK 段：两处必须来自同一次解析，
                     // 否则模型看到的绑定会与程序实际能调用的能力分叉
