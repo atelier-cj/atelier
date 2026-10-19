@@ -57,8 +57,11 @@ internal class RunScope {
      *
      * 收口（[AgentRuntime.settleHistory]）必须据此跳过：挂起时历史**刻意**停在
      * `assistant(tool_calls)` 而不写结果 —— 那条结果要由下一次 run 随宿主答复带回
-     * （见 [ToolBatchOutcome.Suspended]）。此时补占位结果不是"修历史"，而是伪造：
-     * 恢复时会多出一条与本调用不对应的结果，且模型会以为工具已经跑过。
+     * （见 [ToolBatchOutcome.SuspendedForExternal]）。此时补占位结果不是"修历史"，
+     * 而是伪造：恢复时会多出一条与本调用不对应的结果，且模型会以为工具已经跑过。
+     *
+     * **只有"真在等外部输入"才置位**：整批执行失败（[ToolBatchOutcome.BatchFailed]）
+     * 那条路径已经给每个 call 补齐了错误结果，历史是完整的，不该被当成挂起跳过收口。
      */
     var suspended: Bool = false
 
@@ -113,16 +116,26 @@ internal enum ToolAdmission {
 }
 
 /**
- * 工具批次的收尾结论：**继续下一轮**，还是**本次 run 挂起**。
+ * 工具批次的收尾结论。
  *
- * 两种走向都结束当前回合（`TurnEndEvent` 已发），区别只在挂起时还要发
- * `SuspendEvent` 并把历史停在 `assistant(tool_calls)`，等调用方下次带回结果。
+ * 三条走向都结束当前回合（`TurnEndEvent` 已发），但**语义不同**，必须分开表达：
+ *
+ * - [ContinueRun]：本批做完（含被跳过/拦截的），接着下一轮。
+ * - [SuspendedForExternal]：有调用在**等外部输入**（用户答复 / 表单）。历史刻意停在
+ *   `assistant(tool_calls)`、不写结果 —— 那条结果要由下一次 run 随宿主答复带回。
+ *   这是唯一允许"历史不配对"的收尾方式，因此也**必须**发 `SuspendEvent`：
+ *   宿主只靠它知道"这次不是跑完了，是在等你"。
+ * - [BatchFailed]：整批执行抛了异常，已为每个 call 补齐错误结果后收尾。历史是
+ *   **完整**的（每个调用都有结果），不存在"等外部输入"，所以既不发 `SuspendEvent`，
+ *   也不该让收口跳过 —— 它和 `SuspendEvent` 共用一个枚举值时，两件事都会被做错。
  */
 internal enum ToolBatchOutcome {
     /** 本批执行完毕（含被跳过/拦截的），继续下一轮 */
     | ContinueRun
-    /** 有调用在等外部结果：本次 run 到此为止 */
-    | Suspended
+    /** 有调用在等外部结果：本次 run 到此为止，历史停在 assistant(tool_calls) */
+    | SuspendedForExternal
+    /** 整批执行失败：每 call 已补齐错误结果，按失败收尾 */
+    | BatchFailed
 }
 
 /**

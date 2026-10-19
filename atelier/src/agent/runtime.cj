@@ -935,7 +935,7 @@ public open class AgentRuntime <: AgentLoop {
                         // 恢复后同一批一次做完（而不是逐个挂起、逐个恢复）
                         this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
                         this.emit(stream, SuspendEvent(pendingAsks))
-                        return ToolBatchOutcome.Suspended
+                        return ToolBatchOutcome.SuspendedForExternal
                     }
                     // 工具执行开始事件（供流式消费方展示工具进度；被跳过/拦截的工具不发）
                     for (k in 0..runCallIds.size) {
@@ -957,8 +957,15 @@ public open class AgentRuntime <: AgentLoop {
                             scope.messages.add(ToolResultMessage(tc.id, tc.name,
                                 ContentList.ofText(text), true, 0))
                         }
+                        // 这些调用**已经消耗掉了**：历史里有它们的结果（哪怕结果是错误），
+                        // 计入预算才会在下一轮做出正确的裁剪/耗尽裁决。漏计等于让
+                        // "整批失败"这条路可以无限重试而不吃预算。
+                        scope.toolCallCount += toolCalls.size
+                        scope.lastToolTime = MonoTime.now()
                         this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
-                        return ToolBatchOutcome.Suspended
+                        // 历史已补齐（每 call 一条错误结果），不是"在等外部输入"：
+                        // 不发 SuspendEvent，也不让收尾收口跳过
+                        return ToolBatchOutcome.BatchFailed
                     }
                     var resIdx: Int64 = 0
                     // 需要外部给结果的调用：本次 run 挂起（不写结果消息，历史停在
@@ -1006,7 +1013,7 @@ public open class AgentRuntime <: AgentLoop {
                         // 中止本次 run：历史已落在 assistant(tool_calls)，
                         // 下一次 run 带结果即可继续（见 SuspendEvent 注释）
                         this.emit(stream, SuspendEvent(pendingExternal))
-                        return ToolBatchOutcome.Suspended
+                        return ToolBatchOutcome.SuspendedForExternal
                     }
                     ToolBatchOutcome.ContinueRun
     }
@@ -1373,10 +1380,16 @@ public open class AgentRuntime <: AgentLoop {
                                 batch, skipResults, runCallIds, runNames, pendingAsks,
                                 stream, hookState, log)
                             match (outcome) {
-                                case ToolBatchOutcome.Suspended =>
-                                    // 挂起 = 历史刻意停在 assistant(tool_calls)，
-                                    // 收尾收口要认这个状态（见 RunScope.suspended）
+                                case ToolBatchOutcome.SuspendedForExternal =>
+                                    // 只在"等外部输入"时置位：历史刻意停在
+                                    // assistant(tool_calls)，收尾收口要认这个状态
+                                    // （见 RunScope.suspended）
                                     scope.suspended = true
+                                    scope.finished = true
+                                    continue
+                                case ToolBatchOutcome.BatchFailed =>
+                                    // 整批失败：历史已补齐（每 call 一条错误结果），
+                                    // 不置 suspended —— 收口照常跑，且宿主拿到的不是挂起
                                     scope.finished = true
                                     continue
                                 case ToolBatchOutcome.ContinueRun => ()
