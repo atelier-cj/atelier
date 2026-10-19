@@ -22,10 +22,13 @@ import atelier.event.EventStream
 class CaptureRequestHook <: Hook {
     public var tools: ArrayList<OpenAITool> = ArrayList()
     public var systemPrompt: String = ""
+    // 本次 run 的工具视图（钩子拿到的就是它）
+    public var registry: Option<ToolRegistry> = None
 
     public override func beforeTurn(ctx: HookContext, request: ChatRequest): TurnDecision {
         this.tools = request.tools
         this.systemPrompt = request.systemPrompt
+        this.registry = Some(ctx.toolRegistry)
         TurnDecision.Continue(request)
     }
 }
@@ -126,7 +129,10 @@ func runtime_bothModeExposesBothProjections() {
 
 @Test
 func runtime_ptcRegistersRunXispForDispatch() {
-    // 仅出现在请求里不够：分发链路按名字查注册表，必须真的注册进去
+    // 仅出现在请求里不够：分发链路按名字查表，run_xisp 必须真的可查。
+    // 但**只能查在本次 run 的视图里** —— 这个实例的 env 绑着本次 run 的
+    // workDir / sessionId / cancelFlag / authorizer，写进共享根表就等于把一次 run 的
+    // 上下文挂到跨 runtime 共享的状态上（并发会话会命中别人的实例）。
     let hook = CaptureRequestHook()
     let hooks = ArrayList<Hook>()
     hooks.add(hook)
@@ -144,7 +150,13 @@ func runtime_ptcRegistersRunXispForDispatch() {
     msgs.add(UserMessage(ContentList.ofText("hi"), 0))
     runtime.chat(msgs).result()
 
-    @Assert(toolReg.get("run_xisp").isSome())
+    // run 视图里可分发
+    match (hook.registry) {
+        case Some(reg) => @Assert(reg.get("run_xisp").isSome())
+        case None => @Fail("beforeTurn 应当拿到本次 run 的工具视图")
+    }
+    // 共享根表不受影响
+    @Assert(toolReg.get("run_xisp").isNone())
 }
 
 // ==================== 端到端：模型发 run_xisp → 分发 → 程序内派发工具 ====================

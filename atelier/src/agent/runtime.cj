@@ -254,7 +254,8 @@ public open class AgentRuntime <: AgentLoop {
                 let ctxBuilder = ContextBuilder(this.skillRegistry, sessionEnv,
                     contributors: this.promptContributors)
                 let systemText = ctxBuilder.buildSystemText(this.config.systemPrompt, this.config.skills)
-                let tools = this.renderNativeTools(this.resolveVisibleTools())
+                let tools = this.renderNativeTools(this.resolveVisibleTools(
+                    this.toolRegistry.derived(ArrayList())))
                 let actualModel = this.pickModel(this.config.model)
                 let next = this.compactBracketed("manual", sessionId, messages, total, log,
                     { msgs, totalBefore => this.summarizeAndCompact(msgs, cc, cSpec, totalBefore,
@@ -908,7 +909,7 @@ public open class AgentRuntime <: AgentLoop {
                         this.emit(stream, ToolExecutionStartEvent(runCallIds[Int64(k)], runNames[Int64(k)]))
                     }
                     let results = try {
-                        this.toolExecutor.executeBatch(batch)
+                        scope.toolExecutor.executeBatch(batch)
                     } catch (e: Exception) {
                         // 同 provider 错误：异常 message 常为空（FS/Socket 类），只打 message 等于没打
                         log.error("tool execute error: ${e.toString()}", Array<Attr>())
@@ -954,7 +955,7 @@ public open class AgentRuntime <: AgentLoop {
                                     this.emit(stream, ToolExecutionEndEvent(tc.id, r.text, r.isError))
                                     let tr = ToolResultMessage(tc.id, tc.name, ContentList.ofText(r.text), r.isError, 0)
                                     scope.messages.add(tr)
-                                    callAfterToolHooks(hookState, scope.turnCount, tc, tr)
+                                    callAfterToolHooks(scope.tools, hookState, scope.turnCount, tc, tr)
                                     resIdx++
                                 } else {
                                     // 执行器少给了结果：静默跳过会让这条 call 永远没有配对结果，
@@ -991,8 +992,10 @@ public open class AgentRuntime <: AgentLoop {
      */
     private func admitToolCall(tc: ToolCallBlock, idx: Int64, ctx: ToolContext,
         sessionId: String, turnCount: Int64, hookState: HookState,
-        resumed: HashMap<String, UserAnswer>, log: Logger): ToolAdmission {
-        let tool = match (this.toolRegistry.get(tc.name)) {
+        resumed: HashMap<String, UserAnswer>, log: Logger,
+        registry!: ToolRegistry): ToolAdmission {
+        // 按**本次 run 的视图**查表：run 作用域工具只注册在这里（见 RunScope.tools）
+        let tool = match (registry.get(tc.name)) {
             case Some(t) => t
             case None => return ToolAdmission.Skip("Tool not found: " + tc.name)
         }
@@ -1001,17 +1004,17 @@ public open class AgentRuntime <: AgentLoop {
                 log.warn("tool ${tc.name} blocked: workDir untrusted", Array<Attr>())
                 return ToolAdmission.Skip("Tool not allowed: workDir is untrusted")
             case TrustDecision.Allowed =>
-                return this.admitAfterHooks(tc, turnCount, hookState, log)
+                return this.admitAfterHooks(tc, turnCount, hookState, log, registry: registry)
             case TrustDecision.NeedsApproval =>
                 return this.admitByAsking(tc, idx, ctx, sessionId, turnCount, hookState,
-                    resumed, log)
+                    resumed, log, registry: registry)
         }
     }
 
     /** 已通过信任闸门：过滤器 hooks 是否进一步拦截或改写参数 */
     private func admitAfterHooks(tc: ToolCallBlock, turnCount: Int64,
-        hookState: HookState, log: Logger): ToolAdmission {
-        let (args, skipMsg) = decideToolCall(hookState, turnCount, tc)
+        hookState: HookState, log: Logger, registry!: ToolRegistry): ToolAdmission {
+        let (args, skipMsg) = decideToolCall(registry, hookState, turnCount, tc)
         match (args) {
             case Some(a) => return ToolAdmission.Allow(a)
             case None => ()
@@ -1029,7 +1032,8 @@ public open class AgentRuntime <: AgentLoop {
      */
     private func admitByAsking(tc: ToolCallBlock, idx: Int64, ctx: ToolContext,
         sessionId: String, turnCount: Int64, hookState: HookState,
-        resumed: HashMap<String, UserAnswer>, log: Logger): ToolAdmission {
+        resumed: HashMap<String, UserAnswer>, log: Logger,
+        registry!: ToolRegistry): ToolAdmission {
         // 审批走结构化提问：菜单由 approvalRequest 统一构造，结论只认选项 id
         // 参数原样带上：审批的全部意义是让人看清「要执行什么」，只给工具名等于让人盲签
         let gateReq = approvalRequest(
@@ -1057,12 +1061,12 @@ public open class AgentRuntime <: AgentLoop {
         if (gateAns.isAllowAlways()) {
             this.trustManager.setTrust(ctx.workDir, TrustState.Trusted)
             log.info("tool ${tc.name} always approved for ${ctx.workDir}", Array<Attr>())
-            return this.admitAfterHooks(tc, turnCount, hookState, log)
+            return this.admitAfterHooks(tc, turnCount, hookState, log, registry: registry)
         }
         if (gateAns.isAllowOnce()) {
             this.trustManager.setSessionTrust(sessionId, ctx.workDir, TrustState.Trusted)
             log.info("tool ${tc.name} approved for session", Array<Attr>())
-            return this.admitAfterHooks(tc, turnCount, hookState, log)
+            return this.admitAfterHooks(tc, turnCount, hookState, log, registry: registry)
         }
         log.warn("tool ${tc.name} denied by user", Array<Attr>())
         ToolAdmission.Skip("Tool not allowed: user denied approval")
@@ -1144,17 +1148,23 @@ public open class AgentRuntime <: AgentLoop {
             try {
                 this.emit(stream, AgentStartEvent(sessionId))
                 log.info("agent start: ${this.config.name}", Array<Attr>())
+                // 本次 run 的工具视图：根表（装配束共享）只当父表，run 期间按需注册的
+                // run 作用域工具全部落在这张视图上，收尾随 scope 一起丢弃
+                let runTools = this.toolRegistry.derived(ArrayList())
+                let runExecutor = ToolExecutor(runTools, budget: toolBudgetPolicyOf(this.config))
+                let initial = ArrayList<Message>()
+                for (m in messages) { initial.add(m) }
+                // 循环级可变状态收进 RunScope：阶段方法只收一个引用，不必逐个传 8 个标量。
+                // 先于 beforeRun 构造：钩子拿到的工具表就是本次 run 的视图
+                let scope = RunScope(initial, runTools, runExecutor)
+
                 let hookState = HookState()
-                callHooks("beforeRun", 0, hookState)
+                callHooks(scope.tools, "beforeRun", 0, hookState)
 
                 // 系统提示词独立通道（不再注入为消息）；初始消息 = 历史。
                 // PTC 的 SDK 段随「本轮可见工具」变化，因此在循环内拼接（见下）。
                 let baseSystemText = ctxBuilder.buildSystemText(
                     this.config.systemPrompt, this.config.skills)
-                let initial = ArrayList<Message>()
-                for (m in messages) { initial.add(m) }
-                // 循环级可变状态收进 RunScope：阶段方法只收一个引用，不必逐个传 8 个标量
-                let scope = RunScope(initial)
 
                 while (!scope.finished && !cancelFlag.load() && scope.turnCount < Int64(this.config.maxTurns)) {
                     this.openTurn(scope, sessionId, stream, ctxBuilder, log)
@@ -1163,8 +1173,8 @@ public open class AgentRuntime <: AgentLoop {
                     let actualModel = this.pickModel(this.config.model)
                     // 先解析可见工具，再据此生成 SDK 段：两处必须来自同一次解析，
                     // 否则模型看到的绑定会与程序实际能调用的能力分叉
-                    let visible = this.resolveVisibleTools()
-                    let tools = this.resolveTools(visible, ctx, stream, cancelFlag,
+                    let visible = this.resolveVisibleTools(scope.tools)
+                    let tools = this.resolveTools(scope.tools, visible, ctx, stream, cancelFlag,
                         hookState, scope.turnCount)
                     let systemText = if (this.config.toolPresentation == ToolPresentationMode.Native) {
                         baseSystemText
@@ -1175,7 +1185,7 @@ public open class AgentRuntime <: AgentLoop {
                     var chatReq: ChatRequest = ctxBuilder.buildChatRequest(actualModel, systemText, scope.messages,
                         Float64(this.config.temperature), this.maxOutputTokensInUse(),
                         this.config.thinkingLevel, tools)
-                    match (runBeforeTurnHooks(hookState, scope.turnCount, chatReq)) {
+                    match (runBeforeTurnHooks(scope.tools, hookState, scope.turnCount, chatReq)) {
                         case Some(r) =>
                             chatReq = r
                             if (chatReq.model != actualModel) {
@@ -1283,7 +1293,8 @@ public open class AgentRuntime <: AgentLoop {
                             while (idx < toolCalls.size) {
                                 let tc = toolCalls[idx]
                                 let admission = this.admitToolCall(tc, idx, ctx, sessionId,
-                                    scope.turnCount, hookState, resumedAnswers, log)
+                                    scope.turnCount, hookState, resumedAnswers, log,
+                                    registry: scope.tools)
                                 match (admission) {
                                     case ToolAdmission.Allow(args) =>
                                         let entry: (String, ToolContext, JsonValue) =
@@ -1347,7 +1358,7 @@ public open class AgentRuntime <: AgentLoop {
                                 case TurnVerdict.End => ()
                             }
                             log.info("turn finished", Array<Attr>())
-                            let turnUpdate = runAfterTurnHooks(hookState, scope.turnCount)
+                            let turnUpdate = runAfterTurnHooks(scope.tools, hookState, scope.turnCount)
                             match (turnUpdate.messages) {
                                 case Some(msgs) =>
                                     scope.messages = msgs
@@ -1366,7 +1377,7 @@ public open class AgentRuntime <: AgentLoop {
                 }
 
                 log.info("agent end, total turns=${scope.turnCount}", Array<Attr>())
-                callHooks("afterRun", scope.turnCount, hookState)
+                callHooks(scope.tools, "afterRun", scope.turnCount, hookState)
                 stream.setResult(scope.messages)
                 this.emit(stream, AgentEndEvent(scope.messages))
             } catch (e: Exception) {
@@ -1420,22 +1431,24 @@ public open class AgentRuntime <: AgentLoop {
      * 而 native 模式只需要它们的 schema。两者必须来自同一次解析，
      * 否则模型看到的可用能力会与程序能调用的能力分叉。
      */
-    private func resolveVisibleTools(): ArrayList<Tool> {
+    private func resolveVisibleTools(registry: ToolRegistry): ArrayList<Tool> {
         let result = ArrayList<Tool>()
         for (name in this.config.tools) {
             if (name.startsWith("agent_")) {
                 let agentName = name[6..]
                 match (this.agentRegistry.get(agentName)) {
                     case Some(cfg) =>
-                        // 子 agent 复用同一份装配束（provider 由它自己的配置解析）
+                        // 子 agent 复用同一份装配束（provider 由它自己的配置解析）。
+                        // 注册进**本次 run 的视图**：这个实例持有 spec（可再建 runtime），
+                        // 属于 run 作用域，写进共享根表会让别的会话命中别人的实例
                         let tool = AgentTool(agentName, cfg, this.spec)
-                        this.toolRegistry.register(tool)
+                        registry.register(tool)
                         result.add(tool)
                     case None => ()
                 }
             } else if (name.endsWith("_*")) {
                 let prefix = name[0..name.size - 2]
-                for (t in this.toolRegistry.list()) {
+                for (t in registry.list()) {
                     if (t.name().startsWith(prefix)) {
                         if (!this.mcpManager.isActiveTool(t.name(), this.config.mcpCooldownTurns)) {
                             continue
@@ -1444,7 +1457,7 @@ public open class AgentRuntime <: AgentLoop {
                     }
                 }
             } else {
-                match (this.toolRegistry.get(name)) {
+                match (registry.get(name)) {
                     case Some(t) =>
                         result.add(t)
                     case None => ()
@@ -1462,6 +1475,7 @@ public open class AgentRuntime <: AgentLoop {
      * `Both`：两者并存（提示词成本翻倍）。
      */
     private func resolveTools(
+        registry: ToolRegistry,
         visible: ArrayList<Tool>,
         ctx: ToolContext,
         stream: EventStream<AgentEvent, ArrayList<Message>>,
@@ -1480,7 +1494,7 @@ public open class AgentRuntime <: AgentLoop {
         }
         if (programmatic) {
             let authorizer: PtcAuthorizer = { tool, args =>
-                this.authorizeSubCall(tool, args, ctx, hookState, turnCount)
+                this.authorizeSubCall(tool, args, ctx, hookState, turnCount, registry)
             }
             let emit: (PtcEvent) -> Unit = { event => this.emitPtcEvent(stream, event) }
             let env = PtcRunEnv(ctx.workDir, ctx.sessionId,
@@ -1489,8 +1503,10 @@ public open class AgentRuntime <: AgentLoop {
                 timeout: Some(Duration.second * Int64(this.config.ptcTimeoutSeconds)),
                 toolBudget: toolBudgetPolicyOf(this.config))
             let tool = RunXispTool(visible, env)
-            // 注册进注册表：分发链路按名字查找，因此必须与其它工具同样可见
-            this.toolRegistry.register(tool)
+            // 分发链路按名字查表，因此它必须可见 —— 但只注册进**本次 run 的视图**：
+            // 这个实例的 env 绑着本次 run 的 workDir / sessionId / cancelFlag / authorizer，
+            // 写进共享根表等于把「一次 run 的上下文」挂到跨 runtime 的共享状态上
+            registry.register(tool)
             result.add(OpenAITool(tool.name(), tool.description(), tool.schema()))
         }
         result
@@ -1507,7 +1523,8 @@ public open class AgentRuntime <: AgentLoop {
         args: JsonValue,
         ctx: ToolContext,
         hookState: HookState,
-        turnCount: Int64
+        turnCount: Int64,
+        registry: ToolRegistry
     ): PtcAuthDecision {
         match (this.trustGate(tool, ctx.workDir, ctx.sessionId)) {
             case TrustDecision.Denied =>
@@ -1519,7 +1536,7 @@ public open class AgentRuntime <: AgentLoop {
             case TrustDecision.Allowed => ()
         }
         // callId 在此尚未生成，审批与钩子都不依赖它
-        let (replaced, skipMessage) = this.decideToolCall(hookState, turnCount,
+        let (replaced, skipMessage) = this.decideToolCall(registry, hookState, turnCount,
             ToolCallBlock("", tool.name(), args))
         match (replaced) {
             case Some(newArgs) => PtcAuthDecision.AllowWith(newArgs)
@@ -1573,9 +1590,11 @@ public open class AgentRuntime <: AgentLoop {
         }
     }
 
-    private func callHooks(phase: String, turnCount: Int64,
+    // 钩子拿到的工具表是**本次 run 的视图**：钩子里按名字查到的必然是本次 run 的实例，
+    // 而不是别的会话遗留在根表上的。根表（this.toolRegistry）只作为视图的父表存在。
+    private func callHooks(registry: ToolRegistry, phase: String, turnCount: Int64,
         state: HookState): Unit {
-        let ctx = HookContext(this.config, this.toolRegistry, turnCount, state)
+        let ctx = HookContext(this.config, registry, turnCount, state)
         for (h in this.hooks) {
             try {
                 match (phase) {
@@ -1590,9 +1609,9 @@ public open class AgentRuntime <: AgentLoop {
         }
     }
 
-    private func runBeforeTurnHooks(state: HookState, turnCount: Int64,
+    private func runBeforeTurnHooks(registry: ToolRegistry, state: HookState, turnCount: Int64,
         request: ChatRequest): Option<ChatRequest> {
-        let ctx = HookContext(this.config, this.toolRegistry, turnCount, state)
+        let ctx = HookContext(this.config, registry, turnCount, state)
         var current = request
         for (h in this.hooks) {
             try {
@@ -1611,9 +1630,9 @@ public open class AgentRuntime <: AgentLoop {
         Some(current)
     }
 
-    private func runBeforeToolHooks(state: HookState, turnCount: Int64,
+    private func runBeforeToolHooks(registry: ToolRegistry, state: HookState, turnCount: Int64,
         call: ToolCallBlock): BeforeToolDecision {
-        let ctx = HookContext(this.config, this.toolRegistry, turnCount, state)
+        let ctx = HookContext(this.config, registry, turnCount, state)
         var decision = BeforeToolDecision.Allow
         for (h in this.hooks) {
             try {
@@ -1633,9 +1652,9 @@ public open class AgentRuntime <: AgentLoop {
     }
 
     // 返回 Some(args) 表示应执行（可带 hook 改写后的参数）；None + Option(reason) 表示应跳过
-    private func decideToolCall(state: HookState, turnCount: Int64,
+    private func decideToolCall(registry: ToolRegistry, state: HookState, turnCount: Int64,
         tc: ToolCallBlock): (Option<JsonValue>, Option<String>) {
-        match (runBeforeToolHooks(state, turnCount, tc)) {
+        match (runBeforeToolHooks(registry, state, turnCount, tc)) {
             case BeforeToolDecision.Allow =>
                 (Some(tc.args), None)
             case BeforeToolDecision.Deny(reason) =>
@@ -1645,9 +1664,9 @@ public open class AgentRuntime <: AgentLoop {
         }
     }
 
-    private func callAfterToolHooks(state: HookState, turnCount: Int64,
+    private func callAfterToolHooks(registry: ToolRegistry, state: HookState, turnCount: Int64,
         call: ToolCallBlock, result: ToolResultMessage): Unit {
-        let ctx = HookContext(this.config, this.toolRegistry, turnCount, state)
+        let ctx = HookContext(this.config, registry, turnCount, state)
         for (h in this.hooks) {
             try {
                 h.afterTool(ctx, call, result)
@@ -1658,8 +1677,9 @@ public open class AgentRuntime <: AgentLoop {
         }
     }
 
-    private func runAfterTurnHooks(state: HookState, turnCount: Int64): AfterTurnUpdate {
-        let ctx = HookContext(this.config, this.toolRegistry, turnCount, state)
+    private func runAfterTurnHooks(registry: ToolRegistry, state: HookState,
+        turnCount: Int64): AfterTurnUpdate {
+        let ctx = HookContext(this.config, registry, turnCount, state)
         var update = AfterTurnUpdate.none()
         for (h in this.hooks) {
             try {

@@ -1,7 +1,7 @@
 package atelier.agent
 
 import atelier.message.{Message, AssistantMessage}
-import atelier.tool.ExternalRequest
+import atelier.tool.{ExternalRequest, ToolRegistry, ToolExecutor}
 import std.collection.*
 import std.time.MonoTime
 import jsonvalue.*
@@ -52,8 +52,34 @@ internal class RunScope {
     /** 循环是否该收敛 */
     var finished: Bool = false
 
-    init(messages: ArrayList<Message>) {
+    /**
+     * 本次 run 的**工具视图**（根表的派生视图，收尾即弃）。
+     *
+     * 契约：run 作用域的工具实例（`RunXispTool`、`AgentTool`）只注册进这张视图，
+     * 绝不写进 `HarnessSpec.tools` 那张根表。原因是不变量层面的：这些实例的构造参数
+     * 绑着**这一次 run** 的上下文（`RunXispTool.env` 里的 workDir / sessionId /
+     * cancelFlag / authorizer），而根表是同一份装配束下的多个 runtime 共享的。
+     * 写进根表就等于把「某一次 run 的上下文」挂到了共享状态上：并发的另一个会话
+     * 按名字分发时会命中它，于是按**别人**的 workDir 过信任闸门、按别人的取消标志
+     * 判中断 —— 信任判定的键与请求来源脱节。
+     *
+     * 派生视图同时保留父表语义：run 期间宿主注册进根表的新工具（按需加载的 MCP 工具）
+     * 在视图里照样可见，因此隔离不牺牲「本轮注册、本轮可用」。
+     */
+    var tools: ToolRegistry
+
+    /**
+     * 本次 run 的工具执行器。
+     *
+     * 必须与 [tools] 同源：执行器按名字查表分发，用根表就等于绕开上面那条隔离
+     * （run 期注册进视图的工具查不到，而根表里的残留实例反倒可能被选中）。
+     */
+    var toolExecutor: ToolExecutor
+
+    init(messages: ArrayList<Message>, tools: ToolRegistry, toolExecutor: ToolExecutor) {
         this.messages = messages
+        this.tools = tools
+        this.toolExecutor = toolExecutor
     }
 }
 
