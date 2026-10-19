@@ -28,12 +28,13 @@ import atelier.interaction.*
 import atelier.event.EventStream
 import jsonvalue.*
 
-// 执行时抛异常的工具：触发 executeToolBatch 的整批失败兜底。
+// 执行时抛异常的工具。
 //
-// 注意要把**两类**预算都置 0（`toolTimeout` + `sideEffectToolTimeout`，后者对
-// Sequential 工具生效）：`executeTool` 在没有超时预算时**直接**调用
-// `tool.execute`，异常原样冒到 `executeBatch` → 走整批失败兜底；一旦给了预算，调用被
-// `spawn` 包起来，工具异常会被包装成一条 isError 结果，走的就不是那条路径了。
+// `executeTool` 加上单工具异常隔离之后，**两种预算配置下**异常都会变成一条 isError
+// 结果（此前无预算时会被直通到批次层）。所以本工具现在无论怎么配都走"回合继续"，
+// 不再是"整批失败"的构造手段 —— 那个状态改由框架层异常触发
+// （见 tool/executor_isolation_test.cj 的元数据异常用例）。
+// 两类预算置 0 的配置保留着：它锁的正是"无预算分支也被隔离"这一点。
 class ExplodingTool <: Tool {
     public func name(): String { "boom" }
     public func description(): String { "always throws" }
@@ -81,10 +82,17 @@ func hasEventKind(kinds: ArrayList<String>, kind: String): Bool {
     false
 }
 
-// 整批执行抛异常：每 call 都要有错误结果，且**不发 SuspendEvent**
-// （发了等于告诉宿主"在等你输入"，而实际上不会再有输入）
+// 工具执行抛异常 → **回合继续**（不是整批失败收尾），每 call 仍各有结果。
+//
+// 这条此前断言"整批失败后收尾、不再发第二次请求"。`executeTool` 加上单工具异常隔离
+// 之后，工具抛错只是一条 isError 结果，回合照常往下走 —— 正好是想要的行为
+// （与 pi 一致：单工具失败不该让整轮作废）。
+//
+// 保留它原有的配对断言（历史完整、收口补 0 条），只把终点从"整批失败收尾"
+// 改成"继续下一轮"。`BatchFailed` 此后只由**框架层**异常触发（见
+// executor_isolation_test.cj 的元数据异常用例）。
 @Test
-func runtime_batchFailure_pairsEveryCallAndDoesNotSuspend() {
+func runtime_toolExceptionKeepsTurnGoing() {
     let responses = ArrayList<AssistantMessage>()
     let calls = ArrayList<(String, String)>()
     calls.add(("b1", "boom"))
@@ -113,8 +121,8 @@ func runtime_batchFailure_pairsEveryCallAndDoesNotSuspend() {
 
     // 不挂起：宿主不该收到"在等你输入"的信号
     @Expect(hasEventKind(kinds, "suspend"), false)
-    // 整批失败后收尾：不再发起第二次请求
-    @Expect(provider.callCount, Int64(1))
+    // 工具失败**不中断回合**：脚本化 provider 的第二次响应被请求到
+    @Expect(provider.callCount, Int64(2))
     // 历史必须完整：两个调用各有结果，且收口无需再补
     @Expect(ensureToolCallResults(history), Int64(0))
     var b1 = false

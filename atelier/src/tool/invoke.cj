@@ -96,6 +96,30 @@ public struct ToolBudgetPolicy {
  * - `None` 或不足 1ms 的预算 = 不限时，直接在当前线程同步执行（不额外起线程）。
  */
 
+/**
+ * 同步执行工具，并把**工具自己抛的异常**转成一条失败结果。
+ *
+ * 为什么必须隔离：`executeTool` 的两条分支（有无超时预算）此前行为不一致 ——
+ * 有预算时调用被 `spawn` 包起来，异常在边界上变成 isError 结果；无预算时直接调用，
+ * 异常原样冒到 `executeBatch`，进而让整批按"框架失败"收尾、整个 run 结束。
+ * 同一份工具代码在两种预算配置下因此有**不同的失败语义**，而预算只该改变
+ * "等多久"，不该改变"出错了会怎样"。
+ *
+ * 隔离后的语义与 pi 一致：单个工具的任何异常都只是**这一次调用**的失败，
+ * 回合照常继续，模型能看到原因并自行决定重试或换路。
+ *
+ * 用 `e.toString()` 而不是 `e.message`：FS / Socket 这类异常的 message 常为空，
+ * 只打 message 等于什么都没留（runtime 里同口径）。
+ */
+private func invokeIsolated(tool: Tool, ctx: ToolContext, args: JsonValue): ToolResult {
+    try {
+        tool.execute(ctx, args)
+    } catch (e: Exception) {
+        // 与 runtime 的批次兜底同一文案口径
+        ToolResult("[Tool error: ${e.toString()}]", None, true, false)
+    }
+}
+
 public func executeTool(
     tool: Tool,
     ctx: ToolContext,
@@ -104,31 +128,55 @@ public func executeTool(
 ): ToolResult {
     let limit = match (budget) {
         case Some(value) => value
-        case None => return tool.execute(ctx, args)
+        case None => return invokeIsolated(tool, ctx, args)
     }
     if (limit.toMilliseconds() <= 0) {
-        return tool.execute(ctx, args)
+        return invokeIsolated(tool, ctx, args)
     }
 
-    let future = spawn {
-        tool.execute(ctx, args)
-    }
+    return invokeWithBudget(tool, ctx, args, limit)
+}
+
+/**
+ * 带预算的执行：超时与**工具自身异常**都在这一层隔离。
+ *
+ * 两个容易误判的点（都实测确认过）：
+ * ① `spawn` 边界**不会**吃掉工具异常 —— `future.get()` 会把任务抛出的异常重新抛到
+ *    调用线程。因此"有预算就自动变成 isError 结果"并不成立，此前两条分支同样会把
+ *    异常冒到 `executeBatch`。
+ * ② `tryGet()` 在任务以异常结束时同样重新抛出，所以超时分支里也要能兜住它。
+ *
+ * 于是整个方法体包一层 `catch (Exception)`：任何来自工具（或任务调度）的异常都转成
+ * 一条失败结果，与 {@link invokeIsolated} 行为一致。内层仍先判 `TimeoutException`，
+ * 因为超时要区分"框架超时"与"工具自己抛的 TimeoutException"，两者语义不同。
+ */
+private func invokeWithBudget(tool: Tool, ctx: ToolContext, args: JsonValue,
+    limit: Duration): ToolResult {
     try {
-        future.get(limit)
-    } catch (e: TimeoutException) {
-        // 到这一步有两种可能：真的等满了预算，或者工具自己抛了 TimeoutException。
-        // tryGet 区分两者：任务已结束（无论带结果还是带异常）就让它的结果/异常
-        // 原样冒泡，仍在运行才是框架超时。
-        match (future.tryGet()) {
-            case Some(result) =>
-                // 竞态：恰好在判定超时的瞬间完成——真结果优先，不伪造失败
-                result
-            case None =>
-                // 协作式取消请求：本身不会停止线程，但让「可以自己放弃」的工具
-                // （检查 Thread.hasPendingCancellation 的实现）有机会提前收尾
-                future.cancel()
-                ToolResult(timeoutText(tool, limit), None, true, false)
+        let future = spawn {
+            tool.execute(ctx, args)
         }
+        try {
+            future.get(limit)
+        } catch (e: TimeoutException) {
+            // 到这一步有两种可能：真的等满了预算，或者工具自己抛了 TimeoutException。
+            // tryGet 区分两者：任务已结束（无论带结果还是带异常）就让它的结果/异常
+            // 原样冒泡，仍在运行才是框架超时。
+            match (future.tryGet()) {
+                case Some(result) =>
+                    // 竞态：恰好在判定超时的瞬间完成——真结果优先，不伪造失败
+                    result
+                case None =>
+                    // 协作式取消请求：本身不会停止线程，但让「可以自己放弃」的工具
+                    // （检查 Thread.hasPendingCancellation 的实现）有机会提前收尾
+                    future.cancel()
+                    ToolResult(timeoutText(tool, limit), None, true, false)
+            }
+        }
+    } catch (e: Exception) {
+        // 工具自身抛的异常（含工具抛出 TimeoutException 且 tryGet 重新抛出它的情形）：
+        // 只是**这一次调用**失败，不应升级为整批失败/整个 run 结束
+        ToolResult("[Tool error: ${e.toString()}]", None, true, false)
     }
 }
 

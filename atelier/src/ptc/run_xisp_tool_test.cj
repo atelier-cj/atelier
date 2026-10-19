@@ -287,14 +287,19 @@ func runXisp_logsAreStreamedThroughEvents() {
 
 @Test
 func runXisp_handlerNeverThrows() {
-    // 工具抛出的异常必须被转成失败结果，不能穿过求值器
+    // 工具抛出的异常必须被转成失败结果，不能穿过求值器。
+    //
+    // 文案来源可能有两处：`executeTool` 的单调用隔离（`[Tool error: ...]`），
+    // 或本工具 dispatch 里的兜底 catch（`[tool error: ...]`）。两者都是"工具报错"，
+    // 用例该守的是**不抛且返回失败结果**，不该锁死是哪一层写的文案
+    // （上游加防护后，兜底 catch 自然不再触发 —— 防御性代码保留，但不再被依赖）。
     let events = ArrayList<PtcEvent>()
     let tool = RunXispTool(RunXispTestHelpers.tools([ThrowingTool()]),
         RunXispTestHelpers.makeEnv(events, None))
     let result = tool.execute(ToolContext(""),
         RunXispTestHelpers.toolArgs("(tools::boom {})", "throwing tool"))
     @Assert(result.isError)
-    @Assert(result.text.contains("tool error"))
+    @Assert(result.text.toAsciiLower().contains("tool error"))
 }
 
 /** 每次执行都抛异常的工具。 */
