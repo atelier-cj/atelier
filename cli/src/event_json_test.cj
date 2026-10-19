@@ -75,7 +75,7 @@ func jsonLines_toolExecution() {
 // 回合与压缩事件：压缩是评测关心的行为（触发时机与前后 token）
 @Test
 func jsonLines_turnAndCompaction() {
-    @Expect(lastLine(TurnEndEvent(asstMsg("x", StopReason.ToolUse, TokenUsage(5, 6)), ArrayList<ToolResultMessage>())),
+    @Expect(lastLine(TurnEndEvent(asstMsg("x", StopReason.ToolUse, TokenUsage(5, 6)), ArrayList<ToolResultMessage>(), TurnEndReason.Completed)),
         "{\"type\":\"turn_end\",\"stopReason\":\"tool_use\"," +
         "\"usage\":{\"input\":5,\"output\":6,\"cacheRead\":0,\"cacheWrite\":0}}")
     @Expect(lastLine(CompactionEvent("usage", 1000, 200)),

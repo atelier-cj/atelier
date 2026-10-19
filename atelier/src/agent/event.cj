@@ -26,11 +26,50 @@ public class TurnStartEvent <: AgentEvent {
     public func eventType(): String { "turn_start" }
 }
 
+/**
+ * 一次回合结束的**真实原因**。
+ *
+ * 与 [StopReason] 的分工（两者都必要，不能互相替代）：
+ * - `StopReason` 描述**模型这一条回复**怎么停的（自然结束 / 要调工具 / 被截断 …）；
+ * - `TurnEndReason` 描述**这个回合**为什么收尾 —— 回合可能因为与模型无关的原因结束
+ *   （工具预算耗尽、钩子短路、宿主要求挂起、调用方取消、内部失败）。
+ *
+ * 混用两者的后果：消费端会把「任务被预算掐断」当成「模型正常收尾」，
+ * 于是该提示用户"预算用完了"的场景显示成"已完成"。
+ *
+ * **不带载荷**：错误细节留在 [TurnEndEvent.message] 里（provider 失败消息本就在
+ * 那条 AssistantMessage 上）。一个事实不存两处 —— 否则两处会不一致，消费端还得猜
+ * 该信哪个。
+ */
+public enum TurnEndReason {
+    /** 模型自然收尾，无后续动作 */
+    | Completed
+    /** 工具调用预算耗尽：剩余调用未执行，历史里已补"未执行"结果 */
+    | ToolBudgetExhausted
+    /** `beforeTurn` 钩子短路了整个 run（本条回复是占位说明，不是模型产出） */
+    | BlockedByHook
+    /** 宿主要求先确认/补充：历史停在 `assistant(tool_calls)`，等下一次 run 带回结果 */
+    | Suspended
+    /** 调用方取消（协作式收敛，不是错误） */
+    | Cancelled
+    /** 失败：provider 不可恢复错误、工具批次异常、或运行时内部异常 */
+    | Failed
+}
+
 public class TurnEndEvent <: AgentEvent {
     public let message: AssistantMessage
     public let toolResults: ArrayList<ToolResultMessage>
-    public init(message: AssistantMessage, toolResults: ArrayList<ToolResultMessage>) {
-        this.message = message; this.toolResults = toolResults
+    /**
+     * 本回合为什么结束。
+     *
+     * **不设默认值**：默认值会把"旧的错误收尾"静默当成 `Completed`，
+     * 而那正是这个字段要消除的那类事实缺口。构造点必须逐个给出正确原因，
+     * 漏改会编译报错。
+     */
+    public let reason: TurnEndReason
+    public init(message: AssistantMessage, toolResults: ArrayList<ToolResultMessage>,
+        reason: TurnEndReason) {
+        this.message = message; this.toolResults = toolResults; this.reason = reason
     }
     public func eventType(): String { "turn_end" }
 }

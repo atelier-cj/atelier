@@ -235,7 +235,7 @@ func translator_turnLifecycleEmitsStepEvents() {
     let tr = newTranslator()
     @Expect(kinds(tr.translate(TurnStartEvent())), "STEP_STARTED")
     let msg = asstMsg("done", StopReason.EndTurn)
-    @Expect(kinds(tr.translate(TurnEndEvent(msg, ArrayList<ToolResultMessage>()))), "STEP_FINISHED")
+    @Expect(kinds(tr.translate(TurnEndEvent(msg, ArrayList<ToolResultMessage>(), TurnEndReason.Completed))), "STEP_FINISHED")
     let out = tr.translate(AgentEndEvent(ArrayList<Message>()))
     @Expect(kinds(out), "RUN_FINISHED")
     match (out[0]) {
@@ -251,7 +251,7 @@ func translator_providerErrorEndsRunWithoutFinished() {
     let tr = newTranslator()
     tr.translate(TurnStartEvent())
     let failed = asstMsg("", StopReason.Error)
-    let out = tr.translate(TurnEndEvent(failed, ArrayList<ToolResultMessage>()))
+    let out = tr.translate(TurnEndEvent(failed, ArrayList<ToolResultMessage>(), TurnEndReason.Completed))
     @Expect(kinds(out), "STEP_FINISHED,RUN_ERROR")
     match (out[1]) {
         case e: RunErrorEvent => @Expect(e.code, "provider_error")
@@ -326,7 +326,7 @@ func translator_suspendEndsWithInterruptOutcome() {
     let reqs = ArrayList<ExternalRequest>()
     reqs.add(ExternalRequest("int-c1", "tool_call", "客户端需执行 get_weather", toolCallId: "c1"))
     tr.translate(TurnEndEvent(asstWithTool("c1", "get_weather",
-        JsonValue.Map(HashMap<String, JsonValue>())), ArrayList<ToolResultMessage>()))
+        JsonValue.Map(HashMap<String, JsonValue>())), ArrayList<ToolResultMessage>(), TurnEndReason.Completed))
     @Expect(kinds(tr.translate(SuspendEvent(reqs))), "")
     let out = tr.translate(AgentEndEvent(ArrayList<Message>()))
     @Expect(kinds(out), "RUN_FINISHED")
@@ -357,7 +357,7 @@ func translator_suspendWithQuestionCarriesSchemaThrough() {
     tr.translate(MessageStartEvent(msg))
     tr.translate(MessageEndEvent(msg))
     tr.translate(SuspendEvent(reqs))
-    tr.translate(TurnEndEvent(msg, ArrayList<ToolResultMessage>()))
+    tr.translate(TurnEndEvent(msg, ArrayList<ToolResultMessage>(), TurnEndReason.Completed))
     let out = tr.translate(AgentEndEvent(ArrayList<Message>()))
     @Expect(kinds(out), "RUN_FINISHED")
 

@@ -82,7 +82,7 @@ func translator_emptyDeltaNoop() {
     @Expect(t.translate(TurnStartEvent()).size, 0)
     @Expect(t.translate(textDeltaEvent("")).size, 0)
     @Expect(t.translate(AgentStartEvent("sess_1")).size, 0)
-    @Expect(t.translate(TurnEndEvent(assistantMsg(ContentList.ofText("ok"), StopReason.EndTurn, TokenUsage(0, 0)), ArrayList<ToolResultMessage>())).size, 0)
+    @Expect(t.translate(TurnEndEvent(assistantMsg(ContentList.ofText("ok"), StopReason.EndTurn, TokenUsage(0, 0)), ArrayList<ToolResultMessage>(), TurnEndReason.Completed)).size, 0)
 }
 
 // ---------- 工具调用 → tool_call / tool_call_update ----------
@@ -252,7 +252,7 @@ func translator_errorTurnEmitsVisibleFailureText() {
     let blocks = ArrayList<ContentBlock>()
     blocks.add(ContentBlock.TextBlock("[provider error] HTTP 429"))
     let failed = AssistantMessage(ContentList(blocks), "", "", StopReason.Error, TokenUsage(0, 0), 0)
-    let ups = tr.translate(TurnEndEvent(failed, ArrayList<ToolResultMessage>()))
+    let ups = tr.translate(TurnEndEvent(failed, ArrayList<ToolResultMessage>(), TurnEndReason.Completed))
     @Expect(ups.size, 1)
 }
 
@@ -263,5 +263,5 @@ func translator_normalTurnEndEmitsNothing() {
     let blocks = ArrayList<ContentBlock>()
     blocks.add(ContentBlock.TextBlock("正常回答"))
     let ok = AssistantMessage(ContentList(blocks), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0)
-    @Expect(tr.translate(TurnEndEvent(ok, ArrayList<ToolResultMessage>())).size, 0)
+    @Expect(tr.translate(TurnEndEvent(ok, ArrayList<ToolResultMessage>(), TurnEndReason.Completed)).size, 0)
 }

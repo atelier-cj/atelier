@@ -910,7 +910,7 @@ public open class AgentRuntime <: AgentLoop {
                         let failureMsg = AssistantMessage(ContentList.ofText("[provider error] ${errText}"), "", "", StopReason.Error, TokenUsage(0, 0), 0)
                         // 同短路分支：错误必须进消息列表，否则消费端与界面都看不到它
                         scope.messages.add(failureMsg)
-                        this.emit(stream, TurnEndEvent(failureMsg, ArrayList<ToolResultMessage>()))
+                        this.emit(stream, TurnEndEvent(failureMsg, ArrayList<ToolResultMessage>(), TurnEndReason.Failed))
                         requestFailed = true
                 }
             }
@@ -955,7 +955,7 @@ public open class AgentRuntime <: AgentLoop {
                     if (pendingAsks.size > 0) {
                         // 整批一起挂起：一次把本批所有待确认项交给宿主，
                         // 恢复后同一批一次做完（而不是逐个挂起、逐个恢复）
-                        this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
+                        this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>(), TurnEndReason.Suspended))
                         this.emit(stream, SuspendEvent(pendingAsks))
                         return ToolBatchOutcome.SuspendedForExternal
                     }
@@ -984,7 +984,7 @@ public open class AgentRuntime <: AgentLoop {
                         // "整批失败"这条路可以无限重试而不吃预算。
                         scope.toolCallCount += toolCalls.size
                         scope.lastToolTime = MonoTime.now()
-                        this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
+                        this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>(), TurnEndReason.Failed))
                         // 历史已补齐（每 call 一条错误结果），不是"在等外部输入"：
                         // 不发 SuspendEvent，也不让收尾收口跳过
                         return ToolBatchOutcome.BatchFailed
@@ -1030,7 +1030,7 @@ public open class AgentRuntime <: AgentLoop {
                     }
                     scope.toolCallCount += toolCalls.size
                     scope.lastToolTime = MonoTime.now()
-                    this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
+                    this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>(), TurnEndReason.Suspended))
                     if (pendingExternal.size > 0) {
                         // 中止本次 run：历史已落在 assistant(tool_calls)，
                         // 下一次 run 带结果即可继续（见 SuspendEvent 注释）
@@ -1246,7 +1246,7 @@ public open class AgentRuntime <: AgentLoop {
                 let baseSystemText = ctxBuilder.buildSystemText(
                     this.config.systemPrompt, this.config.skills)
 
-                while (!scope.finished && !cancelFlag.load() && scope.turnCount < Int64(this.config.maxTurns)) {
+                while (scope.endReason.isNone() && !cancelFlag.load() && scope.turnCount < Int64(this.config.maxTurns)) {
                     this.openTurn(scope, sessionId, stream, ctxBuilder, log)
 
                     this.announceTurnMessage(scope, stream)
@@ -1289,8 +1289,8 @@ public open class AgentRuntime <: AgentLoop {
                             // 必须同时进消息列表：消费端只从 result() 读消息，仅 emit 事件
                             // 等于什么都没发生（交互前端表现为「跑完界面上没有任何输出」）
                             scope.messages.add(shortCircuitMsg)
-                            this.emit(stream, TurnEndEvent(shortCircuitMsg, ArrayList<ToolResultMessage>()))
-                            scope.finished = true
+                            this.emit(stream, TurnEndEvent(shortCircuitMsg, ArrayList<ToolResultMessage>(), TurnEndReason.BlockedByHook))
+                            scope.endReason = Some(TurnEndReason.BlockedByHook)
                             break
                     }
 
@@ -1308,7 +1308,8 @@ public open class AgentRuntime <: AgentLoop {
                     let assistantMsg = match (attempt) {
                         case ProviderAttempt.Ok(m) => m
                         case ProviderAttempt.Failed =>
-                            scope.finished = true
+                            // TurnEndEvent 已在 invokeProvider 内发出（Failed）
+                            scope.endReason = Some(TurnEndReason.Failed)
                             continue
                     }
                     log.info("provider response received", Array<Attr>())
@@ -1320,8 +1321,8 @@ public open class AgentRuntime <: AgentLoop {
                             if (cancelFlag.load()) {
                                 // 取消：不再发起工具批次，直接收尾
                                 log.info("run cancelled at tool boundary", Array<Attr>())
-                                this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
-                                scope.finished = true
+                                this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>(), TurnEndReason.Cancelled))
+                                scope.endReason = Some(TurnEndReason.Cancelled)
                                 break
                             }
                             let toolCalls = assistantMsg.toolCalls()
@@ -1329,8 +1330,8 @@ public open class AgentRuntime <: AgentLoop {
                                 // provider 报了工具回合却没给任何调用：空批次会让循环原地空转
                                 // （每轮请求都一样），按回合结束收尾
                                 log.warn("stop reason is ToolUse but the message carries no tool call; finish the turn", Array<Attr>())
-                                this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
-                                scope.finished = true
+                                this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>(), TurnEndReason.Completed))
+                                scope.endReason = Some(TurnEndReason.Completed)
                                 break
                             }
                             log.info("tool calls: ${toolCalls.size}", Array<Attr>())
@@ -1352,8 +1353,8 @@ public open class AgentRuntime <: AgentLoop {
                                         scope.messages.add(tr)
                                         exhaustedResults.add(tr)
                                     }
-                                    this.emit(stream, TurnEndEvent(assistantMsg, exhaustedResults))
-                                    scope.finished = true
+                                    this.emit(stream, TurnEndEvent(assistantMsg, exhaustedResults, TurnEndReason.ToolBudgetExhausted))
+                                    scope.endReason = Some(TurnEndReason.ToolBudgetExhausted)
                                     break
                                 case ToolBudgetVerdict.AllAllowed => ()
                                 case ToolBudgetVerdict.Trimmed(allowed) =>
@@ -1408,12 +1409,14 @@ public open class AgentRuntime <: AgentLoop {
                                     // assistant(tool_calls)，收尾收口要认这个状态
                                     // （见 RunScope.suspended）
                                     scope.suspended = true
-                                    scope.finished = true
+                                    // TurnEndEvent 已在批次内发出（Suspended）
+                                    scope.endReason = Some(TurnEndReason.Suspended)
                                     continue
                                 case ToolBatchOutcome.BatchFailed =>
                                     // 整批失败：历史已补齐（每 call 一条错误结果），
                                     // 不置 suspended —— 收口照常跑，且宿主拿到的不是挂起
-                                    scope.finished = true
+                                    // TurnEndEvent 已在批次内发出（Failed）
+                                    scope.endReason = Some(TurnEndReason.Failed)
                                     continue
                                 case ToolBatchOutcome.ContinueRun => ()
                             }
@@ -1422,8 +1425,8 @@ public open class AgentRuntime <: AgentLoop {
                             if (cancelFlag.load()) {
                                 // 取消：跳过 afterTurn 改写与压缩等后续处理，直接收尾
                                 log.info("run cancelled at turn end", Array<Attr>())
-                                this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
-                                scope.finished = true
+                                this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>(), TurnEndReason.Cancelled))
+                                scope.endReason = Some(TurnEndReason.Cancelled)
                                 break
                             }
                             // 带 tool_call 却又不是工具回合（输出被截断、终止原因缺失/未识别、
@@ -1476,12 +1479,12 @@ public open class AgentRuntime <: AgentLoop {
                             }
                             if (turnUpdate.shortCircuit) {
                                 log.info("afterTurn hook short-circuited run", Array<Attr>())
-                                this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
-                                scope.finished = true
+                                this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>(), TurnEndReason.BlockedByHook))
+                                scope.endReason = Some(TurnEndReason.BlockedByHook)
                                 break
                             }
-                            this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
-                            scope.finished = true
+                            this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>(), TurnEndReason.Completed))
+                            scope.endReason = Some(TurnEndReason.Completed)
                     }
                 }
 

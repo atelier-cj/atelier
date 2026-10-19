@@ -66,8 +66,17 @@ internal class RunScope {
     /** 上次工具执行时刻（用于批次间节流） */
     var lastToolTime: MonoTime = MonoTime.now()
 
-    /** 循环是否该收敛 */
-    var finished: Bool = false
+    /**
+     * 循环是否该收敛 —— 以及**为什么**收敛。
+     *
+     * `None` = 还在跑；一旦置成 `Some(reason)` 就退出循环（与原 `finished = true`
+     * 等价）。用「原因」而不是布尔的原因：收尾原因本身就是消费端要的事实，
+     * 用布尔再在旁边另记一份原因，两者会不同步。
+     *
+     * 置位点都在 `TurnEndEvent` 已发出之后（或该事件在批次/调用方法内已发出），
+     * 因此 `endReason` 与最后一个 `TurnEndEvent.reason` 始终一致。
+     */
+    var endReason: Option<TurnEndReason> = None
 
     /**
      * 本次 run 以**挂起**收尾（有调用在等外部结果）。
