@@ -1213,10 +1213,11 @@ public open class AgentRuntime <: AgentLoop {
             // 本轮已写入的历史，才能在交还调用方之前把它对齐成合法历史
             let scope = RunScope(ArrayList<Message>(messages), runTools,
                 ToolExecutor(runTools, budget: toolBudgetPolicyOf(this.config)))
+            // 与 scope 一样提到 try 之外：收尾钩子在 finally 里调用
+            let hookState = HookState()
             try {
                 this.emit(stream, AgentStartEvent(sessionId))
                 log.info("agent start: ${this.config.name}", Array<Attr>())
-                let hookState = HookState()
                 callHooks(scope.tools, "beforeRun", 0, hookState)
 
                 // 系统提示词独立通道（不再注入为消息）；初始消息 = 历史。
@@ -1453,7 +1454,6 @@ public open class AgentRuntime <: AgentLoop {
                 }
 
                 log.info("agent end, total turns=${scope.turnCount}", Array<Attr>())
-                callHooks(scope.tools, "afterRun", scope.turnCount, hookState)
                 // 交还前再收口一次：`ensureToolCallResults` 此前只在**发请求前**跑，
                 // 最后一轮写完历史就收尾，中间没有任何收口点。最后一轮仍会写历史的路径
                 // 不止一条（assistant 消息、预算耗尽 / 裁剪掉的调用、非工具回合里带的
@@ -1483,6 +1483,13 @@ public open class AgentRuntime <: AgentLoop {
                 stream.setError(Exception("runtime system error: " + e.toString()))
                 ()   // 同上：catch 段以 Unit 收尾
             } finally {
+                // "run 结束"是**所有**退出路径的契约，不是正常路径的专利：
+                // 框架级异常（如工具声明期抛出）走 catch 直接收尾，而收尾钩子此前只挂在
+                // 正常路径上 —— 失败路径的宿主清理逻辑（落盘、释放外部资源、上报账目）
+                // 会静默不执行，且与 beforeRun 的括弧不配对。
+                // 放在 finally 最前（早于 close）：钩子仍可发事件、读会话状态。
+                // `callHooks` 内部对每个钩子各自 try/catch，不会让 finally 二次抛出。
+                callHooks(scope.tools, "afterRun", scope.turnCount, hookState)
                 // 生命周期：本次执行收敛（含挂起、取消、异常）→ 回到 idle。
                 // 放在 finally 而不是正常路径尾部：退出只能是「本次执行结束」这一种含义，
                 // 而正常/取消/异常三条路径都会走到这里，漏掉任一条都会让 status() 卡在 Running
