@@ -49,6 +49,28 @@ func toolBudgetPolicyOf(config: AgentConfig): ToolBudgetPolicy {
         budgetSeconds(config.sideEffectToolTimeout))
 }
 
+/**
+ * 按工具名就地稳定排序（插入排序：工具数量很小，且不引入排序依赖）。
+ *
+ * 存在的理由只有一条**字节稳定性**：工具声明与 PTC SDK 段都是提示词前缀的一部分，
+ * 批次相同但顺序不同的前缀等于两次不同的前缀。`PtcSdkRenderer` 内部已自行排序，
+ * 这里统一在解析出口排一次，让 native 投影与 PTC 投影看到同一个顺序。
+ */
+func sortToolsByName(tools: ArrayList<Tool>): Unit {
+    let n = tools.size
+    var i: Int64 = 1
+    while (i < n) {
+        let cur = tools[i]
+        var j = i - 1
+        while (j >= 0 && tools[j].name() > cur.name()) {
+            tools[j + 1] = tools[j]
+            j--
+        }
+        tools[j + 1] = cur
+        i++
+    }
+}
+
 /** 秒 → 预算；0 = 不限时。 */
 func budgetSeconds(seconds: UInt32): Option<Duration> {
     if (seconds == 0) {
@@ -1516,6 +1538,13 @@ public open class AgentRuntime <: AgentLoop {
                 }
             }
         }
+        // **按名字稳定排序**：可见工具会进入提示词前缀（工具声明 / PTC SDK 段）。
+        // 通配分支（`prefix_*`）遍历的是注册表，而注册表底层是 HashMap ——
+        // 迭代顺序取决于插入历史：运行中按需注册 MCP 工具、或不同会话先加载了不同的
+        // 工具集，都会让同一批工具排出不同顺序。前缀只要从第一个工具起就不同，
+        // provider 的前缀缓存就整段未命中（缓存按前缀单元完整匹配计价）。
+        // 每轮仍重算（MCP 冷却要随回合推进），但**同一批工具必须给出同一顺序**。
+        sortToolsByName(result)
         result
     }
 
