@@ -2,6 +2,7 @@ package atelier.agent
 
 import atelier.message.{Message, AssistantMessage}
 import atelier.tool.{ExternalRequest, ToolRegistry, ToolExecutor}
+import atelier.ptc.PtcRunSeq
 import std.collection.*
 import std.time.MonoTime
 import jsonvalue.*
@@ -80,6 +81,15 @@ internal class RunScope {
      * 在视图里照样可见，因此隔离不牺牲「本轮注册、本轮可用」。
      */
     var tools: ToolRegistry
+
+    /**
+     * `run_xisp` 的调用序号（**跨回合单调**）。
+     *
+     * 存在 run 作用域而不是 `RunXispTool` 实例上：那个实例每轮重建（绑本回合执行环境），
+     * 序号随实例归零会让每回合第一次 PTC 都从 1 开始，子调用 id 跨回合撞号 ——
+     * 而 ACP / AG-UI / activity 拿它当唯一键。见 [PtcRunSeq]。
+     */
+    let ptcRunSeq: PtcRunSeq = PtcRunSeq()
 
     /**
      * 本次 run 的工具执行器。

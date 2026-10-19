@@ -24,6 +24,7 @@ import atelier.context.compactWithSummary
 import atelier.context.estimateTokens
 import atelier.context.{summarizeText, plainTextOf}
 import atelier.ptc.*
+import atelier.ptc.PtcRunSeq
 import atelier.event.EventStream
 import std.io.InputStream
 import jsonvalue.*
@@ -1258,8 +1259,8 @@ public open class AgentRuntime <: AgentLoop {
                     // 先解析可见工具，再据此生成 SDK 段：两处必须来自同一次解析，
                     // 否则模型看到的绑定会与程序实际能调用的能力分叉
                     let visible = this.resolveVisibleTools(scope.tools)
-                    let tools = this.resolveTools(scope.tools, visible, ctx, stream, cancelFlag,
-                        hookState, scope.turnCount)
+                    let tools = this.resolveTools(scope.tools, scope.ptcRunSeq, visible, ctx,
+                        stream, cancelFlag, hookState, scope.turnCount)
                     let systemText = if (this.config.toolPresentation == ToolPresentationMode.Native) {
                         baseSystemText
                     } else {
@@ -1602,6 +1603,7 @@ public open class AgentRuntime <: AgentLoop {
      */
     private func resolveTools(
         registry: ToolRegistry,
+        ptcRunSeq: PtcRunSeq,
         visible: ArrayList<Tool>,
         ctx: ToolContext,
         stream: EventStream<AgentEvent, ArrayList<Message>>,
@@ -1627,7 +1629,9 @@ public open class AgentRuntime <: AgentLoop {
                 { => cancelFlag.load() }, emit, authorizer,
                 maxSubCalls: Int64(this.config.ptcMaxSubCalls),
                 timeout: Some(Duration.second * Int64(this.config.ptcTimeoutSeconds)),
-                toolBudget: toolBudgetPolicyOf(this.config))
+                toolBudget: toolBudgetPolicyOf(this.config),
+                // 序号跨回合单调：来自 run 作用域（见 RunScope.ptcRunSeq）
+                runSeq: Some(ptcRunSeq))
             let tool = RunXispTool(visible, env)
             // 分发链路按名字查表，因此它必须可见 —— 但只注册进**本次 run 的视图**：
             // 这个实例的 env 绑着本次 run 的 workDir / sessionId / cancelFlag / authorizer，

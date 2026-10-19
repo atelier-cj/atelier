@@ -2,6 +2,7 @@ package atelier.ptc
 
 import jsonvalue.*
 import std.collection.*
+import std.sync.*
 import std.time.*
 import atelier.tool.*
 
@@ -260,6 +261,37 @@ public type PtcAuthorizer = (Tool, JsonValue) -> PtcAuthDecision
  * 由运行时在每轮组装工具时构造：闭包捕获该回合的取消标志、事件出口与授权逻辑。
  * 因此一个 `RunXispTool` 实例只在构造它的那一轮内有效，不跨回合复用。
  */
+/**
+ * `run_xisp` 的**跨回合**调用序号。
+ *
+ * 为什么必须是共享的引用类型：`RunXispTool` 实例每轮新建（它绑着本回合的执行环境），
+ * 序号若放在实例上，每个回合的第一次 PTC 都会重新从 1 开始 —— 子调用 id
+ * （`run_xisp#N:ptc:M`）在不同回合之间撞号，而调用方（ACP / AG-UI / activity 日志）
+ * 拿它当审计与界面的唯一键：撞号意味着"两个不同的执行显示成同一次"。
+ *
+ * 因此序号的生命周期是**一次 run**（跨回合单调），由运行时在 run 作用域里造一份，
+ * 每轮构造 `RunXispTool` 时传进去。
+ */
+public class PtcRunSeq {
+    private let lock = Mutex()
+    private var seq: Int64 = 0
+
+    public init() {}
+
+    /** 取下一个序号（从 1 开始，跨回合单调递增）。 */
+    public func next(): Int64 {
+        synchronized(this.lock) {
+            this.seq = this.seq + 1
+            this.seq
+        }
+    }
+
+    /** 当前已发出的序号（只读；测试与诊断用）。 */
+    public func current(): Int64 {
+        synchronized(this.lock) { this.seq }
+    }
+}
+
 public struct PtcRunEnv {
     /** 工作目录（子调用据此解析相对路径）。 */
     public let workDir: String
@@ -288,6 +320,13 @@ public struct PtcRunEnv {
     public let toolBudget: ToolBudgetPolicy
     /** 日志累计上限（字符数）。 */
     public let maxLogChars: Int64
+    /**
+     * `run_xisp` 调用序号（跨回合单调）。
+     *
+     * 必须是 run 作用域共享的同一份：详见 [PtcRunSeq]。None = 本环境自建一份
+     * （单轮独立使用的场景，序号只在本环境内有意义）。
+     */
+    public let runSeq: Option<PtcRunSeq>
 
     public init(
         workDir: String,
@@ -298,7 +337,8 @@ public struct PtcRunEnv {
         maxSubCalls!: Int64 = 64,
         timeout!: Option<Duration> = None,
         toolBudget!: ToolBudgetPolicy = ToolBudgetPolicy(None, None),
-        maxLogChars!: Int64 = 32768
+        maxLogChars!: Int64 = 32768,
+        runSeq!: Option<PtcRunSeq> = None
     ) {
         this.workDir = workDir
         this.sessionId = sessionId
@@ -309,5 +349,6 @@ public struct PtcRunEnv {
         this.timeout = timeout
         this.toolBudget = toolBudget
         this.maxLogChars = maxLogChars
+        this.runSeq = runSeq
     }
 }
