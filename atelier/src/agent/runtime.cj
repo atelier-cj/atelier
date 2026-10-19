@@ -521,16 +521,25 @@ public open class AgentRuntime <: AgentLoop {
      * 否则用模型事实（声明 > provider 自报 > 兜底）。
      */
     public func maxOutputTokensInUse(): Int64 {
+        this.maxOutputTokensInUseFor(this.pickModel(this.config.model))
+    }
+
+    // 按**指定模型**取完成预算（压缩按路由后的模型算窗口时要用同一份口径）
+    private func maxOutputTokensInUseFor(model: String): Int64 {
         if (this.config.maxOutputTokens > 0) {
             return Int64(this.config.maxOutputTokens)
         }
-        this.modelInfoInUse().info.maxTokens
+        this.modelInfoInUse(modelForRequest: model).info.maxTokens
     }
 
     // 模型事实（窗口 + 完成预算）：声明 > provider 自报 > 兜底，全链路没人知道时提醒一次
     // （静默按兜底值走 = "模型聊着聊着忘了前面"/"输出被莫名截断"，而下游看不到线索）
-    private func modelInfoInUse(): ResolvedModelInfo {
-        let model = this.pickModel(this.config.model)
+    //
+    // `modelForRequest`：传空串 = 用配置声明的模型；给出时按那个模型算事实。
+    // 钩子可以把请求路由到另一个模型（ChatRequest.model），此时窗口必须按**路由后**的
+    // 模型算 —— 否则小窗口模型会拿到大窗口的阈值判定，压缩永远不触发直到被判 400。
+    private func modelInfoInUse(modelForRequest!: String = ""): ResolvedModelInfo {
+        let model = if (modelForRequest != "") { modelForRequest } else { this.pickModel(this.config.model) }
         let providerName = providerNameOf(this.config)
         let resolved = this.spec.resolveModelInfo(providerName, model)
         if (!resolved.declared) {
@@ -738,13 +747,15 @@ public open class AgentRuntime <: AgentLoop {
      * 而时序（括弧/台账/互斥）留在运行时保证跨实现一致。
      */
     private func compactBeforeRequest(scope: RunScope, sessionId: String,
-        actualModel: String, systemText: String, tools: ArrayList<OpenAITool>,
+        requestModel: String, systemText: String, tools: ArrayList<OpenAITool>,
         log: Logger): Unit {
         var measureMessages = scope.messages
         if (this.compactionEnabledFor()) {
             let cc = this.compactionConfig()
-            let route = CompactRoute(actualModel,
-                this.modelInfoInUse().info.contextWindow, this.maxOutputTokensInUse())
+            // 窗口按**本次请求实际路由到的模型**算（钩子可能把请求改投到别的模型）
+            let route = CompactRoute(requestModel,
+                this.modelInfoInUse(modelForRequest: requestModel).info.contextWindow,
+                this.maxOutputTokensInUseFor(requestModel))
             // 修剪版只用于测量：真正发出去的请求由 wireRequest 再修剪一次
             // （下面 `currentMessages = chatReq.messages` 会把请求表收编为历史，
             //  在这里写回修剪版会让修剪流进落库历史）
@@ -771,7 +782,7 @@ public open class AgentRuntime <: AgentLoop {
                     // 与 compactor 内部的判定口径可以不同：前者是"这次压之前有多大"
                     let total = this.pressureForNextRequest(measureMessages)
                     let compactor = this.compactor
-                    let compactionRuntime = CompactionRuntime(this.provider, actualModel,
+                    let compactionRuntime = CompactionRuntime(this.provider, requestModel,
                         systemText, tools, cc)
                     scope.messages = this.compactBracketed(plan.trigger, sessionId,
                         scope.messages, total, log, { msgs, _ =>
@@ -1199,7 +1210,6 @@ public open class AgentRuntime <: AgentLoop {
                     } else {
                         baseSystemText + "\n\n" + PtcSdkRenderer.render(visible)
                     }
-                    this.compactBeforeRequest(scope, sessionId, actualModel, systemText, tools, log)
                     var chatReq: ChatRequest = ctxBuilder.buildChatRequest(actualModel, systemText, scope.messages,
                         Float64(this.config.temperature), this.maxOutputTokensInUse(),
                         this.config.thinkingLevel, tools)
@@ -1211,6 +1221,16 @@ public open class AgentRuntime <: AgentLoop {
                             }
                             // 若 hook 改写了请求的 messages，同步回运行时上下文，避免分叉
                             scope.messages = chatReq.messages
+                            // 压缩放在钩子**之后**：钩子是这个回合最后的历史改写点。压完再被它整体
+                            // 替换回长历史，等于白压（括弧与台账记的还是一份没人用的历史）；反过来，
+                            // 钩子改写的 messages 才是本次请求的真实输入，压缩必须针对它判定。
+                            // 窗口按 chatReq.model 算：钩子可能把请求路由到另一个（可能更小的）模型。
+                            this.compactBeforeRequest(scope, sessionId, chatReq.model,
+                                chatReq.systemPrompt, chatReq.tools, log)
+                            // 压缩改写的是 scope.messages；请求必须一并跟上，否则发出去的仍是长历史
+                            chatReq = ChatRequest(chatReq.model, scope.messages, chatReq.temperature,
+                                chatReq.maxTokens, chatReq.reasoningEffort, chatReq.tools, chatReq.extra,
+                                systemPrompt: chatReq.systemPrompt)
                         case None =>
                             log.info("beforeTurn hook short-circuited run", Array<Attr>())
                             let shortCircuitMsg = AssistantMessage(ContentList.ofText("[Run short-circuited by hook]"), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0)
