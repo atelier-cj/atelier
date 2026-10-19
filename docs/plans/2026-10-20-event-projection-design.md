@@ -14,7 +14,7 @@
 | 副本 | 位置 | 形态 |
 |---|---|---|
 | ① 宿主事件 DTO | `agent_plugin/src/main.cj:465` `toEventDto` | `AgentEventDto(sid, eventType())`，**结构化字段大量丢弃** |
-| ② `TurnTermination` | `agent_plugin/src/turn_termination.cj`（~200 行） | 专门猜「这一轮到底结束没有」的状态机 |
+| ② `TurnTermination` | `agent_plugin/src/turn_termination.cj`（**实测 88 行**，非原先估计的 200 行） | 大部分是**合法的流语义**（close 可能先于事件被观测到 → drain 排队事件、idle 上限、超时收窄）；只有「用 `AgentEndEvent` 把 10s 窗口收窄到 1s」这一处是绕路 |
 | ③ UI `SessionView.items` | `yggdrasil_host/src/chat_page.cj:68,150-190` | 自己用 `items.add` / `items[n-1]` 重建消息投影 |
 
 ② 的注释是核心证据：
@@ -138,7 +138,11 @@ public class RunProjection {
 
 ## 4. 2c：世界树改造（验收标准）
 
-**验收判据：`TurnTermination` 那 200 行能删掉，且行为等价。** 如果删不掉，说明投影层没做对。
+**验收判据（已修正，见下）：不是「删掉 88 行」，而是「把猜语义的部分换成读事实」。**
+
+> ⚠️ **修正记录**：初版设计写的是「`TurnTermination` 那 200 行能删掉」，实测该文件只有 **88 行**，且大部分是合法的流语义（`EventStream` 的生产端顺序是 `setResult → emit(AgentEndEvent) → close()`，close 可能先被观测到，所以必须 drain 排队事件）。真正绕路的只有一处：用 `AgentEndEvent` 把等待窗口从 10s 收窄到 1s。
+>
+> 因此 2c 的目标是**替换那一处信号源**，不是删文件。为了凑「删 200 行」而破坏合法的流语义，是本末倒置。
 
 改造点：
 1. `agent_plugin/src/turn_termination.cj` → 删除，改读 `RunProjection.status`
@@ -154,7 +158,7 @@ public class RunProjection {
 | `sawEnd` / `idleRounds` / `drainRounds`：事件流关闭后仍可能有排队事件 | **合法的流语义**（生产端 `setResult → emit → close` 的顺序） | **保留**，但它不是「猜终局」，是「等流真正空」 |
 | 用 `AgentEndEvent` 推断「这一轮完了」 | **绕路**（真实原因拿不到） | 删除，改读投影 |
 
-所以 2c 不是无脑删 200 行，而是**把猜语义的部分换成读事实**，等流的部分保留。这点必须在实施时守住。
+所以 2c 不是无脑删文件，而是**把猜语义的那一处换成读事实**，等流的部分保留。这点必须在实施时守住——删多了会把"close 先到"这个真实竞态重新引进来。
 
 ---
 
