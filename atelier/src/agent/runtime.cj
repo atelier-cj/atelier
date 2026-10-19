@@ -1220,9 +1220,20 @@ public open class AgentRuntime <: AgentLoop {
                             match (decideToolBudget(scope.toolCallCount, toolCalls.size, maxCalls)) {
                                 case ToolBudgetVerdict.Exhausted =>
                                     log.warn("max tool calls (${maxCalls}) reached", Array<Attr>())
-                                    scope.messages.add(ToolResultMessage("", "",
-                                        ContentList.ofText("Max tool calls (${maxCalls}) reached, skipping"), true, 0))
-                                    this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
+                                    // 预算用完：本批一个都不执行，但**每个调用都要有配对结果**。
+                                    // 这条 assistant 消息带着 N 个 tool_call，只回一条 id 为空的
+                                    // 结果（旧写法）等于既没有配对、又在历史里留下一条空 id 的脏结果：
+                                    // 落库后历史与「每个 tool_call 恰好一条结果」的不变式不符，
+                                    // 下一轮请求被 provider 判 400 之前，先得靠占位结果兜底补齐。
+                                    // 被跳过的调用各自回一条「预算不足、未执行」，与 Trimmed 分支同口径。
+                                    let exhaustedResults = ArrayList<ToolResultMessage>()
+                                    for (tc in toolCalls) {
+                                        let tr = ToolResultMessage(tc.id, tc.name,
+                                            ContentList.ofText(skippedByToolBudgetNote()), true, 0)
+                                        scope.messages.add(tr)
+                                        exhaustedResults.add(tr)
+                                    }
+                                    this.emit(stream, TurnEndEvent(assistantMsg, exhaustedResults))
                                     scope.finished = true
                                     break
                                 case ToolBudgetVerdict.AllAllowed => ()
@@ -1232,12 +1243,12 @@ public open class AgentRuntime <: AgentLoop {
                                     toolCalls.clear()
                                     for (j in 0..allowed) { toolCalls.add(original[Int64(j)]) }
                                     // 被裁掉的每一个都要有明确结果：否则这条 call 永远没有配对结果，
-                                    // 下一次请求直接被判 400
+                                    // 下一次请求直接被判 400。文案与 Exhausted 分支同一来源
                                     var skipIdx = allowed
                                     while (skipIdx < original.size) {
                                         scope.messages.add(ToolResultMessage(original[Int64(skipIdx)].id,
                                             original[Int64(skipIdx)].name,
-                                            ContentList.ofText("Skipped: max tool calls limit"), true, 0))
+                                            ContentList.ofText(skippedByToolBudgetNote()), true, 0))
                                         skipIdx++
                                     }
                             }
