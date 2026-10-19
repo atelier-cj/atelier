@@ -1528,7 +1528,14 @@ public open class AgentRuntime <: AgentLoop {
                     log.warn("run finished without recording a turn-end reason; this indicates a missing assignment on some exit path", Array<Attr>())
                 }
                 stream.setResult(scope.messages)
-                this.emit(stream, AgentEndEvent(scope.messages))
+                // 正常路径：`endReason` 此时必有值（上面的自检保证）。
+                // 万一没有（未来新增退出条件漏置位），按 Completed 收尾并已由自检留痕，
+                // 不让"缺原因"变成事件层无法表达的状态。
+                let runEnd = match (scope.endReason) {
+                    case Some(r) => r
+                    case None => TurnEndReason.Completed
+                }
+                this.emit(stream, AgentEndEvent(scope.messages, runEnd))
             } catch (e: Exception) {
                 log.error("unhandled error: ${e.message}", Array<Attr>())
                 // 异常同样要收口：抛出去之前已写入的历史（assistant 带 tool_calls、
@@ -1536,7 +1543,9 @@ public open class AgentRuntime <: AgentLoop {
                 this.settleHistory(scope, log)
                 // 先发结束事件（携带错误说明），再置错误信号：流消费者按 AgentEndEvent 收敛，
                 // 随后 result() 抛错由调用方决定策略
-                this.emit(stream, AgentEndEvent(ArrayList<Message>([UserMessage(ContentList.ofText("[Runtime error: ${e.message}]"), 0)])))
+                this.emit(stream, AgentEndEvent(
+                    ArrayList<Message>([UserMessage(ContentList.ofText("[Runtime error: ${e.message}]"), 0)]),
+                    TurnEndReason.Failed))
                 stream.setError(e)
                 ()   // 有无 finally 时的分支类型统一：catch 段以 Unit 收尾
             } catch (e: Error) {
@@ -1544,7 +1553,9 @@ public open class AgentRuntime <: AgentLoop {
                 // 也不 setError —— 消费端（SessionLoop）便永远每 200ms 空转一轮，result()
                 // 也永久阻塞。这里兜住，维持「生产端一定会收尾」这一不变量。
                 eprintln("[atelier] runtime system error: " + e.toString())
-                this.emit(stream, AgentEndEvent(ArrayList<Message>([UserMessage(ContentList.ofText("[Runtime system error: " + e.toString() + "]"), 0)])))
+                this.emit(stream, AgentEndEvent(
+                    ArrayList<Message>([UserMessage(ContentList.ofText("[Runtime system error: " + e.toString() + "]"), 0)]),
+                    TurnEndReason.Failed))
                 stream.setError(Exception("runtime system error: " + e.toString()))
                 ()   // 同上：catch 段以 Unit 收尾
             } finally {

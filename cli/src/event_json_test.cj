@@ -87,7 +87,7 @@ func jsonLines_turnAndCompaction() {
 func jsonLines_startAndEnd() {
     @Expect(lastLine(AgentStartEvent("sess_1")),
         "{\"type\":\"agent_start\",\"sessionId\":\"sess_1\"}")
-    @Expect(lastLine(AgentEndEvent(ArrayList<Message>())), "{\"type\":\"agent_end\"}")
+    @Expect(lastLine(AgentEndEvent(ArrayList<Message>(), TurnEndReason.Completed)), "{\"type\":\"agent_end\"}")
     @Expect(lastLine(TurnStartEvent()), "{\"type\":\"turn_start\"}")
 }
 

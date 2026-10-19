@@ -17,7 +17,27 @@ public class AgentStartEvent <: AgentEvent {
 
 public class AgentEndEvent <: AgentEvent {
     public let messages: ArrayList<Message>
-    public init(messages: ArrayList<Message>) { this.messages = messages }
+    /**
+     * 本次 **run** 的终结方式。
+     *
+     * 与 [TurnEndEvent.reason] 的分工：
+     * - 那个描述「**某一回合**怎么结束的」（一个 run 可以有多个回合）；
+     * - 这个描述「**整个 run** 怎么收尾的」。
+     *
+     * 正常路径上两者一致（都是最后一个回合的原因 —— 运行时保证
+     * `endReason == 最后一个 TurnEndEvent.reason`）。但**崩溃路径没有回合**：
+     * 运行时 catch 住了异常、直接收尾，不会发 `TurnEndEvent`。
+     * 此前消费端只能靠匹配 `"[Runtime error: ...]"` / `"[Runtime system error: ...]"`
+     * 文本前缀来识别这种收尾，消息措辞一变就会**静默失效**（表现为崩溃被当成正常完成）。
+     *
+     * 崩溃与 provider 失败共用 [TurnEndReason.Failed]：按「枚举表达调用方该怎么应对」
+     * 的判据，两者的应对完全相同（不该重试、要上报、要让用户看到），
+     * 区分信息在 [messages] 里（错误文本）。故不为此新增 `Crashed` 变体。
+     */
+    public let reason: TurnEndReason
+    public init(messages: ArrayList<Message>, reason: TurnEndReason) {
+        this.messages = messages; this.reason = reason
+    }
     public func eventType(): String { "agent_end" }
 }
 
@@ -186,85 +206,21 @@ public class CompactionEvent <: AgentEvent {
 public type LoopEventStream = EventStream<AgentEvent, ArrayList<Message>>
 
 /**
- * 一次 run 的结局：**从事件流读出"到底怎么结束的"**。
+ * 该结束原因是否应视为**成功**。
  *
- * 为什么需要它（而不是让每个消费端自己判断）：
- * `StopReason` 只说「模型这一条回复怎么停的」（5 个值），而宿主真正要回答的是
- * 「这次 run 该不该算成功」。此前两个协议适配层各自用信息不足的字段推断：
+ * 消费者（A2A / AG-UI / 宿主）都需要这个判断，而它此前各自用 `StopReason`
+ * 或消息文本前缀去推断 —— 那是信息不足时的替代品：
  *
- * · A2A：用 `stopReason == Error` 判失败，还得**从 AgentEndEvent 的消息文本里匹配
- *   `[Runtime error: ...]`** 才能认出崩溃收尾（`runtimeFailureText`）；
- * · AG-UI：把 `stopReason` 直接映射成协议层的 stopReason 字符串。
+ * · `StopReason` 只有 5 个值，表达不了 `ToolBudgetExhausted` / `BlockedByHook` /
+ *   `MaxTurnsReached` 这类"模型正常回了话、但 run 并没有成功"的收尾；
+ * · 文本前缀匹配（如 `[Runtime error` ）会在消息格式变化时**静默失效**。
  *
- * 两者都在做同一件事，而且每次新增结束原因都要改两处、容易漏。
- * `TurnEndEvent.reason` 把答案直接给出（含 `ToolBudgetExhausted` / `BlockedByHook` /
- * `MaxTurnsReached` 这些 `StopReason` 根本表达不了的原因）。
- *
- * **判据只认 `reason`**：不再看 `stopReason`、不再匹配消息文本前缀 ——
- * 后者是典型的"猜语义"，文本一变就失效。
+ * 只有 `Completed` 算成功；其余（含预算耗尽、钩子短路、挂起、取消、失败、达到回合上限）
+ * 都不是。挂起不属于失败，但也不是"跑完了"，调用方按 reason 自行决定措辞。
  */
-public struct RunOutcome {
-    /** 结束原因；`None` = 事件序列里没有回合结束事件（空 run / 极端异常） */
-    public let reason: Option<TurnEndReason>
-    /** 是否应当视为成功：只有 `Completed` 为真，其余（含 None）为假 */
-    public let succeeded: Bool
-    /**
-     * 失败时的可读说明（供协议层填 FAILED 的原因）。
-     *
-     * 只在**非成功**且末条回合消息里有文本时给出；判定"要不要取"看 `reason`，
-     * 不看文本内容。成功时为 `None`。
-     */
-    public let failureText: Option<String>
-
-    public init(reason: Option<TurnEndReason>, succeeded: Bool,
-        failureText: Option<String>) {
-        this.reason = reason
-        this.succeeded = succeeded
-        this.failureText = failureText
-    }
-}
-
-/**
- * 从事件序列折叠出这次 run 的结局。
- *
- * 取**最后一个** `TurnEndEvent`：一个 run 可以有多条（多回合），结局由最后一条决定。
- * 这与「run 收敛时 `endReason` 等于最后一个 `TurnEndEvent.reason`」的运行时约定一致。
- *
- * 消费端典型用法：
- * ```
- * let outcome = outcomeOf(events)
- * if (!outcome.succeeded) {
- *     // 按 outcome.reason 决定协议层的终态，outcome.failureText 填说明
- * }
- * ```
- */
-public func outcomeOf(events: ArrayList<AgentEvent>): RunOutcome {
-    var last: Option<TurnEndEvent> = None
-    for (ev in events) {
-        match (ev) {
-            // 后到的覆盖先到的：结局看最后一条
-            case te: TurnEndEvent => last = Some(te)
-            case _ => ()
-        }
-    }
-    match (last) {
-        case Some(te) =>
-            let succeeded = match (te.reason) {
-                case TurnEndReason.Completed => true
-                case _ => false
-            }
-            // 失败说明取自该回合的 assistant 消息：provider 错误文本本就在里面。
-            // 判据是 reason（要不要取），不是文本前缀（取什么）——
-            // 文本前缀匹配会在消息格式变化时静默失效。
-            let failureText: Option<String> = if (succeeded) {
-                None
-            } else {
-                let text = textOfMsg(te.message)
-                if (text != "") { Some(text) } else { None }
-            }
-            RunOutcome(Some(te.reason), succeeded, failureText)
-        case None =>
-            // 没有回合结束事件：不能当成功（否则"什么都没跑"会被报成完成）
-            RunOutcome(None, false, None)
+public func isSuccess(reason: TurnEndReason): Bool {
+    match (reason) {
+        case TurnEndReason.Completed => true
+        case _ => false
     }
 }

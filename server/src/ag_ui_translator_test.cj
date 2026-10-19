@@ -236,7 +236,7 @@ func translator_turnLifecycleEmitsStepEvents() {
     @Expect(kinds(tr.translate(TurnStartEvent())), "STEP_STARTED")
     let msg = asstMsg("done", StopReason.EndTurn)
     @Expect(kinds(tr.translate(TurnEndEvent(msg, ArrayList<ToolResultMessage>(), TurnEndReason.Completed))), "STEP_FINISHED")
-    let out = tr.translate(AgentEndEvent(ArrayList<Message>()))
+    let out = tr.translate(AgentEndEvent(ArrayList<Message>(), TurnEndReason.Completed))
     @Expect(kinds(out), "RUN_FINISHED")
     match (out[0]) {
         case e: RunFinishedEvent =>
@@ -258,13 +258,13 @@ func translator_providerErrorEndsRunWithoutFinished() {
         case _ => @Fail("应当是 RUN_ERROR")
     }
     // 失败已收尾：AgentEnd 不能再发 RUN_FINISHED（否则前端等两次结束）
-    @Expect(kinds(tr.translate(AgentEndEvent(ArrayList<Message>()))), "")
+    @Expect(kinds(tr.translate(AgentEndEvent(ArrayList<Message>(), TurnEndReason.Completed))), "")
 }
 
 @Test
 func translator_eventsAfterFinishAreDropped() {
     let tr = newTranslator()
-    tr.translate(AgentEndEvent(ArrayList<Message>()))
+    tr.translate(AgentEndEvent(ArrayList<Message>(), TurnEndReason.Completed))
     @Expect(kinds(tr.translate(TurnStartEvent())), "")
     @Expect(kinds(tr.translate(MessageUpdateEvent(asstMsg("x", StopReason.EndTurn), "x"))), "")
 }
@@ -328,7 +328,7 @@ func translator_suspendEndsWithInterruptOutcome() {
     tr.translate(TurnEndEvent(asstWithTool("c1", "get_weather",
         JsonValue.Map(HashMap<String, JsonValue>())), ArrayList<ToolResultMessage>(), TurnEndReason.Completed))
     @Expect(kinds(tr.translate(SuspendEvent(reqs))), "")
-    let out = tr.translate(AgentEndEvent(ArrayList<Message>()))
+    let out = tr.translate(AgentEndEvent(ArrayList<Message>(), TurnEndReason.Completed))
     @Expect(kinds(out), "RUN_FINISHED")
     match (out[0]) {
         case e: RunFinishedEvent =>
@@ -358,7 +358,7 @@ func translator_suspendWithQuestionCarriesSchemaThrough() {
     tr.translate(MessageEndEvent(msg))
     tr.translate(SuspendEvent(reqs))
     tr.translate(TurnEndEvent(msg, ArrayList<ToolResultMessage>(), TurnEndReason.Completed))
-    let out = tr.translate(AgentEndEvent(ArrayList<Message>()))
+    let out = tr.translate(AgentEndEvent(ArrayList<Message>(), TurnEndReason.Completed))
     @Expect(kinds(out), "RUN_FINISHED")
 
     match (out[0]) {
@@ -382,7 +382,7 @@ func translator_suspendWithQuestionCarriesSchemaThrough() {
 @Test
 func translator_noSuspendKeepsSuccessOutcome() {
     let tr = newTranslator()
-    let out = tr.translate(AgentEndEvent(ArrayList<Message>()))
+    let out = tr.translate(AgentEndEvent(ArrayList<Message>(), TurnEndReason.Completed))
     match (out[0]) {
         case e: RunFinishedEvent => @Expect(e.interrupts.size, 0)
         case _ => @Fail("应当是 RUN_FINISHED")

@@ -21,7 +21,7 @@ func agentStartEvent_eventType() {
 func agentEndEvent_eventType() {
     let messages = ArrayList<Message>()
     messages.add(UserMessage(makeMsgContent("hi"), 100))
-    let e = AgentEndEvent(messages)
+    let e = AgentEndEvent(messages, TurnEndReason.Completed)
     @Expect(e.eventType(), "agent_end")
     @Expect(e.messages.size, 1)
 }

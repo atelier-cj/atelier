@@ -1,174 +1,57 @@
 package atelier.agent
 
 /*
- * `outcomeOf`：从事件流读出「这次 run 该不该算成功」。
+ * `isSuccess(reason)`：这次 run 该不该算成功。
  *
- * 它存在的理由是**有真实消费者**：A2A 与 AG-UI 两个协议适配层此前各自用
- * `StopReason`（模型的 5 个值）推断 run 的结局，A2A 甚至要从 `AgentEndEvent` 的
- * 消息文本里匹配 `[Runtime error: ...]` 才能认出崩溃收尾。信息不足才需要猜，
- * 而现在 `TurnEndEvent.reason` 直接给出答案。
+ * 它存在的理由是**有具体的行会被替换**：A2A 与 AG-UI 两个协议适配层此前各自用
+ * `stopReason`（模型的 5 个值）推断 run 的结局，A2A 甚至要从 `AgentEndEvent` 的
+ * 消息文本里匹配 `[Runtime error: ...]` 才能认出崩溃收尾。有了 `TurnEndReason`，
+ * 那些推断分支可以删掉，换成一次 `isSuccess` 调用。
  *
- * 本文件锁住三元组（reason / succeeded / failureText）对每个变体的取值。
+ * 本文件锁住 7 个变体的成功/非成功归属。
  */
 
 import std.collection.*
-import atelier.message.*
-import atelier.provider.*
-import jsonvalue.*
 
-func outcomeEvent(reason: TurnEndReason, text: String): TurnEndEvent {
-    TurnEndEvent(AssistantMessage(ContentList.ofText(text), "", "", StopReason.EndTurn,
-        TokenUsage(0, 0), 0), ArrayList<ToolResultMessage>(), reason)
-}
-
-func eventsOf(evs: Array<AgentEvent>): ArrayList<AgentEvent> {
-    let l = ArrayList<AgentEvent>()
-    for (e in evs) { l.add(e) }
-    l
-}
-
-// Completed：唯一的成功原因
+// Completed 是唯一的成功原因
 @Test
 func outcome_completedIsSuccess() {
-    let out = outcomeOf(eventsOf([outcomeEvent(TurnEndReason.Completed, "做完了")]))
-    match (out.reason) {
-        case Some(r) => match (r) {
-            case TurnEndReason.Completed => ()
-            case _ => @Fail("reason 应为 Completed")
-        }
-        case None => @Fail("应当取出 reason")
-    }
-    @Expect(out.succeeded, true)
-    @Expect(out.failureText.isNone(), true)
+    @Expect(isSuccess(TurnEndReason.Completed), true)
 }
 
-// ToolBudgetExhausted：不是成功，也不该被当成 Completed（stopReason 表达不了这个）
+// ToolBudgetExhausted：模型可能正常回了话，但任务被预算掐断 —— 不算成功。
+// 这正是 stopReason 表达不了的情形。
 @Test
-func outcome_toolBudgetExhaustedIsFailure() {
-    let out = outcomeOf(eventsOf([outcomeEvent(TurnEndReason.ToolBudgetExhausted,
-        "Max tool calls reached, skipping")]))
-    @Expect(out.succeeded, false)
-    match (out.reason) {
-        case Some(r) => match (r) {
-            case TurnEndReason.ToolBudgetExhausted => ()
-            case _ => @Fail("reason 应为 ToolBudgetExhausted")
-        }
-        case None => @Fail("应当取出 reason")
-    }
-    // 失败说明取自该回合的消息文本
-    match (out.failureText) {
-        case Some(t) => @Expect(t.contains("Max tool calls"), true)
-        case None => @Fail("失败时应当给出说明")
-    }
+func outcome_toolBudgetExhaustedIsNotSuccess() {
+    @Expect(isSuccess(TurnEndReason.ToolBudgetExhausted), false)
 }
 
-// BlockedByHook：被钩子拦下，不算成功
+// BlockedByHook：被钩子拦下
 @Test
-func outcome_blockedByHookIsFailure() {
-    let out = outcomeOf(eventsOf([outcomeEvent(TurnEndReason.BlockedByHook,
-        "[Run short-circuited by hook]")]))
-    @Expect(out.succeeded, false)
-    match (out.reason) {
-        case Some(r) => match (r) {
-            case TurnEndReason.BlockedByHook => ()
-            case _ => @Fail("reason 应为 BlockedByHook")
-        }
-        case None => @Fail("应当取出 reason")
-    }
+func outcome_blockedByHookIsNotSuccess() {
+    @Expect(isSuccess(TurnEndReason.BlockedByHook), false)
 }
 
-// Suspended：等外部输入，不是成功（也不是失败——消费端按 reason 自行决定）
+// Suspended：等外部输入 —— 不是失败，但也不是"跑完了"
 @Test
 func outcome_suspendedIsNotSuccess() {
-    let out = outcomeOf(eventsOf([outcomeEvent(TurnEndReason.Suspended, "要确认")]))
-    @Expect(out.succeeded, false)
-    match (out.reason) {
-        case Some(r) => match (r) {
-            case TurnEndReason.Suspended => ()
-            case _ => @Fail("reason 应为 Suspended")
-        }
-        case None => @Fail("应当取出 reason")
-    }
+    @Expect(isSuccess(TurnEndReason.Suspended), false)
 }
 
 // Cancelled：调用方取消
 @Test
 func outcome_cancelledIsNotSuccess() {
-    let out = outcomeOf(eventsOf([outcomeEvent(TurnEndReason.Cancelled, "取消了")]))
-    @Expect(out.succeeded, false)
-    match (out.reason) {
-        case Some(r) => match (r) {
-            case TurnEndReason.Cancelled => ()
-            case _ => @Fail("reason 应为 Cancelled")
-        }
-        case None => @Fail("应当取出 reason")
-    }
+    @Expect(isSuccess(TurnEndReason.Cancelled), false)
 }
 
-// Failed：provider 错误文本已在 message 里，直接从 reason 判断要不要取
+// Failed：provider / 批次 / 内部异常
 @Test
-func outcome_failedCarriesFailureText() {
-    let out = outcomeOf(eventsOf([outcomeEvent(TurnEndReason.Failed,
-        "[provider error] boom")]))
-    @Expect(out.succeeded, false)
-    match (out.reason) {
-        case Some(r) => match (r) {
-            case TurnEndReason.Failed => ()
-            case _ => @Fail("reason 应为 Failed")
-        }
-        case None => @Fail("应当取出 reason")
-    }
-    match (out.failureText) {
-        case Some(t) => @Expect(t.contains("boom"), true)
-        case None => @Fail("Failed 应当带说明")
-    }
+func outcome_failedIsNotSuccess() {
+    @Expect(isSuccess(TurnEndReason.Failed), false)
 }
 
-// MaxTurnsReached：被上限掐断，不算成功
+// MaxTurnsReached：被回合上限掐断
 @Test
-func outcome_maxTurnsReachedIsFailure() {
-    let out = outcomeOf(eventsOf([outcomeEvent(TurnEndReason.MaxTurnsReached,
-        "最后一回合的产出")]))
-    @Expect(out.succeeded, false)
-    match (out.reason) {
-        case Some(r) => match (r) {
-            case TurnEndReason.MaxTurnsReached => ()
-            case _ => @Fail("reason 应为 MaxTurnsReached")
-        }
-        case None => @Fail("应当取出 reason")
-    }
-}
-
-// 多回合：结局由**最后一条** TurnEndEvent 决定
-@Test
-func outcome_usesLastTurnEnd() {
-    let out = outcomeOf(eventsOf([
-        outcomeEvent(TurnEndReason.Completed, "中间回合"),
-        outcomeEvent(TurnEndReason.ToolBudgetExhausted, "最后被预算掐断"),
-    ]))
-    @Expect(out.succeeded, false)
-    match (out.reason) {
-        case Some(r) => match (r) {
-            case TurnEndReason.ToolBudgetExhausted => ()
-            case _ => @Fail("应当取最后一条 TurnEndEvent 的 reason")
-        }
-        case None => @Fail("应当取出 reason")
-    }
-}
-
-// 空事件流：不能当成功（否则"什么都没跑"会被报成完成）
-@Test
-func outcome_emptyEventsIsNotSuccess() {
-    let out = outcomeOf(ArrayList<AgentEvent>())
-    @Expect(out.reason.isNone(), true)
-    @Expect(out.succeeded, false)
-    @Expect(out.failureText.isNone(), true)
-}
-
-// 只有其它事件、没有回合结束事件：同样不算成功
-@Test
-func outcome_withoutTurnEndIsNotSuccess() {
-    let out = outcomeOf(eventsOf([AgentStartEvent("s"), TurnStartEvent()]))
-    @Expect(out.reason.isNone(), true)
-    @Expect(out.succeeded, false)
+func outcome_maxTurnsReachedIsNotSuccess() {
+    @Expect(isSuccess(TurnEndReason.MaxTurnsReached), false)
 }

@@ -300,7 +300,7 @@ func a2aTranslator_unexecutedToolArtifactClosedAtTurnEnd() {
     @Expect(a2aToolStatus(arts[0]), "skipped")
     @Expect(a2aStatusEvents(out).size, 0)
     @Expect(t.isFinished(), false)
-    let fin = t.translate(AgentEndEvent(ArrayList<AtelierMessage>()))
+    let fin = t.translate(AgentEndEvent(ArrayList<AtelierMessage>(), TurnEndReason.Completed))
     @Expect(a2aStatusEvents(fin)[0].status.state, TaskState.Completed)
     @Expect(t.isFinished(), true)
 }
@@ -374,7 +374,7 @@ func a2aTranslator_lengthTurnStaysWorkingUntilAgentEnd() {
     @Expect(arts.size, 1)
     @Expect(arts[0].lastChunk, true)
 
-    let fin = t.translate(AgentEndEvent(ArrayList<AtelierMessage>()))
+    let fin = t.translate(AgentEndEvent(ArrayList<AtelierMessage>(), TurnEndReason.Completed))
     let sts = a2aStatusEvents(fin)
     @Expect(sts.size, 1)
     @Expect(sts[0].status.state, TaskState.Completed)
@@ -390,7 +390,7 @@ func a2aTranslator_runtimeErrorSentinelEmitsFailed() {
     @Expect(t.translate(a2aTextDelta("半截输出")).size, 0)
     let msgs = ArrayList<AtelierMessage>()
     msgs.add(UserMessage(ContentList.ofText("[Runtime error: boom]"), 0))
-    let out = t.translate(AgentEndEvent(msgs))
+    let out = t.translate(AgentEndEvent(msgs, TurnEndReason.Completed))
     let arts = a2aArtifactEvents(out)
     @Expect(arts.size, 1)
     @Expect(arts[0].lastChunk, true)
@@ -479,7 +479,7 @@ func a2aTranslator_suspendEmitsInputRequiredThenResumes() {
     // 中断态不是终态
     @Expect(t.isFinished(), false)
     // run 收尾不得把中断态改成 COMPLETED
-    @Expect(t.translate(AgentEndEvent(ArrayList<AtelierMessage>())).size, 0)
+    @Expect(t.translate(AgentEndEvent(ArrayList<AtelierMessage>(), TurnEndReason.Completed)).size, 0)
     @Expect(t.isFinished(), false)
     // 同 taskId 续聊：reset 清回合状态但保留回合号（产物 id 在任务内唯一）
     t.reset()

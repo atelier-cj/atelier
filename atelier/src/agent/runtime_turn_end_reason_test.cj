@@ -342,3 +342,87 @@ func turnEndReason_maxTurnsReusesLastAssistant() {
         case None => @Fail("maxTurns 收尾应当补发一条 MaxTurnsReached 事件")
     }
 }
+
+// 崩溃路径：运行时 catch 住异常后直接收尾，**没有 TurnEndEvent**。
+// 此前消费端只能靠匹配 "[Runtime error: ...]" 文本前缀识别它 ——
+// 现在 AgentEndEvent.reason 直接给出 Failed。
+//
+// 构造方式：工具声明期抛异常会让 run 走 catch（与 B9 用例同一手法）。
+@Test
+func agentEndReason_failedOnFrameworkError() {
+    let toolReg = ToolRegistry()
+    toolReg.register(SchemaThrowingTool())
+    let responses = ArrayList<AssistantMessage>()
+    responses.add(endTurnMsg("不应该被请求"))
+    let cfg = AgentConfig("crash-probe", None, "", None, "m", None,
+        namesOfTools(["bad_schema"]), ArrayList<String>(), Int64(0),
+        UInt32(20), Float32(0.7), UInt32(4096), None,
+        false, None, UInt32(50), UInt32(30), UInt32(0),
+        ArrayList(), None, Int64(0), Int64(0))
+    let runtime = reasonRuntime(ScriptedMsgProvider(responses), toolReg, cfg: cfg)
+    let msgs = ArrayList<Message>()
+    msgs.add(UserMessage(ContentList.ofText("go"), 0))
+    let stream = runtime.chat(msgs)
+
+    var sawTurnEnd = false
+    var agentEndReason: Option<TurnEndReason> = None
+    var done = false
+    while (!done) {
+        match (stream.receive(50 * Duration.millisecond)) {
+            case Some(ev) =>
+                match (ev) {
+                    case _: TurnEndEvent => sawTurnEnd = true
+                    case ae: AgentEndEvent => agentEndReason = Some(ae.reason)
+                    case _ => ()
+                }
+            case None => if (stream.isClosed()) { done = true }
+        }
+    }
+    // 崩溃路径**没有**回合结束事件（这正是它此前无法被 reason 表达的原因）
+    @Expect(sawTurnEnd, false)
+    match (agentEndReason) {
+        case Some(r) =>
+            @Expect(isSuccess(r), false)
+            match (r) {
+                case TurnEndReason.Failed => ()
+                case _ => @Fail("崩溃收尾应当是 Failed")
+            }
+        case None => @Fail("应当收到 AgentEndEvent")
+    }
+}
+
+// 正常路径：AgentEndEvent.reason 与最后一个 TurnEndEvent.reason 一致
+@Test
+func agentEndReason_matchesLastTurnEndOnNormalPath() {
+    let responses = ArrayList<AssistantMessage>()
+    responses.add(endTurnMsg("做完了"))
+    let runtime = reasonRuntime(ScriptedMsgProvider(responses), ToolRegistry())
+    let msgs = ArrayList<Message>()
+    msgs.add(UserMessage(ContentList.ofText("go"), 0))
+    let stream = runtime.chat(msgs)
+
+    var lastTurnEnd: Option<TurnEndReason> = None
+    var endReason: Option<TurnEndReason> = None
+    var done = false
+    while (!done) {
+        match (stream.receive(50 * Duration.millisecond)) {
+            case Some(ev) =>
+                match (ev) {
+                    case te: TurnEndEvent => lastTurnEnd = Some(te.reason)
+                    case ae: AgentEndEvent => endReason = Some(ae.reason)
+                    case _ => ()
+                }
+            case None => if (stream.isClosed()) { done = true }
+        }
+    }
+    match ((lastTurnEnd, endReason)) {
+        case (Some(t), Some(e)) =>
+            // 逐个变体比（枚举无 ==）
+            let same = match ((t, e)) {
+                case (TurnEndReason.Completed, TurnEndReason.Completed) => true
+                case _ => false
+            }
+            @Expect(same, true)
+        case _ => @Fail("正常路径应当同时有 TurnEndEvent 与 AgentEndEvent")
+    }
+}

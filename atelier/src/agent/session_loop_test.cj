@@ -289,7 +289,7 @@ func fakeTurnStream(emitEnd: Bool, closeIt: Bool): EventStream<AgentEvent, Array
     let msgs = ArrayList<Message>()
     msgs.add(UserMessage(ContentList.ofText("hi"), 0))
     s.emit(AgentStartEvent("s1"))
-    if (emitEnd) { s.emit(AgentEndEvent(msgs)) }
+    if (emitEnd) { s.emit(AgentEndEvent(msgs, TurnEndReason.Completed)) }
     s.setResult(msgs)
     if (closeIt) { s.close() }
     s
