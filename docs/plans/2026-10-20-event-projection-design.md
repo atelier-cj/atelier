@@ -92,6 +92,76 @@ public enum TurnEndReason {
 
 同时把 `RunScope.finished: Bool` 升级为 `RunScope.endReason: Option<TurnEndReason>`（`None` = 还在跑），对应 dsh 的 `turnEnds`。这解决 B8。
 
+### 2a.1 `TurnEndReason` 与 `StopReason` 是**两个正交维度**
+
+> 这条是本轮实现中最重要的设计结论，来自 A2A 改造被 6 条既有用例逐个纠正的过程。
+
+**分工**：
+
+| | 回答的问题 | 取值 | 作用域 |
+|---|---|---|---|
+| `StopReason` | **模型这一条回复**怎么停的 | EndTurn / ToolUse / Length / Error / Aborted | 单条消息 |
+| `TurnEndReason` | **这个回合**为什么收尾 | Completed / ToolBudgetExhausted / BlockedByHook / Suspended / Cancelled / Failed / MaxTurnsReached | 单个回合 |
+
+**`TurnEndReason` 不能取代 `StopReason`** —— 原稿曾暗示可以，那是错的。两处硬证据：
+
+**① 「本回合是否还会继续」只有 `StopReason` 能表达。**
+`ToolUse`（模型要求继续调工具）与 `Length`（输出被截断、运行时会在同一回合内续跑）这两种情形下，`TurnEndReason` 都是 `Completed`（本回合确实正常收尾了），但**任务并未结束**。
+若只看 `reason`，A2A 会在工具回合就下发 `COMPLETED` 终态，而协议规定**终态之后不能再有更新** → 后续回合的状态更新全部违反协议。
+
+**② `Suspended` 既非成功也非失败。**
+它是"等你输入"。归进"非成功 → 置终态"的分支会提前把 phase 设为 `Terminal`，把随后的
+`SuspendEvent`（协议要求的 `INPUT_REQUIRED`，且要携带待确认项文案）吞掉。
+它必须单独处理：本回合只发 `TurnEndEvent`，终态转换留给 `SuspendEvent`。
+
+**因此正确的用法是**：
+
+```cangjie
+// 判 run 结局 —— 用 reason
+if (!isSuccess(te.reason)) { /* 失败/取消/挂起 … */ }
+
+// 判任务整体是否结束 —— 仍需 StopReason
+let continues = match (te.message.stopReason) {
+    case StopReason.ToolUse => true    // 还要调工具
+    case StopReason.Length => true     // 截断待续
+    case _ => false
+}
+if (!continues && te.toolResults.size == 0) { /* 这才是任务终态 */ }
+```
+
+两者**不是替代关系**，而是"回合内是否继续"与"run 结局"两个相互独立的事实。
+新增消费端时若只剩一个判据可用，说明用错了维度。
+
+### 2a.2 崩溃收尾：`AgentEndEvent.reason`
+
+崩溃路径（运行时 catch 住异常后直接收尾）**没有 `TurnEndEvent`**，只有 `AgentEndEvent`。
+因此 `AgentEndEvent` 也需要 `reason`，否则消费端只能靠匹配 `"[Runtime error: ...]"`
+文本前缀识别崩溃 —— 措辞一变就静默失效（表现为崩溃被当成正常完成）。
+
+崩溃与 provider 失败共用 `TurnEndReason.Failed`：按「枚举表达调用方该怎么应对」的判据，
+两者应对完全相同（不该重试、要上报、要让用户看到），区分信息在 `messages` 里。
+**故不新增 `Crashed` 变体，也不加 `Interrupted`**（后者在 dsh 里对应跨进程崩溃恢复，
+而我们的崩溃是同进程 catch，`Failed` 语义准确；加它才是"同一个词表达两件不同的事"）。
+
+### 2a.3 协议映射：给准确值，不迁就消费方当前能识别的值
+
+AG-UI 的 `RunFinishedEvent.stopReason` 是自由字符串（协议只约定几个惯用值），
+映射时**不把非成功原因压成 `end_turn`**：
+
+| TurnEndReason | AG-UI stopReason |
+|---|---|
+| Completed | `end_turn` |
+| ToolBudgetExhausted | `tool_budget_exhausted` |
+| BlockedByHook | `blocked_by_hook` |
+| Suspended | `suspended` |
+| Cancelled | `aborted` |
+| Failed | `error` |
+| MaxTurnsReached | `max_turns_reached` |
+
+`ToolBudgetExhausted` 尤其不能报 `end_turn`（前端会显示"任务完成"），也不能报 `error`
+（它不是故障，工具没失败、模型没报错）。**宁可前端暂时不认识这个字符串，也不给一个意思错误的值**
+—— 用协议兼容去掩盖语义丢失，比显示未知值严重得多。
+
 ---
 
 ## 3. 2b：纯 fold 投影
