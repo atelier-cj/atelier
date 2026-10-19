@@ -1488,6 +1488,29 @@ public open class AgentRuntime <: AgentLoop {
                     }
                 }
 
+                // 循环可能在**没有置位原因**的情况下退出：`turnCount >= maxTurns` 时
+                // 循环条件为假直接跳出，循环体内一次都没跑。这条路径原本连
+                // `TurnEndEvent` 都不发，消费端只看到 AgentEnd —— 一个"跑完了"的假象。
+                //
+                // 因此在这里补发一条：复用最后一条 assistant 消息（不伪造新的模型产出），
+                // toolResults 传空（本回合没有工具批次收尾）。
+                // 「每个回合恰好一条 TurnEndEvent」仍然成立：退出循环意味着上一回合
+                // 已在循环体内发过它的事件、或这是从未进入过循环的边界情形。
+                if (scope.endReason.isNone()) {
+                    let lastAssistant = match (lastAssistantOf(scope.messages)) {
+                        case Some(m) => m
+                        case None =>
+                            // 从未进入循环（maxTurns=0 等边界）：没有模型产出可复用，
+                            // 用一条说明性占位，让消费端知道这轮什么都没跑
+                            AssistantMessage(ContentList.ofText("[Run stopped before any turn: max turns limit reached]"),
+                                "", "", StopReason.EndTurn, TokenUsage(0, 0), 0)
+                    }
+                    log.warn("run ended without a turn-end reason (turnCount=${scope.turnCount}, maxTurns=${this.config.maxTurns}); emitting MaxTurnsReached", Array<Attr>())
+                    this.emit(stream, TurnEndEvent(lastAssistant, ArrayList<ToolResultMessage>(),
+                        TurnEndReason.MaxTurnsReached))
+                    scope.endReason = Some(TurnEndReason.MaxTurnsReached)
+                }
+
                 log.info("agent end, total turns=${scope.turnCount}", Array<Attr>())
                 // 交还前再收口一次：`ensureToolCallResults` 此前只在**发请求前**跑，
                 // 最后一轮写完历史就收尾，中间没有任何收口点。最后一轮仍会写历史的路径
@@ -1497,6 +1520,13 @@ public open class AgentRuntime <: AgentLoop {
                 // 宿主把它落库后就是一条脏历史，下一轮请求前才发现。
                 // 幂等（history_invariant.cj 已声明），合法历史这里补 0 条。
                 this.settleHistory(scope, log)
+                // 兜底自检：走到这里 endReason 必须已经有值。
+                // 目前所有退出路径都覆盖了（循环体内各收尾点 + 上面的 maxTurns 补发）；
+                // 若将来新增退出条件而忘了置位，这条 warn 会把它留痕 ——
+                // 枚举的"封闭性"靠这个自检守住，而不是靠每处都记得改。
+                if (scope.endReason.isNone()) {
+                    log.warn("run finished without recording a turn-end reason; this indicates a missing assignment on some exit path", Array<Attr>())
+                }
                 stream.setResult(scope.messages)
                 this.emit(stream, AgentEndEvent(scope.messages))
             } catch (e: Exception) {
@@ -1855,6 +1885,27 @@ func verifyBeforeFinishPrompt(): String {
     "（系统提示）在宣布任务完成之前，请对着任务要求逐条自验：" +
     "重新读取或运行你产出的文件与命令，核对是否真的满足每条约束（格式、路径、输出内容、" +
     "边界情况），而不是凭记忆断言。发现不符就先修正，全部确认无误后再给出结论。"
+}
+
+/**
+ * 历史里最后一条 assistant 消息（没有则 None）。
+ *
+ * 收尾补发 `TurnEndEvent` 时用它：那条事件需要一条「本回合的 assistant 消息」，
+ * 而复用最后一条真实产出比伪造一条新消息诚实得多 —— 伪造会让消费端以为模型又说了话。
+ *
+ * 只找 tail 一段：整条历史里翻找没必要（收尾补发只发生在"从没进入循环"或"回合数用尽"
+ * 这两种边界，此时最后一条 assistant 就在尾部附近）。
+ */
+func lastAssistantOf(messages: ArrayList<Message>): Option<AssistantMessage> {
+    var i = Int64(messages.size) - 1
+    while (i >= 0) {
+        match (messages[i]) {
+            case am: AssistantMessage => return Some(am)
+            case _ => ()
+        }
+        i--
+    }
+    None
 }
 
 /**

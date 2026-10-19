@@ -263,3 +263,82 @@ func turnEndReason_suspended() {
     }
     @Expect(sawSuspended, true)
 }
+
+// MaxTurnsReached：回合数用尽 → 这条路径原本**不发** TurnEndEvent，
+// 消费端只看到 AgentEnd，误以为任务跑完了。现在补发一条并带正确原因。
+@Test
+func turnEndReason_maxTurnsReached() {
+    // maxTurns=1：第一回合调工具（ToolUse → 继续循环），第二回合循环条件
+    // turnCount(1) < maxTurns(1) 为假 → 退出且循环体内没有置位任何 reason
+    let toolReg = ToolRegistry()
+    toolReg.register(NoopTool())
+    let calls = ArrayList<(String, String)>()
+    calls.add(("m1", "noop"))
+    let responses = ArrayList<AssistantMessage>()
+    responses.add(assistantWithCalls("第一回合调工具", calls))
+    responses.add(endTurnMsg("不应该被请求"))
+    let cfg = AgentConfig("max-turns-probe", None, "", None, "m", None,
+        namesOfTools(["noop"]), ArrayList<String>(), Int64(0),
+        UInt32(1), Float32(0.7), UInt32(4096), None,
+        false, None, UInt32(50), UInt32(0), UInt32(0),
+        ArrayList(), None, Int64(0), Int64(0), sideEffectToolTimeout: UInt32(0))
+    let provider = ScriptedMsgProvider(responses)
+    let runtime = reasonRuntime(provider, toolReg, cfg: cfg)
+    let msgs = ArrayList<Message>()
+    msgs.add(UserMessage(ContentList.ofText("go"), 0))
+    let reasons = collectTurnEndReasons(runtime.chat(msgs))
+
+    // 补发了一条带 MaxTurnsReached 的事件
+    var sawMaxTurns = false
+    for (r in reasons) {
+        match (r) {
+            case TurnEndReason.MaxTurnsReached => sawMaxTurns = true
+            case _ => ()
+        }
+    }
+    @Expect(sawMaxTurns, true)
+}
+
+// 补发的事件必须复用**最后一条真实 assistant 消息**，不能伪造新的模型产出。
+@Test
+func turnEndReason_maxTurnsReusesLastAssistant() {
+    let toolReg = ToolRegistry()
+    toolReg.register(NoopTool())
+    let calls = ArrayList<(String, String)>()
+    calls.add(("m1", "noop"))
+    let responses = ArrayList<AssistantMessage>()
+    responses.add(assistantWithCalls("第一回合的产出文本", calls))
+    responses.add(endTurnMsg("不应该被请求"))
+    let cfg = AgentConfig("max-turns-probe2", None, "", None, "m", None,
+        namesOfTools(["noop"]), ArrayList<String>(), Int64(0),
+        UInt32(1), Float32(0.7), UInt32(4096), None,
+        false, None, UInt32(50), UInt32(0), UInt32(0),
+        ArrayList(), None, Int64(0), Int64(0), sideEffectToolTimeout: UInt32(0))
+    let runtime = reasonRuntime(ScriptedMsgProvider(responses), toolReg, cfg: cfg)
+    let msgs = ArrayList<Message>()
+    msgs.add(UserMessage(ContentList.ofText("go"), 0))
+    let stream = runtime.chat(msgs)
+
+    var maxTurnsMsg: Option<AssistantMessage> = None
+    var done = false
+    while (!done) {
+        match (stream.receive(50 * Duration.millisecond)) {
+            case Some(ev) =>
+                match (ev) {
+                    case te: TurnEndEvent =>
+                        match (te.reason) {
+                            case TurnEndReason.MaxTurnsReached => maxTurnsMsg = Some(te.message)
+                            case _ => ()
+                        }
+                    case _ => ()
+                }
+            case None => if (stream.isClosed()) { done = true }
+        }
+    }
+    match (maxTurnsMsg) {
+        case Some(m) =>
+            // 复用的是第一回合那条真实回复，不是新造的占位
+            @Expect(textOfMsg(m).contains("第一回合的产出文本"), true)
+        case None => @Fail("maxTurns 收尾应当补发一条 MaxTurnsReached 事件")
+    }
+}

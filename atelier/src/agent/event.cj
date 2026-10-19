@@ -54,6 +54,14 @@ public enum TurnEndReason {
     | Cancelled
     /** 失败：provider 不可恢复错误、工具批次异常、或运行时内部异常 */
     | Failed
+    /**
+     * 达到 `maxTurns` 上限：循环条件把回合数卡住，任务**没跑完**。
+     *
+     * 这条路径原本连 `TurnEndEvent` 都不发（循环条件直接为假退出），
+     * 消费端因此看到一个"跑完了"的 run，实际是被上限掐断的 ——
+     * 正是本枚举要消除的那类事实缺口。现在由收尾处补发一条事件。
+     */
+    | MaxTurnsReached
 }
 
 public class TurnEndEvent <: AgentEvent {
