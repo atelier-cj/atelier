@@ -24,6 +24,7 @@ import atelier.context.compactWithSummary
 import atelier.context.estimateTokens
 import atelier.context.{summarizeText, plainTextOf}
 import atelier.ptc.*
+import atelier.ptc.PtcRunSeq
 import atelier.event.EventStream
 import std.io.InputStream
 import jsonvalue.*
@@ -47,6 +48,28 @@ import opencj::ulid.nextId
 func toolBudgetPolicyOf(config: AgentConfig): ToolBudgetPolicy {
     ToolBudgetPolicy(budgetSeconds(config.toolTimeout),
         budgetSeconds(config.sideEffectToolTimeout))
+}
+
+/**
+ * 按工具名就地稳定排序（插入排序：工具数量很小，且不引入排序依赖）。
+ *
+ * 存在的理由只有一条**字节稳定性**：工具声明与 PTC SDK 段都是提示词前缀的一部分，
+ * 批次相同但顺序不同的前缀等于两次不同的前缀。`PtcSdkRenderer` 内部已自行排序，
+ * 这里统一在解析出口排一次，让 native 投影与 PTC 投影看到同一个顺序。
+ */
+func sortToolsByName(tools: ArrayList<Tool>): Unit {
+    let n = tools.size
+    var i: Int64 = 1
+    while (i < n) {
+        let cur = tools[i]
+        var j = i - 1
+        while (j >= 0 && tools[j].name() > cur.name()) {
+            tools[j + 1] = tools[j]
+            j--
+        }
+        tools[j + 1] = cur
+        i++
+    }
 }
 
 /** 秒 → 预算；0 = 不限时。 */
@@ -119,10 +142,6 @@ public open class AgentRuntime <: AgentLoop {
     private let hooks: ArrayList<Hook>
     // 结构化提问（None = 该宿主没有交互通道，提问即取消）；用它可以返回 Pending 让 run 挂起
     private let askFn: Option<AskFn>
-    // 本次 run 的恢复答复（chatWithEnv 开跑时设置）。运行时不跨 run 复用：
-    // 现有宿主（CLI 每回合、ACP 每会话、server 每请求）都是新建实例，子 agent 亦各自持有一份。
-    // PTC 子调用授权在深层调用栈里，拿不到开跑时的局部变量，故用瞬态字段传递。
-    private var resumedAnswersForSub: HashMap<String, UserAnswer> = HashMap()
     private let modelRegistry: ModelContextRegistry
     // 未命中模型表只提醒一次（每回合一条会把日志淹掉）
     private let warnedModels = HashSet<String>()
@@ -254,7 +273,8 @@ public open class AgentRuntime <: AgentLoop {
                 let ctxBuilder = ContextBuilder(this.skillRegistry, sessionEnv,
                     contributors: this.promptContributors)
                 let systemText = ctxBuilder.buildSystemText(this.config.systemPrompt, this.config.skills)
-                let tools = this.renderNativeTools(this.resolveVisibleTools())
+                let tools = this.renderNativeTools(this.resolveVisibleTools(
+                    this.toolRegistry.derived(ArrayList())))
                 let actualModel = this.pickModel(this.config.model)
                 let next = this.compactBracketed("manual", sessionId, messages, total, log,
                     { msgs, totalBefore => this.summarizeAndCompact(msgs, cc, cSpec, totalBefore,
@@ -520,16 +540,25 @@ public open class AgentRuntime <: AgentLoop {
      * 否则用模型事实（声明 > provider 自报 > 兜底）。
      */
     public func maxOutputTokensInUse(): Int64 {
+        this.maxOutputTokensInUseFor(this.pickModel(this.config.model))
+    }
+
+    // 按**指定模型**取完成预算（压缩按路由后的模型算窗口时要用同一份口径）
+    private func maxOutputTokensInUseFor(model: String): Int64 {
         if (this.config.maxOutputTokens > 0) {
             return Int64(this.config.maxOutputTokens)
         }
-        this.modelInfoInUse().info.maxTokens
+        this.modelInfoInUse(modelForRequest: model).info.maxTokens
     }
 
     // 模型事实（窗口 + 完成预算）：声明 > provider 自报 > 兜底，全链路没人知道时提醒一次
     // （静默按兜底值走 = "模型聊着聊着忘了前面"/"输出被莫名截断"，而下游看不到线索）
-    private func modelInfoInUse(): ResolvedModelInfo {
-        let model = this.pickModel(this.config.model)
+    //
+    // `modelForRequest`：传空串 = 用配置声明的模型；给出时按那个模型算事实。
+    // 钩子可以把请求路由到另一个模型（ChatRequest.model），此时窗口必须按**路由后**的
+    // 模型算 —— 否则小窗口模型会拿到大窗口的阈值判定，压缩永远不触发直到被判 400。
+    private func modelInfoInUse(modelForRequest!: String = ""): ResolvedModelInfo {
+        let model = if (modelForRequest != "") { modelForRequest } else { this.pickModel(this.config.model) }
         let providerName = providerNameOf(this.config)
         let resolved = this.spec.resolveModelInfo(providerName, model)
         if (!resolved.declared) {
@@ -736,14 +765,29 @@ public open class AgentRuntime <: AgentLoop {
      * 决策交给 `Compactor`（它回答"压不压、切哪、预算多少"），
      * 而时序（括弧/台账/互斥）留在运行时保证跨实现一致。
      */
+    /**
+     * 请求前的上下文压缩。
+     *
+     * **必须检查取消标志**：压缩内部是一次**同步**的摘要子调用（provider 往返，
+     * 几十秒量级），期间没有任何检查点。取消在语义上是"在当前检查点尽快收敛"，
+     * 若压缩不检查，用户按下取消后仍要等完整一轮摘要往返 —— 表现为"取消没反应"。
+     *
+     * 两个检查点：
+     * - 进入前：已取消就整段跳过（连摘要都不发，省一次计费往返）；
+     * - 摘要返回后：压缩结果不再写回历史（历史保持原样，按已取消收尾）。
+     *
+     * 跳过压缩不等于跳过错觉：历史没有被改写，请求照常按原历史发出/收尾。
+     */
     private func compactBeforeRequest(scope: RunScope, sessionId: String,
-        actualModel: String, systemText: String, tools: ArrayList<OpenAITool>,
-        log: Logger): Unit {
+        requestModel: String, systemText: String, tools: ArrayList<OpenAITool>,
+        cancelFlag: AtomicBool, log: Logger): Unit {
         var measureMessages = scope.messages
         if (this.compactionEnabledFor()) {
             let cc = this.compactionConfig()
-            let route = CompactRoute(actualModel,
-                this.modelInfoInUse().info.contextWindow, this.maxOutputTokensInUse())
+            // 窗口按**本次请求实际路由到的模型**算（钩子可能把请求改投到别的模型）
+            let route = CompactRoute(requestModel,
+                this.modelInfoInUse(modelForRequest: requestModel).info.contextWindow,
+                this.maxOutputTokensInUseFor(requestModel))
             // 修剪版只用于测量：真正发出去的请求由 wireRequest 再修剪一次
             // （下面 `currentMessages = chatReq.messages` 会把请求表收编为历史，
             //  在这里写回修剪版会让修剪流进落库历史）
@@ -758,6 +802,11 @@ public open class AgentRuntime <: AgentLoop {
                 case bc: BasicCompactor => bc.shouldCompactWith(measureMessages, route, cc)
                 case other => other.shouldCompact(measureMessages, route)
             }
+            // 已取消：不再发起摘要往返
+            if (cancelFlag.load()) {
+                log.info("compaction skipped: run cancelled before summary call", Array<Attr>())
+                return
+            }
             match (decision) {
                 case CompactDecision.Skip(reason) =>
                     // 只在"算不出预算"这类配置问题上留痕一次；
@@ -770,12 +819,19 @@ public open class AgentRuntime <: AgentLoop {
                     // 与 compactor 内部的判定口径可以不同：前者是"这次压之前有多大"
                     let total = this.pressureForNextRequest(measureMessages)
                     let compactor = this.compactor
-                    let compactionRuntime = CompactionRuntime(this.provider, actualModel,
+                    let compactionRuntime = CompactionRuntime(this.provider, requestModel,
                         systemText, tools, cc)
-                    scope.messages = this.compactBracketed(plan.trigger, sessionId,
+                    let compacted = this.compactBracketed(plan.trigger, sessionId,
                         scope.messages, total, log, { msgs, _ =>
                         compactor.compact(msgs, plan, compactionRuntime)
                     })
+                    // 摘要期间被取消：结果不写回历史（保持原样），随后的取消检查点
+                    // 会按"已取消"收尾 —— 免得把一次没人要的压缩结果留在历史里
+                    if (cancelFlag.load()) {
+                        log.info("compaction result discarded: run cancelled during summary call", Array<Attr>())
+                        return
+                    }
+                    scope.messages = compacted
             }
         }
     }
@@ -854,7 +910,7 @@ public open class AgentRuntime <: AgentLoop {
                         let failureMsg = AssistantMessage(ContentList.ofText("[provider error] ${errText}"), "", "", StopReason.Error, TokenUsage(0, 0), 0)
                         // 同短路分支：错误必须进消息列表，否则消费端与界面都看不到它
                         scope.messages.add(failureMsg)
-                        this.emit(stream, TurnEndEvent(failureMsg, ArrayList<ToolResultMessage>()))
+                        this.emit(stream, TurnEndEvent(failureMsg, ArrayList<ToolResultMessage>(), TurnEndReason.Failed))
                         requestFailed = true
                 }
             }
@@ -899,16 +955,16 @@ public open class AgentRuntime <: AgentLoop {
                     if (pendingAsks.size > 0) {
                         // 整批一起挂起：一次把本批所有待确认项交给宿主，
                         // 恢复后同一批一次做完（而不是逐个挂起、逐个恢复）
-                        this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
+                        this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>(), TurnEndReason.Suspended))
                         this.emit(stream, SuspendEvent(pendingAsks))
-                        return ToolBatchOutcome.Suspended
+                        return ToolBatchOutcome.SuspendedForExternal
                     }
                     // 工具执行开始事件（供流式消费方展示工具进度；被跳过/拦截的工具不发）
                     for (k in 0..runCallIds.size) {
                         this.emit(stream, ToolExecutionStartEvent(runCallIds[Int64(k)], runNames[Int64(k)]))
                     }
                     let results = try {
-                        this.toolExecutor.executeBatch(batch)
+                        scope.toolExecutor.executeBatch(batch)
                     } catch (e: Exception) {
                         // 同 provider 错误：异常 message 常为空（FS/Socket 类），只打 message 等于没打
                         log.error("tool execute error: ${e.toString()}", Array<Attr>())
@@ -923,8 +979,15 @@ public open class AgentRuntime <: AgentLoop {
                             scope.messages.add(ToolResultMessage(tc.id, tc.name,
                                 ContentList.ofText(text), true, 0))
                         }
-                        this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
-                        return ToolBatchOutcome.Suspended
+                        // 这些调用**已经消耗掉了**：历史里有它们的结果（哪怕结果是错误），
+                        // 计入预算才会在下一轮做出正确的裁剪/耗尽裁决。漏计等于让
+                        // "整批失败"这条路可以无限重试而不吃预算。
+                        scope.toolCallCount += toolCalls.size
+                        scope.lastToolTime = MonoTime.now()
+                        this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>(), TurnEndReason.Failed))
+                        // 历史已补齐（每 call 一条错误结果），不是"在等外部输入"：
+                        // 不发 SuspendEvent，也不让收尾收口跳过
+                        return ToolBatchOutcome.BatchFailed
                     }
                     var resIdx: Int64 = 0
                     // 需要外部给结果的调用：本次 run 挂起（不写结果消息，历史停在
@@ -954,7 +1017,7 @@ public open class AgentRuntime <: AgentLoop {
                                     this.emit(stream, ToolExecutionEndEvent(tc.id, r.text, r.isError))
                                     let tr = ToolResultMessage(tc.id, tc.name, ContentList.ofText(r.text), r.isError, 0)
                                     scope.messages.add(tr)
-                                    callAfterToolHooks(hookState, scope.turnCount, tc, tr)
+                                    callAfterToolHooks(scope.tools, hookState, scope.turnCount, tc, tr)
                                     resIdx++
                                 } else {
                                     // 执行器少给了结果：静默跳过会让这条 call 永远没有配对结果，
@@ -967,12 +1030,12 @@ public open class AgentRuntime <: AgentLoop {
                     }
                     scope.toolCallCount += toolCalls.size
                     scope.lastToolTime = MonoTime.now()
-                    this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
+                    this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>(), TurnEndReason.Suspended))
                     if (pendingExternal.size > 0) {
                         // 中止本次 run：历史已落在 assistant(tool_calls)，
                         // 下一次 run 带结果即可继续（见 SuspendEvent 注释）
                         this.emit(stream, SuspendEvent(pendingExternal))
-                        return ToolBatchOutcome.Suspended
+                        return ToolBatchOutcome.SuspendedForExternal
                     }
                     ToolBatchOutcome.ContinueRun
     }
@@ -991,8 +1054,10 @@ public open class AgentRuntime <: AgentLoop {
      */
     private func admitToolCall(tc: ToolCallBlock, idx: Int64, ctx: ToolContext,
         sessionId: String, turnCount: Int64, hookState: HookState,
-        resumed: HashMap<String, UserAnswer>, log: Logger): ToolAdmission {
-        let tool = match (this.toolRegistry.get(tc.name)) {
+        resumed: HashMap<String, UserAnswer>, log: Logger,
+        registry!: ToolRegistry): ToolAdmission {
+        // 按**本次 run 的视图**查表：run 作用域工具只注册在这里（见 RunScope.tools）
+        let tool = match (registry.get(tc.name)) {
             case Some(t) => t
             case None => return ToolAdmission.Skip("Tool not found: " + tc.name)
         }
@@ -1001,17 +1066,17 @@ public open class AgentRuntime <: AgentLoop {
                 log.warn("tool ${tc.name} blocked: workDir untrusted", Array<Attr>())
                 return ToolAdmission.Skip("Tool not allowed: workDir is untrusted")
             case TrustDecision.Allowed =>
-                return this.admitAfterHooks(tc, turnCount, hookState, log)
+                return this.admitAfterHooks(tc, turnCount, hookState, log, registry: registry)
             case TrustDecision.NeedsApproval =>
                 return this.admitByAsking(tc, idx, ctx, sessionId, turnCount, hookState,
-                    resumed, log)
+                    resumed, log, registry: registry)
         }
     }
 
     /** 已通过信任闸门：过滤器 hooks 是否进一步拦截或改写参数 */
     private func admitAfterHooks(tc: ToolCallBlock, turnCount: Int64,
-        hookState: HookState, log: Logger): ToolAdmission {
-        let (args, skipMsg) = decideToolCall(hookState, turnCount, tc)
+        hookState: HookState, log: Logger, registry!: ToolRegistry): ToolAdmission {
+        let (args, skipMsg) = decideToolCall(registry, hookState, turnCount, tc)
         match (args) {
             case Some(a) => return ToolAdmission.Allow(a)
             case None => ()
@@ -1029,7 +1094,8 @@ public open class AgentRuntime <: AgentLoop {
      */
     private func admitByAsking(tc: ToolCallBlock, idx: Int64, ctx: ToolContext,
         sessionId: String, turnCount: Int64, hookState: HookState,
-        resumed: HashMap<String, UserAnswer>, log: Logger): ToolAdmission {
+        resumed: HashMap<String, UserAnswer>, log: Logger,
+        registry!: ToolRegistry): ToolAdmission {
         // 审批走结构化提问：菜单由 approvalRequest 统一构造，结论只认选项 id
         // 参数原样带上：审批的全部意义是让人看清「要执行什么」，只给工具名等于让人盲签
         let gateReq = approvalRequest(
@@ -1057,12 +1123,12 @@ public open class AgentRuntime <: AgentLoop {
         if (gateAns.isAllowAlways()) {
             this.trustManager.setTrust(ctx.workDir, TrustState.Trusted)
             log.info("tool ${tc.name} always approved for ${ctx.workDir}", Array<Attr>())
-            return this.admitAfterHooks(tc, turnCount, hookState, log)
+            return this.admitAfterHooks(tc, turnCount, hookState, log, registry: registry)
         }
         if (gateAns.isAllowOnce()) {
             this.trustManager.setSessionTrust(sessionId, ctx.workDir, TrustState.Trusted)
             log.info("tool ${tc.name} approved for session", Array<Attr>())
-            return this.admitAfterHooks(tc, turnCount, hookState, log)
+            return this.admitAfterHooks(tc, turnCount, hookState, log, registry: registry)
         }
         log.warn("tool ${tc.name} denied by user", Array<Attr>())
         ToolAdmission.Skip("Tool not allowed: user denied approval")
@@ -1101,6 +1167,46 @@ public open class AgentRuntime <: AgentLoop {
         scope.messages = ctxBuilder.applyArchives(scope.messages)
     }
 
+    /**
+     * 交还历史前的最后收口：把本次 run 写下的历史对齐成合法历史。
+     *
+     * `ensureToolCallResults` 此前只在**发请求前**调用，而循环的最后一次迭代之后直接
+     * `stream.setResult` —— 中间没有任何收口点。最后一轮仍然会写历史，且能写脏的路径
+     * 不止一条：assistant 消息本身、预算耗尽 / 裁剪掉的那批调用、非工具回合里携带的
+     * 孤儿调用、工具批次异常兜底、provider 失败消息、`afterRun` 钩子改写历史。
+     *
+     * 交还出去的历史是宿主的持久化输入（会话树 / JSONL / 协议对端），所以收口放在
+     * **交还点**而不是要求每条写入路径各自维护不变式：新增路径不必记得这条规则。
+     * 幂等（见 [ensureToolCallResults]）：合法历史这里补 0 条，正常路径零成本。
+     */
+    private func settleHistory(scope: RunScope, log: Logger): Unit {
+        // 挂起不是"写漏了"：那条结果属于下一次 run（宿主答复带回），这里补就是伪造
+        if (scope.suspended) { return }
+        let patched = ensureToolCallResults(scope.messages)
+        if (patched > 0) {
+            log.warn("history had ${patched} tool call(s) without results at run end; inserted placeholders so the returned history stays valid", Array<Attr>())
+        }
+    }
+
+    /**
+     * 回合开场时通告「本回合正在处理的首条消息」。
+     *
+     * **空历史时不发**，这本身是契约的一部分，不是省略：`MessageStartEvent` 的载荷是
+     * **一条具体消息**（[docs/events.md]），语义是「这条消息开始播放」。历史为空时不存在
+     * 这条消息，也就没有可通告的对象 —— 伪造一条占位消息会让协议适配层（AG-UI / ACP / A2A
+     * 均按 `role` 分派）以为真有一条新消息开始，开出消息 id 并等一个永远不会到来的正文。
+     * 回合本身由 `TurnStart` / `TurnEnd` 括起，不依赖这条事件表达「有回合在跑」。
+     *
+     * 而**空历史是合法输入**：`chatWithEnv(sessionId, messages, env)` 的契约是接收调用方
+     * 给出的历史，新会话首轮、历史被归档或压缩清空之后都可能传空列表。此时运行时照常发请求
+     * （系统提示词走独立通道，不依赖历史非空），不能因为取首条而抛越界、把整轮变成错误收尾。
+     */
+    private func announceTurnMessage(scope: RunScope,
+        stream: EventStream<AgentEvent, ArrayList<Message>>): Unit {
+        if (scope.messages.size == 0) { return }
+        this.emit(stream, MessageStartEvent(scope.messages[0]))
+    }
+
     private func chatWithEnv(sessionId: String, messages: ArrayList<Message>, sessionEnv: SessionEnvironment): EventStream<AgentEvent, ArrayList<Message>> {
         let stream = EventStream<AgentEvent, ArrayList<Message>>()
         let se = sessionEnv
@@ -1108,7 +1214,6 @@ public open class AgentRuntime <: AgentLoop {
         let ctx = ToolContext(workDir, se.context, sessionId, ask: this.askFn)
         // 恢复：宿主随消息带回的答复（重放同一回合时要先查它，命中就不再问宿主）
         let resumedAnswers = collectResumedAnswers(messages)
-        this.resumedAnswersForSub = resumedAnswers
         // 每次工具调用单独一份上下文（带该次调用的 id）：工具要把自己与协议/UI 上的同一次调用对上时用
         let ctxBuilder = ContextBuilder(this.skillRegistry, se, contributors: this.promptContributors)
 
@@ -1122,41 +1227,45 @@ public open class AgentRuntime <: AgentLoop {
             // 「任何入口跑起来，status() 都真的回答 Running」。
             this.statusKey = sessionId
             this.statusRegistry.transition(sessionId, AgentStatus.Running)
+            // 本次 run 的工具视图：根表（装配束共享）只当父表，run 期间按需注册的
+            // run 作用域工具全部落在这张视图上，收尾随 scope 一起丢弃
+            let runTools = this.toolRegistry.derived(ArrayList())
+            // 收尾收口要能覆盖异常路径，故 scope 在 try 之外声明：catch 里拿得到
+            // 本轮已写入的历史，才能在交还调用方之前把它对齐成合法历史
+            let scope = RunScope(ArrayList<Message>(messages), runTools,
+                ToolExecutor(runTools, budget: toolBudgetPolicyOf(this.config)))
+            // 与 scope 一样提到 try 之外：收尾钩子在 finally 里调用
+            let hookState = HookState()
             try {
                 this.emit(stream, AgentStartEvent(sessionId))
                 log.info("agent start: ${this.config.name}", Array<Attr>())
-                let hookState = HookState()
-                callHooks("beforeRun", 0, hookState)
+                callHooks(scope.tools, "beforeRun", 0, hookState)
 
                 // 系统提示词独立通道（不再注入为消息）；初始消息 = 历史。
                 // PTC 的 SDK 段随「本轮可见工具」变化，因此在循环内拼接（见下）。
                 let baseSystemText = ctxBuilder.buildSystemText(
                     this.config.systemPrompt, this.config.skills)
-                let initial = ArrayList<Message>()
-                for (m in messages) { initial.add(m) }
-                // 循环级可变状态收进 RunScope：阶段方法只收一个引用，不必逐个传 8 个标量
-                let scope = RunScope(initial)
 
-                while (!scope.finished && !cancelFlag.load() && scope.turnCount < Int64(this.config.maxTurns)) {
+                while (scope.endReason.isNone() && !cancelFlag.load() && scope.turnCount < Int64(this.config.maxTurns)) {
                     this.openTurn(scope, sessionId, stream, ctxBuilder, log)
 
-                    this.emit(stream, MessageStartEvent(scope.messages[0]))
+                    this.announceTurnMessage(scope, stream)
                     let actualModel = this.pickModel(this.config.model)
                     // 先解析可见工具，再据此生成 SDK 段：两处必须来自同一次解析，
                     // 否则模型看到的绑定会与程序实际能调用的能力分叉
-                    let visible = this.resolveVisibleTools()
-                    let tools = this.resolveTools(visible, ctx, stream, cancelFlag,
-                        hookState, scope.turnCount)
+                    let visible = this.resolveVisibleTools(scope.tools)
+                    let tools = this.resolveTools(scope.tools, scope.ptcRunSeq,
+                        resumedAnswers, visible, ctx, stream, cancelFlag, hookState,
+                        scope.turnCount)
                     let systemText = if (this.config.toolPresentation == ToolPresentationMode.Native) {
                         baseSystemText
                     } else {
                         baseSystemText + "\n\n" + PtcSdkRenderer.render(visible)
                     }
-                    this.compactBeforeRequest(scope, sessionId, actualModel, systemText, tools, log)
                     var chatReq: ChatRequest = ctxBuilder.buildChatRequest(actualModel, systemText, scope.messages,
                         Float64(this.config.temperature), this.maxOutputTokensInUse(),
                         this.config.thinkingLevel, tools)
-                    match (runBeforeTurnHooks(hookState, scope.turnCount, chatReq)) {
+                    match (runBeforeTurnHooks(scope.tools, hookState, scope.turnCount, chatReq)) {
                         case Some(r) =>
                             chatReq = r
                             if (chatReq.model != actualModel) {
@@ -1164,14 +1273,24 @@ public open class AgentRuntime <: AgentLoop {
                             }
                             // 若 hook 改写了请求的 messages，同步回运行时上下文，避免分叉
                             scope.messages = chatReq.messages
+                            // 压缩放在钩子**之后**：钩子是这个回合最后的历史改写点。压完再被它整体
+                            // 替换回长历史，等于白压（括弧与台账记的还是一份没人用的历史）；反过来，
+                            // 钩子改写的 messages 才是本次请求的真实输入，压缩必须针对它判定。
+                            // 窗口按 chatReq.model 算：钩子可能把请求路由到另一个（可能更小的）模型。
+                            this.compactBeforeRequest(scope, sessionId, chatReq.model,
+                                chatReq.systemPrompt, chatReq.tools, cancelFlag, log)
+                            // 压缩改写的是 scope.messages；请求必须一并跟上，否则发出去的仍是长历史
+                            chatReq = ChatRequest(chatReq.model, scope.messages, chatReq.temperature,
+                                chatReq.maxTokens, chatReq.reasoningEffort, chatReq.tools, chatReq.extra,
+                                systemPrompt: chatReq.systemPrompt)
                         case None =>
                             log.info("beforeTurn hook short-circuited run", Array<Attr>())
                             let shortCircuitMsg = AssistantMessage(ContentList.ofText("[Run short-circuited by hook]"), "", "", StopReason.EndTurn, TokenUsage(0, 0), 0)
                             // 必须同时进消息列表：消费端只从 result() 读消息，仅 emit 事件
                             // 等于什么都没发生（交互前端表现为「跑完界面上没有任何输出」）
                             scope.messages.add(shortCircuitMsg)
-                            this.emit(stream, TurnEndEvent(shortCircuitMsg, ArrayList<ToolResultMessage>()))
-                            scope.finished = true
+                            this.emit(stream, TurnEndEvent(shortCircuitMsg, ArrayList<ToolResultMessage>(), TurnEndReason.BlockedByHook))
+                            scope.endReason = Some(TurnEndReason.BlockedByHook)
                             break
                     }
 
@@ -1189,7 +1308,8 @@ public open class AgentRuntime <: AgentLoop {
                     let assistantMsg = match (attempt) {
                         case ProviderAttempt.Ok(m) => m
                         case ProviderAttempt.Failed =>
-                            scope.finished = true
+                            // TurnEndEvent 已在 invokeProvider 内发出（Failed）
+                            scope.endReason = Some(TurnEndReason.Failed)
                             continue
                     }
                     log.info("provider response received", Array<Attr>())
@@ -1201,8 +1321,8 @@ public open class AgentRuntime <: AgentLoop {
                             if (cancelFlag.load()) {
                                 // 取消：不再发起工具批次，直接收尾
                                 log.info("run cancelled at tool boundary", Array<Attr>())
-                                this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
-                                scope.finished = true
+                                this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>(), TurnEndReason.Cancelled))
+                                scope.endReason = Some(TurnEndReason.Cancelled)
                                 break
                             }
                             let toolCalls = assistantMsg.toolCalls()
@@ -1210,8 +1330,8 @@ public open class AgentRuntime <: AgentLoop {
                                 // provider 报了工具回合却没给任何调用：空批次会让循环原地空转
                                 // （每轮请求都一样），按回合结束收尾
                                 log.warn("stop reason is ToolUse but the message carries no tool call; finish the turn", Array<Attr>())
-                                this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
-                                scope.finished = true
+                                this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>(), TurnEndReason.Completed))
+                                scope.endReason = Some(TurnEndReason.Completed)
                                 break
                             }
                             log.info("tool calls: ${toolCalls.size}", Array<Attr>())
@@ -1220,10 +1340,21 @@ public open class AgentRuntime <: AgentLoop {
                             match (decideToolBudget(scope.toolCallCount, toolCalls.size, maxCalls)) {
                                 case ToolBudgetVerdict.Exhausted =>
                                     log.warn("max tool calls (${maxCalls}) reached", Array<Attr>())
-                                    scope.messages.add(ToolResultMessage("", "",
-                                        ContentList.ofText("Max tool calls (${maxCalls}) reached, skipping"), true, 0))
-                                    this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
-                                    scope.finished = true
+                                    // 预算用完：本批一个都不执行，但**每个调用都要有配对结果**。
+                                    // 这条 assistant 消息带着 N 个 tool_call，只回一条 id 为空的
+                                    // 结果（旧写法）等于既没有配对、又在历史里留下一条空 id 的脏结果：
+                                    // 落库后历史与「每个 tool_call 恰好一条结果」的不变式不符，
+                                    // 下一轮请求被 provider 判 400 之前，先得靠占位结果兜底补齐。
+                                    // 被跳过的调用各自回一条「预算不足、未执行」，与 Trimmed 分支同口径。
+                                    let exhaustedResults = ArrayList<ToolResultMessage>()
+                                    for (tc in toolCalls) {
+                                        let tr = ToolResultMessage(tc.id, tc.name,
+                                            ContentList.ofText(skippedByToolBudgetNote()), true, 0)
+                                        scope.messages.add(tr)
+                                        exhaustedResults.add(tr)
+                                    }
+                                    this.emit(stream, TurnEndEvent(assistantMsg, exhaustedResults, TurnEndReason.ToolBudgetExhausted))
+                                    scope.endReason = Some(TurnEndReason.ToolBudgetExhausted)
                                     break
                                 case ToolBudgetVerdict.AllAllowed => ()
                                 case ToolBudgetVerdict.Trimmed(allowed) =>
@@ -1232,12 +1363,12 @@ public open class AgentRuntime <: AgentLoop {
                                     toolCalls.clear()
                                     for (j in 0..allowed) { toolCalls.add(original[Int64(j)]) }
                                     // 被裁掉的每一个都要有明确结果：否则这条 call 永远没有配对结果，
-                                    // 下一次请求直接被判 400
+                                    // 下一次请求直接被判 400。文案与 Exhausted 分支同一来源
                                     var skipIdx = allowed
                                     while (skipIdx < original.size) {
                                         scope.messages.add(ToolResultMessage(original[Int64(skipIdx)].id,
                                             original[Int64(skipIdx)].name,
-                                            ContentList.ofText("Skipped: max tool calls limit"), true, 0))
+                                            ContentList.ofText(skippedByToolBudgetNote()), true, 0))
                                         skipIdx++
                                     }
                             }
@@ -1253,7 +1384,8 @@ public open class AgentRuntime <: AgentLoop {
                             while (idx < toolCalls.size) {
                                 let tc = toolCalls[idx]
                                 let admission = this.admitToolCall(tc, idx, ctx, sessionId,
-                                    scope.turnCount, hookState, resumedAnswers, log)
+                                    scope.turnCount, hookState, resumedAnswers, log,
+                                    registry: scope.tools)
                                 match (admission) {
                                     case ToolAdmission.Allow(args) =>
                                         let entry: (String, ToolContext, JsonValue) =
@@ -1272,8 +1404,19 @@ public open class AgentRuntime <: AgentLoop {
                                 batch, skipResults, runCallIds, runNames, pendingAsks,
                                 stream, hookState, log)
                             match (outcome) {
-                                case ToolBatchOutcome.Suspended =>
-                                    scope.finished = true
+                                case ToolBatchOutcome.SuspendedForExternal =>
+                                    // 只在"等外部输入"时置位：历史刻意停在
+                                    // assistant(tool_calls)，收尾收口要认这个状态
+                                    // （见 RunScope.suspended）
+                                    scope.suspended = true
+                                    // TurnEndEvent 已在批次内发出（Suspended）
+                                    scope.endReason = Some(TurnEndReason.Suspended)
+                                    continue
+                                case ToolBatchOutcome.BatchFailed =>
+                                    // 整批失败：历史已补齐（每 call 一条错误结果），
+                                    // 不置 suspended —— 收口照常跑，且宿主拿到的不是挂起
+                                    // TurnEndEvent 已在批次内发出（Failed）
+                                    scope.endReason = Some(TurnEndReason.Failed)
                                     continue
                                 case ToolBatchOutcome.ContinueRun => ()
                             }
@@ -1282,8 +1425,8 @@ public open class AgentRuntime <: AgentLoop {
                             if (cancelFlag.load()) {
                                 // 取消：跳过 afterTurn 改写与压缩等后续处理，直接收尾
                                 log.info("run cancelled at turn end", Array<Attr>())
-                                this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
-                                scope.finished = true
+                                this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>(), TurnEndReason.Cancelled))
+                                scope.endReason = Some(TurnEndReason.Cancelled)
                                 break
                             }
                             // 带 tool_call 却又不是工具回合（输出被截断、终止原因缺失/未识别、
@@ -1313,11 +1456,21 @@ public open class AgentRuntime <: AgentLoop {
                                     scope.verifyPasses++
                                     log.warn("agent announced completion, run verify pass (${scope.verifyPasses}/${this.config.maxVerifyPasses})", Array<Attr>())
                                     scope.messages.add(UserMessage(ContentList.ofText(verifyBeforeFinishPrompt()), 0))
+                                    // **刻意不设 resumingSameTurn**：自验是"模型已宣布完成、
+                                    // 现在进入核对阶段"，那是一次新的推理任务（新提示、新产出
+                                    // 目标），按新回合计 —— 于是下一轮会正常推进 turnCount、
+                                    // 重置本回合的续跑预算。
+                                    // 对照截断续跑：那是"同一条回复没写完"，模型仍在产出同一份
+                                    // 内容，所以不推进回合计数、不重置续跑预算（否则
+                                    // maxLengthContinuations 形同虚设）。
+                                    // 两者语义不同，因此**不对称是对的**；整轮上界由 maxTurns 兜住。
+                                    // 见 RunScope.lengthContinuations 的注释与
+                                    // runtime_verify_turn_semantics 的锁定用例。
                                     continue
                                 case TurnVerdict.End => ()
                             }
                             log.info("turn finished", Array<Attr>())
-                            let turnUpdate = runAfterTurnHooks(hookState, scope.turnCount)
+                            let turnUpdate = runAfterTurnHooks(scope.tools, hookState, scope.turnCount)
                             match (turnUpdate.messages) {
                                 case Some(msgs) =>
                                     scope.messages = msgs
@@ -1326,24 +1479,73 @@ public open class AgentRuntime <: AgentLoop {
                             }
                             if (turnUpdate.shortCircuit) {
                                 log.info("afterTurn hook short-circuited run", Array<Attr>())
-                                this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
-                                scope.finished = true
+                                this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>(), TurnEndReason.BlockedByHook))
+                                scope.endReason = Some(TurnEndReason.BlockedByHook)
                                 break
                             }
-                            this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>()))
-                            scope.finished = true
+                            this.emit(stream, TurnEndEvent(assistantMsg, ArrayList<ToolResultMessage>(), TurnEndReason.Completed))
+                            scope.endReason = Some(TurnEndReason.Completed)
                     }
                 }
 
+                // 循环可能在**没有置位原因**的情况下退出：`turnCount >= maxTurns` 时
+                // 循环条件为假直接跳出，循环体内一次都没跑。这条路径原本连
+                // `TurnEndEvent` 都不发，消费端只看到 AgentEnd —— 一个"跑完了"的假象。
+                //
+                // 因此在这里补发一条：复用最后一条 assistant 消息（不伪造新的模型产出），
+                // toolResults 传空（本回合没有工具批次收尾）。
+                // 「每个回合恰好一条 TurnEndEvent」仍然成立：退出循环意味着上一回合
+                // 已在循环体内发过它的事件、或这是从未进入过循环的边界情形。
+                if (scope.endReason.isNone()) {
+                    let lastAssistant = match (lastAssistantOf(scope.messages)) {
+                        case Some(m) => m
+                        case None =>
+                            // 从未进入循环（maxTurns=0 等边界）：没有模型产出可复用，
+                            // 用一条说明性占位，让消费端知道这轮什么都没跑
+                            AssistantMessage(ContentList.ofText("[Run stopped before any turn: max turns limit reached]"),
+                                "", "", StopReason.EndTurn, TokenUsage(0, 0), 0)
+                    }
+                    log.warn("run ended without a turn-end reason (turnCount=${scope.turnCount}, maxTurns=${this.config.maxTurns}); emitting MaxTurnsReached", Array<Attr>())
+                    this.emit(stream, TurnEndEvent(lastAssistant, ArrayList<ToolResultMessage>(),
+                        TurnEndReason.MaxTurnsReached))
+                    scope.endReason = Some(TurnEndReason.MaxTurnsReached)
+                }
+
                 log.info("agent end, total turns=${scope.turnCount}", Array<Attr>())
-                callHooks("afterRun", scope.turnCount, hookState)
+                // 交还前再收口一次：`ensureToolCallResults` 此前只在**发请求前**跑，
+                // 最后一轮写完历史就收尾，中间没有任何收口点。最后一轮仍会写历史的路径
+                // 不止一条（assistant 消息、预算耗尽 / 裁剪掉的调用、非工具回合里带的
+                // 孤儿调用、批次异常兜底、provider 失败消息、afterRun 钩子改写），
+                // 任何一条漏配对都会让交返的历史违反「每个 tool_call 恰好一条结果」——
+                // 宿主把它落库后就是一条脏历史，下一轮请求前才发现。
+                // 幂等（history_invariant.cj 已声明），合法历史这里补 0 条。
+                this.settleHistory(scope, log)
+                // 兜底自检：走到这里 endReason 必须已经有值。
+                // 目前所有退出路径都覆盖了（循环体内各收尾点 + 上面的 maxTurns 补发）；
+                // 若将来新增退出条件而忘了置位，这条 warn 会把它留痕 ——
+                // 枚举的"封闭性"靠这个自检守住，而不是靠每处都记得改。
+                if (scope.endReason.isNone()) {
+                    log.warn("run finished without recording a turn-end reason; this indicates a missing assignment on some exit path", Array<Attr>())
+                }
                 stream.setResult(scope.messages)
-                this.emit(stream, AgentEndEvent(scope.messages))
+                // 正常路径：`endReason` 此时必有值（上面的自检保证）。
+                // 万一没有（未来新增退出条件漏置位），按 Completed 收尾并已由自检留痕，
+                // 不让"缺原因"变成事件层无法表达的状态。
+                let runEnd = match (scope.endReason) {
+                    case Some(r) => r
+                    case None => TurnEndReason.Completed
+                }
+                this.emit(stream, AgentEndEvent(scope.messages, runEnd))
             } catch (e: Exception) {
                 log.error("unhandled error: ${e.message}", Array<Attr>())
+                // 异常同样要收口：抛出去之前已写入的历史（assistant 带 tool_calls、
+                // 工具结果写了一半）必须对齐，否则宿主从错误里恢复后拿到的仍是脏历史。
+                this.settleHistory(scope, log)
                 // 先发结束事件（携带错误说明），再置错误信号：流消费者按 AgentEndEvent 收敛，
                 // 随后 result() 抛错由调用方决定策略
-                this.emit(stream, AgentEndEvent(ArrayList<Message>([UserMessage(ContentList.ofText("[Runtime error: ${e.message}]"), 0)])))
+                this.emit(stream, AgentEndEvent(
+                    ArrayList<Message>([UserMessage(ContentList.ofText("[Runtime error: ${e.message}]"), 0)]),
+                    TurnEndReason.Failed))
                 stream.setError(e)
                 ()   // 有无 finally 时的分支类型统一：catch 段以 Unit 收尾
             } catch (e: Error) {
@@ -1351,10 +1553,19 @@ public open class AgentRuntime <: AgentLoop {
                 // 也不 setError —— 消费端（SessionLoop）便永远每 200ms 空转一轮，result()
                 // 也永久阻塞。这里兜住，维持「生产端一定会收尾」这一不变量。
                 eprintln("[atelier] runtime system error: " + e.toString())
-                this.emit(stream, AgentEndEvent(ArrayList<Message>([UserMessage(ContentList.ofText("[Runtime system error: " + e.toString() + "]"), 0)])))
+                this.emit(stream, AgentEndEvent(
+                    ArrayList<Message>([UserMessage(ContentList.ofText("[Runtime system error: " + e.toString() + "]"), 0)]),
+                    TurnEndReason.Failed))
                 stream.setError(Exception("runtime system error: " + e.toString()))
                 ()   // 同上：catch 段以 Unit 收尾
             } finally {
+                // "run 结束"是**所有**退出路径的契约，不是正常路径的专利：
+                // 框架级异常（如工具声明期抛出）走 catch 直接收尾，而收尾钩子此前只挂在
+                // 正常路径上 —— 失败路径的宿主清理逻辑（落盘、释放外部资源、上报账目）
+                // 会静默不执行，且与 beforeRun 的括弧不配对。
+                // 放在 finally 最前（早于 close）：钩子仍可发事件、读会话状态。
+                // `callHooks` 内部对每个钩子各自 try/catch，不会让 finally 二次抛出。
+                callHooks(scope.tools, "afterRun", scope.turnCount, hookState)
                 // 生命周期：本次执行收敛（含挂起、取消、异常）→ 回到 idle。
                 // 放在 finally 而不是正常路径尾部：退出只能是「本次执行结束」这一种含义，
                 // 而正常/取消/异常三条路径都会走到这里，漏掉任一条都会让 status() 卡在 Running
@@ -1390,22 +1601,24 @@ public open class AgentRuntime <: AgentLoop {
      * 而 native 模式只需要它们的 schema。两者必须来自同一次解析，
      * 否则模型看到的可用能力会与程序能调用的能力分叉。
      */
-    private func resolveVisibleTools(): ArrayList<Tool> {
+    private func resolveVisibleTools(registry: ToolRegistry): ArrayList<Tool> {
         let result = ArrayList<Tool>()
         for (name in this.config.tools) {
             if (name.startsWith("agent_")) {
                 let agentName = name[6..]
                 match (this.agentRegistry.get(agentName)) {
                     case Some(cfg) =>
-                        // 子 agent 复用同一份装配束（provider 由它自己的配置解析）
+                        // 子 agent 复用同一份装配束（provider 由它自己的配置解析）。
+                        // 注册进**本次 run 的视图**：这个实例持有 spec（可再建 runtime），
+                        // 属于 run 作用域，写进共享根表会让别的会话命中别人的实例
                         let tool = AgentTool(agentName, cfg, this.spec)
-                        this.toolRegistry.register(tool)
+                        registry.register(tool)
                         result.add(tool)
                     case None => ()
                 }
             } else if (name.endsWith("_*")) {
                 let prefix = name[0..name.size - 2]
-                for (t in this.toolRegistry.list()) {
+                for (t in registry.list()) {
                     if (t.name().startsWith(prefix)) {
                         if (!this.mcpManager.isActiveTool(t.name(), this.config.mcpCooldownTurns)) {
                             continue
@@ -1414,13 +1627,20 @@ public open class AgentRuntime <: AgentLoop {
                     }
                 }
             } else {
-                match (this.toolRegistry.get(name)) {
+                match (registry.get(name)) {
                     case Some(t) =>
                         result.add(t)
                     case None => ()
                 }
             }
         }
+        // **按名字稳定排序**：可见工具会进入提示词前缀（工具声明 / PTC SDK 段）。
+        // 通配分支（`prefix_*`）遍历的是注册表，而注册表底层是 HashMap ——
+        // 迭代顺序取决于插入历史：运行中按需注册 MCP 工具、或不同会话先加载了不同的
+        // 工具集，都会让同一批工具排出不同顺序。前缀只要从第一个工具起就不同，
+        // provider 的前缀缓存就整段未命中（缓存按前缀单元完整匹配计价）。
+        // 每轮仍重算（MCP 冷却要随回合推进），但**同一批工具必须给出同一顺序**。
+        sortToolsByName(result)
         result
     }
 
@@ -1432,6 +1652,9 @@ public open class AgentRuntime <: AgentLoop {
      * `Both`：两者并存（提示词成本翻倍）。
      */
     private func resolveTools(
+        registry: ToolRegistry,
+        ptcRunSeq: PtcRunSeq,
+        resumedAnswers: HashMap<String, UserAnswer>,
         visible: ArrayList<Tool>,
         ctx: ToolContext,
         stream: EventStream<AgentEvent, ArrayList<Message>>,
@@ -1450,17 +1673,22 @@ public open class AgentRuntime <: AgentLoop {
         }
         if (programmatic) {
             let authorizer: PtcAuthorizer = { tool, args =>
-                this.authorizeSubCall(tool, args, ctx, hookState, turnCount)
+                this.authorizeSubCall(tool, args, ctx, hookState, turnCount, registry,
+                    resumedAnswers)
             }
             let emit: (PtcEvent) -> Unit = { event => this.emitPtcEvent(stream, event) }
             let env = PtcRunEnv(ctx.workDir, ctx.sessionId,
                 { => cancelFlag.load() }, emit, authorizer,
                 maxSubCalls: Int64(this.config.ptcMaxSubCalls),
                 timeout: Some(Duration.second * Int64(this.config.ptcTimeoutSeconds)),
-                toolBudget: toolBudgetPolicyOf(this.config))
+                toolBudget: toolBudgetPolicyOf(this.config),
+                // 序号跨回合单调：来自 run 作用域（见 RunScope.ptcRunSeq）
+                runSeq: Some(ptcRunSeq))
             let tool = RunXispTool(visible, env)
-            // 注册进注册表：分发链路按名字查找，因此必须与其它工具同样可见
-            this.toolRegistry.register(tool)
+            // 分发链路按名字查表，因此它必须可见 —— 但只注册进**本次 run 的视图**：
+            // 这个实例的 env 绑着本次 run 的 workDir / sessionId / cancelFlag / authorizer，
+            // 写进共享根表等于把「一次 run 的上下文」挂到跨 runtime 的共享状态上
+            registry.register(tool)
             result.add(OpenAITool(tool.name(), tool.description(), tool.schema()))
         }
         result
@@ -1477,19 +1705,21 @@ public open class AgentRuntime <: AgentLoop {
         args: JsonValue,
         ctx: ToolContext,
         hookState: HookState,
-        turnCount: Int64
+        turnCount: Int64,
+        registry: ToolRegistry,
+        resumed: HashMap<String, UserAnswer>
     ): PtcAuthDecision {
         match (this.trustGate(tool, ctx.workDir, ctx.sessionId)) {
             case TrustDecision.Denied =>
                 return PtcAuthDecision.Deny("Tool not allowed: workDir is untrusted")
             case TrustDecision.NeedsApproval =>
-                if (!this.approveSubCall(tool, args, ctx)) {
+                if (!this.approveSubCall(tool, args, ctx, resumed)) {
                     return PtcAuthDecision.Deny("Tool not allowed: user denied approval")
                 }
             case TrustDecision.Allowed => ()
         }
         // callId 在此尚未生成，审批与钩子都不依赖它
-        let (replaced, skipMessage) = this.decideToolCall(hookState, turnCount,
+        let (replaced, skipMessage) = this.decideToolCall(registry, hookState, turnCount,
             ToolCallBlock("", tool.name(), args))
         match (replaced) {
             case Some(newArgs) => PtcAuthDecision.AllowWith(newArgs)
@@ -1498,13 +1728,16 @@ public open class AgentRuntime <: AgentLoop {
     }
 
     /** 交互审批；与模型直调的审批分支保持同样的回答语义。 */
-    private func approveSubCall(tool: Tool, args: JsonValue, ctx: ToolContext): Bool {
+    private func approveSubCall(tool: Tool, args: JsonValue, ctx: ToolContext,
+        resumed: HashMap<String, UserAnswer>): Bool {
         let log = getGlobalLogger([("name", "AgentRuntime")])
         // 与模型直调的审批同一条路径（同一套选项、同一套判定）
         let subReq = approvalRequest(
             "ask:${ctx.sessionId}:sub:${tool.name()}:approval",
             tool.name(), args, "Tool '" + tool.name() + "' needs your approval.")
-        let subAns = this.askHost(subReq, this.resumedAnswersForSub)
+        // 恢复答复来自**本次 run** 的局部变量（随参数链传入），不是实例字段：
+        // 实例一旦被复用，字段里可能留着另一个会话的答复 —— 命中即等于跳过用户审批
+        let subAns = this.askHost(subReq, resumed)
         let subInvalid = match (validateAnswer(subReq, subAns)) {
             case Some(err) =>
                 log.warn("invalid approval answer (${err}); treating as deny", Array<Attr>())
@@ -1543,9 +1776,11 @@ public open class AgentRuntime <: AgentLoop {
         }
     }
 
-    private func callHooks(phase: String, turnCount: Int64,
+    // 钩子拿到的工具表是**本次 run 的视图**：钩子里按名字查到的必然是本次 run 的实例，
+    // 而不是别的会话遗留在根表上的。根表（this.toolRegistry）只作为视图的父表存在。
+    private func callHooks(registry: ToolRegistry, phase: String, turnCount: Int64,
         state: HookState): Unit {
-        let ctx = HookContext(this.config, this.toolRegistry, turnCount, state)
+        let ctx = HookContext(this.config, registry, turnCount, state)
         for (h in this.hooks) {
             try {
                 match (phase) {
@@ -1560,9 +1795,9 @@ public open class AgentRuntime <: AgentLoop {
         }
     }
 
-    private func runBeforeTurnHooks(state: HookState, turnCount: Int64,
+    private func runBeforeTurnHooks(registry: ToolRegistry, state: HookState, turnCount: Int64,
         request: ChatRequest): Option<ChatRequest> {
-        let ctx = HookContext(this.config, this.toolRegistry, turnCount, state)
+        let ctx = HookContext(this.config, registry, turnCount, state)
         var current = request
         for (h in this.hooks) {
             try {
@@ -1581,9 +1816,9 @@ public open class AgentRuntime <: AgentLoop {
         Some(current)
     }
 
-    private func runBeforeToolHooks(state: HookState, turnCount: Int64,
+    private func runBeforeToolHooks(registry: ToolRegistry, state: HookState, turnCount: Int64,
         call: ToolCallBlock): BeforeToolDecision {
-        let ctx = HookContext(this.config, this.toolRegistry, turnCount, state)
+        let ctx = HookContext(this.config, registry, turnCount, state)
         var decision = BeforeToolDecision.Allow
         for (h in this.hooks) {
             try {
@@ -1603,9 +1838,9 @@ public open class AgentRuntime <: AgentLoop {
     }
 
     // 返回 Some(args) 表示应执行（可带 hook 改写后的参数）；None + Option(reason) 表示应跳过
-    private func decideToolCall(state: HookState, turnCount: Int64,
+    private func decideToolCall(registry: ToolRegistry, state: HookState, turnCount: Int64,
         tc: ToolCallBlock): (Option<JsonValue>, Option<String>) {
-        match (runBeforeToolHooks(state, turnCount, tc)) {
+        match (runBeforeToolHooks(registry, state, turnCount, tc)) {
             case BeforeToolDecision.Allow =>
                 (Some(tc.args), None)
             case BeforeToolDecision.Deny(reason) =>
@@ -1615,9 +1850,9 @@ public open class AgentRuntime <: AgentLoop {
         }
     }
 
-    private func callAfterToolHooks(state: HookState, turnCount: Int64,
+    private func callAfterToolHooks(registry: ToolRegistry, state: HookState, turnCount: Int64,
         call: ToolCallBlock, result: ToolResultMessage): Unit {
-        let ctx = HookContext(this.config, this.toolRegistry, turnCount, state)
+        let ctx = HookContext(this.config, registry, turnCount, state)
         for (h in this.hooks) {
             try {
                 h.afterTool(ctx, call, result)
@@ -1628,8 +1863,9 @@ public open class AgentRuntime <: AgentLoop {
         }
     }
 
-    private func runAfterTurnHooks(state: HookState, turnCount: Int64): AfterTurnUpdate {
-        let ctx = HookContext(this.config, this.toolRegistry, turnCount, state)
+    private func runAfterTurnHooks(registry: ToolRegistry, state: HookState,
+        turnCount: Int64): AfterTurnUpdate {
+        let ctx = HookContext(this.config, registry, turnCount, state)
         var update = AfterTurnUpdate.none()
         for (h in this.hooks) {
             try {
@@ -1660,6 +1896,27 @@ func verifyBeforeFinishPrompt(): String {
     "（系统提示）在宣布任务完成之前，请对着任务要求逐条自验：" +
     "重新读取或运行你产出的文件与命令，核对是否真的满足每条约束（格式、路径、输出内容、" +
     "边界情况），而不是凭记忆断言。发现不符就先修正，全部确认无误后再给出结论。"
+}
+
+/**
+ * 历史里最后一条 assistant 消息（没有则 None）。
+ *
+ * 收尾补发 `TurnEndEvent` 时用它：那条事件需要一条「本回合的 assistant 消息」，
+ * 而复用最后一条真实产出比伪造一条新消息诚实得多 —— 伪造会让消费端以为模型又说了话。
+ *
+ * 只找 tail 一段：整条历史里翻找没必要（收尾补发只发生在"从没进入循环"或"回合数用尽"
+ * 这两种边界，此时最后一条 assistant 就在尾部附近）。
+ */
+func lastAssistantOf(messages: ArrayList<Message>): Option<AssistantMessage> {
+    var i = Int64(messages.size) - 1
+    while (i >= 0) {
+        match (messages[i]) {
+            case am: AssistantMessage => return Some(am)
+            case _ => ()
+        }
+        i--
+    }
+    None
 }
 
 /**

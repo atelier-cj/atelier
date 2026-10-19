@@ -83,3 +83,15 @@ public func decideToolBudget(used: Int64, requested: Int64, maxAllowed: Int64): 
     if (used + requested > maxAllowed) { return ToolBudgetVerdict.Trimmed(maxAllowed - used) }
     ToolBudgetVerdict.AllAllowed
 }
+
+/**
+ * 因预算不足（[ToolBudgetVerdict.Exhausted] / [ToolBudgetVerdict.Trimmed] 裁掉的那部分）
+ * 而没有执行的调用，写进历史的结果正文。
+ *
+ * 两种裁决共用同一句文案：模型看到的应当是同一个事实 ——「这条调用因为预算上限没有执行」。
+ * 措辞刻意与 `[Tool error: ...]` 区分：没执行不等于执行失败，模型据此重新安排剩余工作，
+ * 而不是把这次调用当成跑过。
+ */
+public func skippedByToolBudgetNote(): String {
+    "Skipped: max tool calls limit"
+}

@@ -235,8 +235,8 @@ func translator_turnLifecycleEmitsStepEvents() {
     let tr = newTranslator()
     @Expect(kinds(tr.translate(TurnStartEvent())), "STEP_STARTED")
     let msg = asstMsg("done", StopReason.EndTurn)
-    @Expect(kinds(tr.translate(TurnEndEvent(msg, ArrayList<ToolResultMessage>()))), "STEP_FINISHED")
-    let out = tr.translate(AgentEndEvent(ArrayList<Message>()))
+    @Expect(kinds(tr.translate(TurnEndEvent(msg, ArrayList<ToolResultMessage>(), TurnEndReason.Completed))), "STEP_FINISHED")
+    let out = tr.translate(AgentEndEvent(ArrayList<Message>(), TurnEndReason.Completed))
     @Expect(kinds(out), "RUN_FINISHED")
     match (out[0]) {
         case e: RunFinishedEvent =>
@@ -251,20 +251,20 @@ func translator_providerErrorEndsRunWithoutFinished() {
     let tr = newTranslator()
     tr.translate(TurnStartEvent())
     let failed = asstMsg("", StopReason.Error)
-    let out = tr.translate(TurnEndEvent(failed, ArrayList<ToolResultMessage>()))
+    let out = tr.translate(TurnEndEvent(failed, ArrayList<ToolResultMessage>(), TurnEndReason.Failed))
     @Expect(kinds(out), "STEP_FINISHED,RUN_ERROR")
     match (out[1]) {
         case e: RunErrorEvent => @Expect(e.code, "provider_error")
         case _ => @Fail("应当是 RUN_ERROR")
     }
     // 失败已收尾：AgentEnd 不能再发 RUN_FINISHED（否则前端等两次结束）
-    @Expect(kinds(tr.translate(AgentEndEvent(ArrayList<Message>()))), "")
+    @Expect(kinds(tr.translate(AgentEndEvent(ArrayList<Message>(), TurnEndReason.Completed))), "")
 }
 
 @Test
 func translator_eventsAfterFinishAreDropped() {
     let tr = newTranslator()
-    tr.translate(AgentEndEvent(ArrayList<Message>()))
+    tr.translate(AgentEndEvent(ArrayList<Message>(), TurnEndReason.Completed))
     @Expect(kinds(tr.translate(TurnStartEvent())), "")
     @Expect(kinds(tr.translate(MessageUpdateEvent(asstMsg("x", StopReason.EndTurn), "x"))), "")
 }
@@ -326,9 +326,9 @@ func translator_suspendEndsWithInterruptOutcome() {
     let reqs = ArrayList<ExternalRequest>()
     reqs.add(ExternalRequest("int-c1", "tool_call", "客户端需执行 get_weather", toolCallId: "c1"))
     tr.translate(TurnEndEvent(asstWithTool("c1", "get_weather",
-        JsonValue.Map(HashMap<String, JsonValue>())), ArrayList<ToolResultMessage>()))
+        JsonValue.Map(HashMap<String, JsonValue>())), ArrayList<ToolResultMessage>(), TurnEndReason.Completed))
     @Expect(kinds(tr.translate(SuspendEvent(reqs))), "")
-    let out = tr.translate(AgentEndEvent(ArrayList<Message>()))
+    let out = tr.translate(AgentEndEvent(ArrayList<Message>(), TurnEndReason.Completed))
     @Expect(kinds(out), "RUN_FINISHED")
     match (out[0]) {
         case e: RunFinishedEvent =>
@@ -357,8 +357,8 @@ func translator_suspendWithQuestionCarriesSchemaThrough() {
     tr.translate(MessageStartEvent(msg))
     tr.translate(MessageEndEvent(msg))
     tr.translate(SuspendEvent(reqs))
-    tr.translate(TurnEndEvent(msg, ArrayList<ToolResultMessage>()))
-    let out = tr.translate(AgentEndEvent(ArrayList<Message>()))
+    tr.translate(TurnEndEvent(msg, ArrayList<ToolResultMessage>(), TurnEndReason.Completed))
+    let out = tr.translate(AgentEndEvent(ArrayList<Message>(), TurnEndReason.Completed))
     @Expect(kinds(out), "RUN_FINISHED")
 
     match (out[0]) {
@@ -382,7 +382,7 @@ func translator_suspendWithQuestionCarriesSchemaThrough() {
 @Test
 func translator_noSuspendKeepsSuccessOutcome() {
     let tr = newTranslator()
-    let out = tr.translate(AgentEndEvent(ArrayList<Message>()))
+    let out = tr.translate(AgentEndEvent(ArrayList<Message>(), TurnEndReason.Completed))
     match (out[0]) {
         case e: RunFinishedEvent => @Expect(e.interrupts.size, 0)
         case _ => @Fail("应当是 RUN_FINISHED")
@@ -482,4 +482,62 @@ func translator_toolCallInterruptHasNoResponseSchema() {
         case None => ()
         case Some(_) => @Fail("外部执行工具的中断不应带 schema")
     }
+}
+
+// 非成功原因**不能**压成 end_turn —— 前端拿 end_turn 会显示"任务完成"，
+// 而预算耗尽/被钩子拦截/达到回合上限都不是完成。宁可给前端暂时不认识的字符串
+// （它至少能显示原因），也不要给一个意思错误的值。
+@Test
+func translator_nonSuccessReasonsAreNotReportedAsEndTurn() {
+    let cases: Array<(TurnEndReason, String)> = [
+        (TurnEndReason.ToolBudgetExhausted, "tool_budget_exhausted"),
+        (TurnEndReason.BlockedByHook, "blocked_by_hook"),
+        (TurnEndReason.Suspended, "suspended"),
+        (TurnEndReason.Cancelled, "aborted"),
+        (TurnEndReason.MaxTurnsReached, "max_turns_reached"),
+    ]
+    for ((reason, expected) in cases) {
+        let tr = newTranslator()
+        tr.translate(TurnStartEvent())
+        let msg = asstMsg("半截", StopReason.EndTurn)
+        tr.translate(TurnEndEvent(msg, ArrayList<ToolResultMessage>(), reason))
+        // 用 AgentEndEvent 收尾（Cancelled 等不会触发 RUN_ERROR）
+        let out = tr.translate(AgentEndEvent(ArrayList<Message>(), reason))
+        var got = ""
+        for (e in out) {
+            match (e) {
+                case fe: RunFinishedEvent => got = fe.stopReason
+                case _ => ()
+            }
+        }
+        @Expect(got, expected)
+        // 明确不是 end_turn
+        @Expect(got == "end_turn", false)
+    }
+}
+
+// Failed → RUN_ERROR（不是 RUN_FINISHED），与既有的 provider 错误路径一致
+@Test
+func translator_failedReasonEndsWithRunError() {
+    let tr = newTranslator()
+    tr.translate(TurnStartEvent())
+    let failed = asstMsg("[provider error] boom", StopReason.Error)
+    let out = tr.translate(TurnEndEvent(failed, ArrayList<ToolResultMessage>(), TurnEndReason.Failed))
+    @Expect(kinds(out).contains("RUN_ERROR"), true)
+}
+
+// 崩溃路径（没有 TurnEndEvent）：AgentEndEvent.reason 决定收尾
+@Test
+func translator_crashEndUsesAgentEndReason() {
+    let tr = newTranslator()
+    tr.translate(TurnStartEvent())
+    let out = tr.translate(AgentEndEvent(ArrayList<Message>(), TurnEndReason.Failed))
+    var got = ""
+    for (e in out) {
+        match (e) {
+            case fe: RunFinishedEvent => got = fe.stopReason
+            case _ => ()
+        }
+    }
+    @Expect(got, "error")
 }

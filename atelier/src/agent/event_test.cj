@@ -21,7 +21,7 @@ func agentStartEvent_eventType() {
 func agentEndEvent_eventType() {
     let messages = ArrayList<Message>()
     messages.add(UserMessage(makeMsgContent("hi"), 100))
-    let e = AgentEndEvent(messages)
+    let e = AgentEndEvent(messages, TurnEndReason.Completed)
     @Expect(e.eventType(), "agent_end")
     @Expect(e.messages.size, 1)
 }
@@ -38,7 +38,7 @@ func turnEndEvent_eventType() {
     let msg = AssistantMessage(makeMsgContent("response"), "gpt-4", "openai", StopReason.EndTurn, usage, 200)
     let results = ArrayList<ToolResultMessage>()
     results.add(ToolResultMessage("call_1", "get_weather", makeMsgContent("sunny"), false, 300))
-    let e = TurnEndEvent(msg, results)
+    let e = TurnEndEvent(msg, results, TurnEndReason.Completed)
     @Expect(e.eventType(), "turn_end")
     @Expect(e.toolResults.size, 1)
 }

@@ -22,12 +22,17 @@ public class RunXispTool <: Tool {
     private let env: PtcRunEnv
     private let runtime = XispRuntime()
     /**
-     * 本实例内的调用序号。
+     * 本次 run 的调用序号（跨回合单调）。
      *
      * 子调用编号需要以「哪一次 run_xisp」为前缀，而模型的 callId 只在 execute
-     * 时才知道，因此在此处递增。Sequential 声明保证同一实例不会被并发调用。
+     * 时才知道，因此在执行处递增。
+     *
+     * **序号的生命周期是一次 run，不是本实例**：实例每轮重建（它绑着本回合的
+     * 执行环境），序号若随实例归零，每回合第一次 PTC 都会重新从 1 开始，
+     * 子调用 id（`run_xisp#N:ptc:M`）跨回合撞号 —— 而那是 ACP / AG-UI / activity
+     * 当唯一键用的。故取自 [env.runSeq]（run 作用域共享），本实例自建时则退化成本实例内单调。
      */
-    private var runSeq: Int64 = 0
+    private let runSeq: PtcRunSeq
 
     private static let CODE_PARAM_DESCRIPTION: String =
         "要执行的 xisp 程序。最后一个表达式的值作为本次调用的返回值；" +
@@ -40,6 +45,11 @@ public class RunXispTool <: Tool {
     public init(visibleTools: ArrayList<Tool>, env: PtcRunEnv) {
         this.visibleTools = visibleTools
         this.env = env
+        // 环境没给共享计数器时自建一份：序号只在本实例内有意义（单轮独立使用）
+        this.runSeq = match (env.runSeq) {
+            case Some(seq) => seq
+            case None => PtcRunSeq()
+        }
     }
 
     public func name(): String {
@@ -111,8 +121,7 @@ public class RunXispTool <: Tool {
         }
 
         // 绑定只按「本次可见」注册：不注册再过滤，因为权限检查对特殊形式无效
-        this.runSeq = this.runSeq + 1
-        let parentCallId = "${RunXispTool.TOOL_NAME}#${this.runSeq}"
+        let parentCallId = "${RunXispTool.TOOL_NAME}#${this.runSeq.next()}"
         let namespaces = ArrayList<PtcBindingNamespace>()
         namespaces.add(PtcBindings.forTools(this.visibleTools, RunXispHost(this.env, ctx, parentCallId)))
 

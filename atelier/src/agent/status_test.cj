@@ -223,12 +223,9 @@ func lifecycle_statusFollowsLastExecutedSession() {
     let msgs = ArrayList<Message>()
     msgs.add(UserMessage(ContentList.ofText("hi"), 0))
     rt.chatWithSessionId("sess_latest", msgs, SessionEnvironment()).result()
+    // 等 finally 里的 transition(Idle) 落定（result() 早于它）
+    @Expect(awaitIdle(registry, "sess_latest"), true)
 
-    // 执行结束后 status() 回答 Idle（键位已指向 sess_latest）
-    match (rt.status()) {
-        case AgentStatus.Idle => @Expect(true, true)
-        case AgentStatus.Running => @Fail("run 结束后必须回到 Idle")
-    }
     expectIdle(rt.statusOf("sess_latest"), "run 结束后会话必须为 Idle")
 }
 
@@ -246,16 +243,19 @@ func lifecycle_allEntriesLeaveIdle() {
     let msgs = ArrayList<Message>()
     msgs.add(UserMessage(ContentList.ofText("hi"), 0))
     rt.chat(msgs).result()
+    @Expect(awaitIdle(registry, rt.recentStatusKey()), true)
     expectIdle(registry.statusOf(rt.recentStatusKey()), "chat 入口收尾后必须 Idle")
 
     let msgs2 = ArrayList<Message>()
     msgs2.add(UserMessage(ContentList.ofText("hi"), 0))
     rt.drive(RunInput(msgs2, sessionId: "sess_drive")).result()
+    @Expect(awaitIdle(registry, "sess_drive"), true)
     expectIdle(registry.statusOf("sess_drive"), "drive 入口收尾后必须 Idle")
 
     let msgs3 = ArrayList<Message>()
     msgs3.add(UserMessage(ContentList.ofText("hi"), 0))
     rt.chatWithEnv(msgs3, SessionEnvironment()).result()
+    @Expect(awaitIdle(registry, rt.recentStatusKey()), true)
     expectIdle(registry.statusOf(rt.recentStatusKey()), "chatWithEnv 入口收尾后必须 Idle")
 }
 
@@ -306,17 +306,33 @@ func lifecycle_errorPathReturnsIdle() {
     } catch (e: Exception) {
         ()   // 失败是预期：provider 抛错
     }
-    // 收尾在 finally 里，但线程调度可能滞后：短轮询
-    var idle = false
-    var i = 0
-    while (!idle && i < 40) {
-        match (registry.statusOf("sess_err")) {
-            case AgentStatus.Idle => idle = true
-            case AgentStatus.Running => sleep(Duration.millisecond * 20)
+    // 收尾在 finally 里，result() 早于它 —— 统一用 awaitIdle 等
+    @Expect(awaitIdle(registry, "sess_err"), true)
+}
+
+/**
+ * 等某会话状态回到 Idle（finally 里 `transition(Idle)` 的产物）。
+ *
+ * **为什么必须轮询**：`chat*(...).result()` 的 `result()` 只是从信号队列取一个值，
+ * `stream.setResult(...)` 一发生它就返回 —— 而 `statusRegistry.transition(Idle)`
+ * 在 **finally** 里跑得更晚。因此「result() 返回」不等于「状态已回 Idle」，
+ * 直接断言会偶发失败（线程调度相关）。
+ *
+ * 超时只是兜底：正常路径毫秒级收敛。
+ */
+func awaitIdle(registry: AgentStatusRegistry, sessionId: String,
+    timeoutMs!: Int64 = 2000): Bool {
+    var waited: Int64 = 0
+    let step: Int64 = 2
+    while (waited < timeoutMs) {
+        match (registry.statusOf(sessionId)) {
+            case AgentStatus.Idle => return true
+            case AgentStatus.Running =>
+                sleep(Duration.millisecond * step)
+                waited += step
         }
-        i++
     }
-    @Expect(idle, true)
+    false
 }
 
 // 枚举没有 Equatable，@Expect 直接比会推断不出泛型参数 → 用 match 断言

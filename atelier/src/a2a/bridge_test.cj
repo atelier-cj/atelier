@@ -177,7 +177,7 @@ func a2aBridge_forwardsTranslatorOutputIntoTaskStore() {
 
     let msg = AssistantMessage(ContentList.ofText("答案"), "", "",
         StopReason.EndTurn, TokenUsage(0, 0), 0)
-    forwardToQueue(queue, t.translate(TurnEndEvent(msg, ArrayList<ToolResultMessage>())))
+    forwardToQueue(queue, t.translate(TurnEndEvent(msg, ArrayList<ToolResultMessage>(), TurnEndReason.Completed)))
 
     let task = a2aTaskOf(store, "task_1")
     @Expect(task.status.state, TaskState.Completed)

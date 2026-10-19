@@ -9,6 +9,7 @@ import atelier.message.AssistantMessage
 import atelier.message.ToolCallBlock
 import atelier.message.UserMessage
 import atelier.message.StopReason
+import atelier.message.textOfMsg
 import atelier.message.ContentBlock as MsgContentBlock
 // 事件里的消息是 atelier（llm_api）消息类型，与 a2a.types.Message 同名，取别名区分
 import atelier.message.Message as AtelierMessage
@@ -164,49 +165,82 @@ public class A2aTranslator {
                 this.emitStatus(TaskState.InputRequired,
                     this.agentMessage(this.pendingRequestsText(se.requests)), out)
             case te: TurnEndEvent =>
-                // 异常回合（如 provider 报错）：失败文本一条增量都没发过，
-                // 把它挂到 FAILED 状态消息上，宿主（评测框架/日志）才有办法定位。
-                let failed = match (te.message.stopReason) {
-                    case StopReason.Error => true
+                // 本回合怎么结束的 —— 判据是 `reason`，不再用 `stopReason` 推断。
+                // `StopReason` 只描述模型那条回复怎么停的，表达不了
+                // 「预算耗尽 / 钩子短路 / 达到回合上限」这类"模型回了话但 run 没成功"的收尾。
+                let succeeded = isSuccess(te.reason)
+                this.closeText(if (succeeded) { assistantTextOf(te.message) } else { "" }, out)
+                this.closeOpenTools(out)
+                // `Suspended` 要单独拎出来：它既不是成功也不是失败，而是"等你输入"。
+                // 终态转换留给随后的 `SuspendEvent`（那才是协议要求的 INPUT_REQUIRED，
+                // 且要带上待确认项的文案）。在这里提前转 Terminal 会把那条状态吞掉。
+                let suspended = match (te.reason) {
+                    case TurnEndReason.Suspended => true
                     case _ => false
                 }
-                this.closeText(if (failed) { "" } else { assistantTextOf(te.message) }, out)
-                this.closeOpenTools(out)
-                match (te.message.stopReason) {
-                    case StopReason.Error =>
-                        this.phase = A2aTaskPhase.Terminal
+                if (suspended) {
+                    // 什么状态都不发：SuspendEvent 负责
+                } else if (!succeeded) {
+                    // 失败/取消：都是终态。失败要带说明（协议对端才定位得了），
+                    // 取消则不带消息（对端只关心"停了"）。
+                    this.phase = A2aTaskPhase.Terminal
+                    let cancelled = match (te.reason) {
+                        case TurnEndReason.Cancelled => true
+                        case _ => false
+                    }
+                    if (cancelled) {
+                        this.emitStatus(TaskState.Canceled, None, out)
+                    } else {
                         this.emitStatus(TaskState.Failed,
                             this.agentMessage(assistantTextOf(te.message)), out)
-                    case StopReason.Aborted =>
+                    }
+                } else {
+                    // 成功的回合也不一定是任务终态：**工具回合之后还有新回合**，
+                    // 提前收终态会让后续更新违反协议。
+                    //
+                    // 这个判断需要 `StopReason`：`reason == Completed` 只说"本回合正常收尾"，
+                    // 表达不了"模型还要求继续调工具"（stopReason = ToolUse）。
+                    // **这不是在用 stopReason 猜 run 的结局**——结局已由 reason 判完，
+                    // 这里判的是"任务整体是否结束"，两者是不同的问题。
+                    // 两条"本回合还没完"的信号：
+                    // · ToolUse —— 模型要求继续调工具
+                    // · Length  —— 输出被截断，运行时会接着写完（同一回合内续跑）
+                    // 两者都不能当作任务终态。
+                    let continues = match (te.message.stopReason) {
+                        case StopReason.ToolUse => true
+                        case StopReason.Length => true
+                        case _ => false
+                    }
+                    if (!continues && te.toolResults.size == 0) {
                         this.phase = A2aTaskPhase.Terminal
-                        this.emitStatus(TaskState.Canceled, None, out)
-                    case StopReason.EndTurn =>
-                        // 只有「正常结束且没有待执行工具」才是本任务的终态；
-                        // 带工具结果的回合之后还有新回合，提前收终态会让后续更新违反协议
-                        if (te.toolResults.size == 0) {
-                            this.phase = A2aTaskPhase.Terminal
-                            this.emitStatus(this.terminalState(), None, out)
-                        }
-                    case _ =>
-                        // ToolUse：工具批次（或挂起）之后继续；Length：截断续跑或由 AgentEnd 收尾
-                        ()
+                        this.emitStatus(this.terminalState(), None, out)
+                    }
                 }
             case ae: AgentEndEvent =>
-                // 运行收尾。已在中断态（等外部输入）时不改状态；其余情况按完成收尾，
-                // 除非运行以系统错误哨兵收尾 —— 那种情况任务并没有成功。
+                // 运行收尾。已在中断态（等外部输入）时不改状态。
+                //
+                // **崩溃收尾**（运行时 catch 住异常直接收尾，没有 TurnEndEvent）此前只能靠
+                // 匹配 messages 里 `"[Runtime error: ...]"` 文本前缀识别 —— 现在
+                // `ae.reason` 直接给出 `Failed`，文本匹配已删除。
                 if (this.phase == A2aTaskPhase.Working || this.phase == A2aTaskPhase.Idle) {
-                    match (runtimeFailureText(ae.messages)) {
-                        case Some(text) =>
-                            // 崩溃收尾同样要把已产出的分片收干净，再下发失败
-                            this.closeText("", out)
-                            this.closeOpenTools(out)
-                            this.phase = A2aTaskPhase.Terminal
-                            this.emitStatus(TaskState.Failed, this.agentMessage(text), out)
-                        case None =>
-                            this.closeText("", out)
-                            this.closeOpenTools(out)
-                            this.phase = A2aTaskPhase.Terminal
-                            this.emitStatus(this.terminalState(), None, out)
+                    this.closeText("", out)
+                    this.closeOpenTools(out)
+                    this.phase = A2aTaskPhase.Terminal
+                    if (isSuccess(ae.reason)) {
+                        this.emitStatus(this.terminalState(), None, out)
+                    } else {
+                        // 失败/取消：与 turn_end 分支同口径
+                        let cancelled = match (ae.reason) {
+                            case TurnEndReason.Cancelled => true
+                            case _ => false
+                        }
+                        if (cancelled) {
+                            this.emitStatus(TaskState.Canceled, None, out)
+                        } else {
+                            // 崩溃说明取自 messages 末条（错误文本本就在里面）
+                            this.emitStatus(TaskState.Failed,
+                                this.agentMessage(textOfLastMessage(ae.messages)), out)
+                        }
                     }
                 }
             case _ => ()
@@ -389,31 +423,18 @@ private func assistantTextOf(am: AssistantMessage): String {
     sb.toString()
 }
 
-// 运行时 catch 路径的收尾哨兵：AgentEndEvent 只带一条说明性 UserMessage
-// （"[Runtime error: ...]" / "[Runtime system error: ...]"）。这类收尾代表任务并没有成功，
-// 不能按 COMPLETED 下发；正常收尾的历史末条是 assistant 消息，不会命中。
-private func runtimeFailureText(messages: ArrayList<AtelierMessage>): ?String {
-    if (messages.size == 0) {
-        return None
-    }
+// AgentEndEvent.messages 末条的文本。
+//
+// 崩溃收尾时那条是运行时写的说明性 UserMessage（错误文本），**不匹配任何前缀**：
+// 「这次是不是崩溃」已由调用方用 `ae.reason` 判断，这里只负责取文本。
+private func textOfLastMessage(messages: ArrayList<AtelierMessage>): String {
+    if (messages.size == 0) { return "" }
+    // 只认 UserMessage：崩溃收尾时运行时写的是一条说明性用户消息；
+    // 正常路径末条是 assistant —— 那种情况调用方不会走到这里（reason 已判为成功），
+    // 万一走到也不该把模型产出当成错误说明。
     match (messages[messages.size - 1]) {
-        case um: UserMessage =>
-            let text = textOfUserMessage(um)
-            if (text.startsWith("[Runtime error") || text.startsWith("[Runtime system error")) {
-                return Some(text)
-            }
-            None
-        case _ => None
+        case um: UserMessage => textOfMsg(um)
+        case _ => ""
     }
 }
 
-private func textOfUserMessage(um: UserMessage): String {
-    let sb = StringBuilder()
-    for (b in um.content.blocks()) {
-        match (b) {
-            case MsgContentBlock.TextBlock(txt) => sb.append(txt)
-            case _ => ()
-        }
-    }
-    sb.toString()
-}

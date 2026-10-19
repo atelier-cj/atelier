@@ -246,32 +246,43 @@ func executeTool_zeroBudgetRunsOnCallerThread() {
     @Expect(probe.threadId, Thread.currentThread.id)
 }
 
+// 工具抛异常 → **不冒泡**，转成一条 isError 结果。
+//
+// 此前断言的是"异常向上传播"。改判据的理由不是"异常被吞了"——异常信息完整进了
+// `[Tool error: <e.toString()>]`，模型与日志都看得到；区别只在**传播路径**：
+// 从「抛到批次层 → 整批失败 → run 结束」变成「这一条结果失败 → 回合继续」。
+// 后者才是对的：单个工具失败不该让整轮作废（与 pi 的单工具 try/catch 一致）。
 @Test
-func executeTool_propagatesToolException() {
+func executeTool_isolatesToolExceptionIntoErrorResult() {
     let tool = ThrowingProbeTool(false)
-    var caught = ""
-    try {
-        executeTool(tool, ToolContext(""), budgetArgs(), Some(Duration.millisecond * 5000))
-        @Fail("expected the tool exception to propagate")
-    } catch (e: Exception) {
-        caught = e.message
-    }
-    @Expect(caught, "kaboom")
+    let result = executeTool(tool, ToolContext(""), budgetArgs(),
+        Some(Duration.millisecond * 5000))
+    @Expect(result.isError, true)
+    // 异常正文必须保留（不是静默吞掉）
+    @Expect(result.text.contains("kaboom"), true)
+    // 与框架超时的文案区分开
+    @Expect(result.text.contains("did not return within"), false)
 }
 
+// 工具自己抛的 TimeoutException **不能**被误判成框架超时。
+//
+// 这条守的是内层区分，不是"冒泡"：`executeTool` 内部先判 `TimeoutException`、
+// 再用 `tryGet()` 分辨「任务已结束（工具自己抛的）」与「仍在运行（框架超时）」。
+// 两种结论的文案语义完全不同 ——
+//   框架超时：`[tool timeout] ... did not return within ...`，且结果未知、要求先核实
+//   工具自抛：`[Tool error: ...]`，是工具自己报的错
+// 本例断言最终形态是后者：不冒泡、但也不被当成框架超时。
 @Test
-func executeTool_propagatesToolOwnTimeoutException() {
-    // 工具自己抛的 TimeoutException 不能被误判成框架超时：
-    // 前者该原样冒泡（调用方可能正等着它），后者才需要变成失败结果
+func executeTool_toolOwnTimeoutIsNotMisreadAsFrameworkTimeout() {
     let tool = ThrowingProbeTool(true)
-    var caught = ""
-    try {
-        executeTool(tool, ToolContext(""), budgetArgs(), Some(Duration.millisecond * 5000))
-        @Fail("expected the tool's own TimeoutException to propagate")
-    } catch (e: TimeoutException) {
-        caught = e.message
-    }
-    @Expect(caught, "thrown by the tool itself")
+    let result = executeTool(tool, ToolContext(""), budgetArgs(),
+        Some(Duration.millisecond * 5000))
+    @Expect(result.isError, true)
+    // 工具自己的异常信息被保留
+    @Expect(result.text.contains("thrown by the tool itself"), true)
+    // 走的是"工具报错"这条，不是"框架超时"那条
+    @Expect(result.text.contains("Tool error"), true)
+    @Expect(result.text.contains("did not return within"), false)
 }
 
 // ── toolBudget：工具声明优先 ─────────────────────────────────

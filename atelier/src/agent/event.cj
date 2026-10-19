@@ -17,7 +17,27 @@ public class AgentStartEvent <: AgentEvent {
 
 public class AgentEndEvent <: AgentEvent {
     public let messages: ArrayList<Message>
-    public init(messages: ArrayList<Message>) { this.messages = messages }
+    /**
+     * 本次 **run** 的终结方式。
+     *
+     * 与 [TurnEndEvent.reason] 的分工：
+     * - 那个描述「**某一回合**怎么结束的」（一个 run 可以有多个回合）；
+     * - 这个描述「**整个 run** 怎么收尾的」。
+     *
+     * 正常路径上两者一致（都是最后一个回合的原因 —— 运行时保证
+     * `endReason == 最后一个 TurnEndEvent.reason`）。但**崩溃路径没有回合**：
+     * 运行时 catch 住了异常、直接收尾，不会发 `TurnEndEvent`。
+     * 此前消费端只能靠匹配 `"[Runtime error: ...]"` / `"[Runtime system error: ...]"`
+     * 文本前缀来识别这种收尾，消息措辞一变就会**静默失效**（表现为崩溃被当成正常完成）。
+     *
+     * 崩溃与 provider 失败共用 [TurnEndReason.Failed]：按「枚举表达调用方该怎么应对」
+     * 的判据，两者的应对完全相同（不该重试、要上报、要让用户看到），
+     * 区分信息在 [messages] 里（错误文本）。故不为此新增 `Crashed` 变体。
+     */
+    public let reason: TurnEndReason
+    public init(messages: ArrayList<Message>, reason: TurnEndReason) {
+        this.messages = messages; this.reason = reason
+    }
     public func eventType(): String { "agent_end" }
 }
 
@@ -26,11 +46,58 @@ public class TurnStartEvent <: AgentEvent {
     public func eventType(): String { "turn_start" }
 }
 
+/**
+ * 一次回合结束的**真实原因**。
+ *
+ * 与 [StopReason] 的分工（两者都必要，不能互相替代）：
+ * - `StopReason` 描述**模型这一条回复**怎么停的（自然结束 / 要调工具 / 被截断 …）；
+ * - `TurnEndReason` 描述**这个回合**为什么收尾 —— 回合可能因为与模型无关的原因结束
+ *   （工具预算耗尽、钩子短路、宿主要求挂起、调用方取消、内部失败）。
+ *
+ * 混用两者的后果：消费端会把「任务被预算掐断」当成「模型正常收尾」，
+ * 于是该提示用户"预算用完了"的场景显示成"已完成"。
+ *
+ * **不带载荷**：错误细节留在 [TurnEndEvent.message] 里（provider 失败消息本就在
+ * 那条 AssistantMessage 上）。一个事实不存两处 —— 否则两处会不一致，消费端还得猜
+ * 该信哪个。
+ */
+public enum TurnEndReason {
+    /** 模型自然收尾，无后续动作 */
+    | Completed
+    /** 工具调用预算耗尽：剩余调用未执行，历史里已补"未执行"结果 */
+    | ToolBudgetExhausted
+    /** `beforeTurn` 钩子短路了整个 run（本条回复是占位说明，不是模型产出） */
+    | BlockedByHook
+    /** 宿主要求先确认/补充：历史停在 `assistant(tool_calls)`，等下一次 run 带回结果 */
+    | Suspended
+    /** 调用方取消（协作式收敛，不是错误） */
+    | Cancelled
+    /** 失败：provider 不可恢复错误、工具批次异常、或运行时内部异常 */
+    | Failed
+    /**
+     * 达到 `maxTurns` 上限：循环条件把回合数卡住，任务**没跑完**。
+     *
+     * 这条路径原本连 `TurnEndEvent` 都不发（循环条件直接为假退出），
+     * 消费端因此看到一个"跑完了"的 run，实际是被上限掐断的 ——
+     * 正是本枚举要消除的那类事实缺口。现在由收尾处补发一条事件。
+     */
+    | MaxTurnsReached
+}
+
 public class TurnEndEvent <: AgentEvent {
     public let message: AssistantMessage
     public let toolResults: ArrayList<ToolResultMessage>
-    public init(message: AssistantMessage, toolResults: ArrayList<ToolResultMessage>) {
-        this.message = message; this.toolResults = toolResults
+    /**
+     * 本回合为什么结束。
+     *
+     * **不设默认值**：默认值会把"旧的错误收尾"静默当成 `Completed`，
+     * 而那正是这个字段要消除的那类事实缺口。构造点必须逐个给出正确原因，
+     * 漏改会编译报错。
+     */
+    public let reason: TurnEndReason
+    public init(message: AssistantMessage, toolResults: ArrayList<ToolResultMessage>,
+        reason: TurnEndReason) {
+        this.message = message; this.toolResults = toolResults; this.reason = reason
     }
     public func eventType(): String { "turn_end" }
 }
@@ -137,3 +204,23 @@ public class CompactionEvent <: AgentEvent {
 }
 
 public type LoopEventStream = EventStream<AgentEvent, ArrayList<Message>>
+
+/**
+ * 该结束原因是否应视为**成功**。
+ *
+ * 消费者（A2A / AG-UI / 宿主）都需要这个判断，而它此前各自用 `StopReason`
+ * 或消息文本前缀去推断 —— 那是信息不足时的替代品：
+ *
+ * · `StopReason` 只有 5 个值，表达不了 `ToolBudgetExhausted` / `BlockedByHook` /
+ *   `MaxTurnsReached` 这类"模型正常回了话、但 run 并没有成功"的收尾；
+ * · 文本前缀匹配（如 `[Runtime error` ）会在消息格式变化时**静默失效**。
+ *
+ * 只有 `Completed` 算成功；其余（含预算耗尽、钩子短路、挂起、取消、失败、达到回合上限）
+ * 都不是。挂起不属于失败，但也不是"跑完了"，调用方按 reason 自行决定措辞。
+ */
+public func isSuccess(reason: TurnEndReason): Bool {
+    match (reason) {
+        case TurnEndReason.Completed => true
+        case _ => false
+    }
+}
