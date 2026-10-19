@@ -1106,6 +1106,27 @@ public open class AgentRuntime <: AgentLoop {
     }
 
     /**
+     * 交还历史前的最后收口：把本次 run 写下的历史对齐成合法历史。
+     *
+     * `ensureToolCallResults` 此前只在**发请求前**调用，而循环的最后一次迭代之后直接
+     * `stream.setResult` —— 中间没有任何收口点。最后一轮仍然会写历史，且能写脏的路径
+     * 不止一条：assistant 消息本身、预算耗尽 / 裁剪掉的那批调用、非工具回合里携带的
+     * 孤儿调用、工具批次异常兜底、provider 失败消息、`afterRun` 钩子改写历史。
+     *
+     * 交还出去的历史是宿主的持久化输入（会话树 / JSONL / 协议对端），所以收口放在
+     * **交还点**而不是要求每条写入路径各自维护不变式：新增路径不必记得这条规则。
+     * 幂等（见 [ensureToolCallResults]）：合法历史这里补 0 条，正常路径零成本。
+     */
+    private func settleHistory(scope: RunScope, log: Logger): Unit {
+        // 挂起不是"写漏了"：那条结果属于下一次 run（宿主答复带回），这里补就是伪造
+        if (scope.suspended) { return }
+        let patched = ensureToolCallResults(scope.messages)
+        if (patched > 0) {
+            log.warn("history had ${patched} tool call(s) without results at run end; inserted placeholders so the returned history stays valid", Array<Attr>())
+        }
+    }
+
+    /**
      * 回合开场时通告「本回合正在处理的首条消息」。
      *
      * **空历史时不发**，这本身是契约的一部分，不是省略：`MessageStartEvent` 的载荷是
@@ -1145,19 +1166,16 @@ public open class AgentRuntime <: AgentLoop {
             // 「任何入口跑起来，status() 都真的回答 Running」。
             this.statusKey = sessionId
             this.statusRegistry.transition(sessionId, AgentStatus.Running)
+            // 本次 run 的工具视图：根表（装配束共享）只当父表，run 期间按需注册的
+            // run 作用域工具全部落在这张视图上，收尾随 scope 一起丢弃
+            let runTools = this.toolRegistry.derived(ArrayList())
+            // 收尾收口要能覆盖异常路径，故 scope 在 try 之外声明：catch 里拿得到
+            // 本轮已写入的历史，才能在交还调用方之前把它对齐成合法历史
+            let scope = RunScope(ArrayList<Message>(messages), runTools,
+                ToolExecutor(runTools, budget: toolBudgetPolicyOf(this.config)))
             try {
                 this.emit(stream, AgentStartEvent(sessionId))
                 log.info("agent start: ${this.config.name}", Array<Attr>())
-                // 本次 run 的工具视图：根表（装配束共享）只当父表，run 期间按需注册的
-                // run 作用域工具全部落在这张视图上，收尾随 scope 一起丢弃
-                let runTools = this.toolRegistry.derived(ArrayList())
-                let runExecutor = ToolExecutor(runTools, budget: toolBudgetPolicyOf(this.config))
-                let initial = ArrayList<Message>()
-                for (m in messages) { initial.add(m) }
-                // 循环级可变状态收进 RunScope：阶段方法只收一个引用，不必逐个传 8 个标量。
-                // 先于 beforeRun 构造：钩子拿到的工具表就是本次 run 的视图
-                let scope = RunScope(initial, runTools, runExecutor)
-
                 let hookState = HookState()
                 callHooks(scope.tools, "beforeRun", 0, hookState)
 
@@ -1314,6 +1332,9 @@ public open class AgentRuntime <: AgentLoop {
                                 stream, hookState, log)
                             match (outcome) {
                                 case ToolBatchOutcome.Suspended =>
+                                    // 挂起 = 历史刻意停在 assistant(tool_calls)，
+                                    // 收尾收口要认这个状态（见 RunScope.suspended）
+                                    scope.suspended = true
                                     scope.finished = true
                                     continue
                                 case ToolBatchOutcome.ContinueRun => ()
@@ -1378,10 +1399,21 @@ public open class AgentRuntime <: AgentLoop {
 
                 log.info("agent end, total turns=${scope.turnCount}", Array<Attr>())
                 callHooks(scope.tools, "afterRun", scope.turnCount, hookState)
+                // 交还前再收口一次：`ensureToolCallResults` 此前只在**发请求前**跑，
+                // 最后一轮写完历史就收尾，中间没有任何收口点。最后一轮仍会写历史的路径
+                // 不止一条（assistant 消息、预算耗尽 / 裁剪掉的调用、非工具回合里带的
+                // 孤儿调用、批次异常兜底、provider 失败消息、afterRun 钩子改写），
+                // 任何一条漏配对都会让交返的历史违反「每个 tool_call 恰好一条结果」——
+                // 宿主把它落库后就是一条脏历史，下一轮请求前才发现。
+                // 幂等（history_invariant.cj 已声明），合法历史这里补 0 条。
+                this.settleHistory(scope, log)
                 stream.setResult(scope.messages)
                 this.emit(stream, AgentEndEvent(scope.messages))
             } catch (e: Exception) {
                 log.error("unhandled error: ${e.message}", Array<Attr>())
+                // 异常同样要收口：抛出去之前已写入的历史（assistant 带 tool_calls、
+                // 工具结果写了一半）必须对齐，否则宿主从错误里恢复后拿到的仍是脏历史。
+                this.settleHistory(scope, log)
                 // 先发结束事件（携带错误说明），再置错误信号：流消费者按 AgentEndEvent 收敛，
                 // 随后 result() 抛错由调用方决定策略
                 this.emit(stream, AgentEndEvent(ArrayList<Message>([UserMessage(ContentList.ofText("[Runtime error: ${e.message}]"), 0)])))

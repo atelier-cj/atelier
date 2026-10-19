@@ -53,6 +53,16 @@ internal class RunScope {
     var finished: Bool = false
 
     /**
+     * 本次 run 以**挂起**收尾（有调用在等外部结果）。
+     *
+     * 收口（[AgentRuntime.settleHistory]）必须据此跳过：挂起时历史**刻意**停在
+     * `assistant(tool_calls)` 而不写结果 —— 那条结果要由下一次 run 随宿主答复带回
+     * （见 [ToolBatchOutcome.Suspended]）。此时补占位结果不是"修历史"，而是伪造：
+     * 恢复时会多出一条与本调用不对应的结果，且模型会以为工具已经跑过。
+     */
+    var suspended: Bool = false
+
+    /**
      * 本次 run 的**工具视图**（根表的派生视图，收尾即弃）。
      *
      * 契约：run 作用域的工具实例（`RunXispTool`、`AgentTool`）只注册进这张视图，
