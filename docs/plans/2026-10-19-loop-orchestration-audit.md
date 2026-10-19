@@ -70,6 +70,12 @@
 
 **A5 的含义**：`ArchiveMessage(startIndex, endIndex)` 记的是绝对下标，`applyArchiveMarks` 却拿当前循环下标去比。截断让下标整体前移而记录不变 → 误跳。`builder.cj` 只有"全跳过则回退"兜底，**部分误跳不兜**。ACP 每回合 `maxLoad=15` 是常规路径。
 
+修法有三处细节，都不是一开始能想到的（实施时撞出来的，记在这里免得下次重踩）：
+
+1. 平移量必须**在构造结果前一次算完**——边扫边累加会让头部最前面的 Archive 拿到 `dropped = 0`，等于没修。
+2. 范围整体落到窗口之前时表达成**空范围**（`end = start - 1`），**不能**把下界钳成 `[0,0]`——钳成 `[0,0]` 会让它转而去吃窗口里的第一条消息，正是要消除的那类误伤。
+3. 窗口**内**的 Archive（`applyArchives` 产出的新标记就落在原下标位置）范围同样要平移。
+
 ### B 类：结构隐患（当前宿主不触发，换宿主就炸）
 
 | # | 隐患 | 判定要点 |
@@ -134,7 +140,7 @@ worktree 分支 `probe/loop-orchestration`（基于 master `9e6f7d9`），6 个�
 | `b9adeef` | A3 run 作用域工具落派生视图：`RunScope` 增 `tools` + `toolExecutor`，run 期注册/查表/PTC 授权/5 个 hook 统一走视图 |
 | `abd9747` | A4 交还历史前收口（正常 + 异常路径），`RunScope.suspended` 跳过挂起 |
 | `0794650` | B2 压缩移到 `beforeTurn` 之后，并按 `chatReq.model` 重算窗口（压完重建请求） |
-| `0b479ba` | A5 截断时同步平移 Archive 下标（含空范围表达，避免钳到 [0,0] 反吃第一条） |
+| `0b479ba` | A5 截断时同步平移 Archive 下标：`dropped` 先一次算完、越界用空范围而非钳 `[0,0]`、窗口内 Archive 同样平移 |
 
 **A4 途中发现的真实设计冲突**：挂起路径是**刻意**让历史停在 `assistant(tool_calls)` 且不写结果的（结果由下次 run 带回，注释原话"写了就等于伪造"）。无脑收口会伪造结果——既有用例 `suspend_doesNotWriteResultMessage` 立刻抓住了，于是补 `RunScope.suspended` 跳过。**既有用例在这里起到了正确的守护作用。**
 
