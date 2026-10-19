@@ -293,6 +293,7 @@ func a2aTranslator_unexecutedToolArtifactClosedAtTurnEnd() {
     t.translate(MessageEndEvent(a2aToolCallMsg("call_9", "bash", a2aArgs())))
     let out = t.translate(TurnEndEvent(
         a2aToolCallMsg("call_9", "bash", a2aArgs()), ArrayList<ToolResultMessage>(), TurnEndReason.Completed))
+    // 本回合是工具回合（带结果）→ 不是任务终态，后续还有回合
     let arts = a2aArtifactEvents(out)
     @Expect(arts.size, 1)
     @Expect(arts[0].append, true)
@@ -315,7 +316,7 @@ func a2aTranslator_errorTurnEmitsFailedWithVisibleText() {
     let blocks = ArrayList<ContentBlock>()
     blocks.add(ContentBlock.TextBlock("[provider error] HTTP 429"))
     let failed = a2aAssistantMsg(ContentList(blocks), StopReason.Error)
-    let out = t.translate(TurnEndEvent(failed, ArrayList<ToolResultMessage>(), TurnEndReason.Completed))
+    let out = t.translate(TurnEndEvent(failed, ArrayList<ToolResultMessage>(), TurnEndReason.Failed))
     // 失败原因走终态状态消息，而不是塞进产物
     @Expect(a2aArtifactEvents(out).size, 0)
     let sts = a2aStatusEvents(out)
@@ -350,7 +351,7 @@ func a2aTranslator_abortedTurnEmitsCanceled() {
     t.translate(TurnStartEvent())
     t.translate(a2aTextDelta("做到一半"))
     let out = t.translate(TurnEndEvent(
-        a2aAssistantMsg(ContentList.ofText("做到一半"), StopReason.Aborted), ArrayList<ToolResultMessage>(), TurnEndReason.Completed))
+        a2aAssistantMsg(ContentList.ofText("做到一半"), StopReason.Aborted), ArrayList<ToolResultMessage>(), TurnEndReason.Cancelled))
     // 半截文本先收尾（lastChunk），再下发终态
     let arts = a2aArtifactEvents(out)
     @Expect(arts.size, 1)
@@ -390,7 +391,8 @@ func a2aTranslator_runtimeErrorSentinelEmitsFailed() {
     @Expect(t.translate(a2aTextDelta("半截输出")).size, 0)
     let msgs = ArrayList<AtelierMessage>()
     msgs.add(UserMessage(ContentList.ofText("[Runtime error: boom]"), 0))
-    let out = t.translate(AgentEndEvent(msgs, TurnEndReason.Completed))
+    // 崩溃收尾：AgentEndEvent.reason 直接是 Failed（不再靠 messages 里的文本前缀识别）
+    let out = t.translate(AgentEndEvent(msgs, TurnEndReason.Failed))
     let arts = a2aArtifactEvents(out)
     @Expect(arts.size, 1)
     @Expect(arts[0].lastChunk, true)
@@ -460,7 +462,7 @@ func a2aTranslator_suspendEmitsInputRequiredThenResumes() {
 
     // 挂起路径：先 TurnEnd（工具未执行）→ 再 SuspendEvent
     let endOut = t.translate(TurnEndEvent(
-        a2aToolCallMsg("call_1", "bash", a2aArgs()), ArrayList<ToolResultMessage>(), TurnEndReason.Completed))
+        a2aToolCallMsg("call_1", "bash", a2aArgs()), ArrayList<ToolResultMessage>(), TurnEndReason.Suspended))
     let endArts = a2aArtifactEvents(endOut)
     @Expect(endArts.size, 1)
     @Expect(endArts[0].lastChunk, true)
