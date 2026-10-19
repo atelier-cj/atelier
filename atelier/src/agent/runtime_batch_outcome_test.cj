@@ -63,6 +63,13 @@ func nameListAttr(names: Array<String>): ArrayList<String> {
 }
 
 // 收集流里所有事件，按类型名判断形状
+// 消费到生产端收尾（`isClosed`）。
+//
+// 注意这里有一步**隐含的同步保证**：`close()` 是 finally 的最后一步，因此
+// 本函数返回时 finally 已经跑完（`afterRun`、状态转 Idle 都已完成）。
+// 本文件的用例都靠它来确定性地断言收尾相关的事 —— 若将来改成"收满 N 条就返回"，
+// 那些断言会变成 flaky（`result()` 早于 finally，见 runtime_after_run_test.cj 的说明）。
+// 纯事件形状的断言（如 turn_end 出现过）不依赖这个保证。
 func drainEventTypes(stream: EventStream<AgentEvent, ArrayList<Message>>): ArrayList<String> {
     let kinds = ArrayList<String>()
     var done = false

@@ -12,9 +12,25 @@ package atelier.agent
  *
  * `callHooks` 内部对每个钩子各自 try/catch，因此收尾钩子自身出错也不会影响收尾，
  * 这也是它可以安全地放进 finally 的前提。
+ *
+ * ## 断言时机（本文件的用例必须遵守）
+ *
+ * `stream.setResult(...)` 在 **try 内**、`afterRun` 在 **finally 里**，而
+ * `result()` 只是从信号队列取一个值（`StreamSignal.Value`）—— **`setResult` 一发生
+ * 它就返回**。因此「`result()` 返回」**不等于**「finally 已跑完」，直接断言
+ * `afterRunCalls` 会偶发失败。
+ *
+ * 正确做法：等一个**由 finally 产生**的、晚于 afterRun 的观测点。
+ * finally 的顺序是 `afterRun` → `statusRegistry.transition(Idle)` → `close()`，
+ * 所以「状态回到 Idle」天然是 afterRun 之后的事实，也是产品真正的不变量
+ * （run 收敛 → 回到 idle，宿主据此判断能否再派活）。[awaitRunSettled] 用它等待。
+ *
+ * 不要用 `sleep` 猜时间：那只是把竞态窗口改小，慢机器上照样红。
  */
 
 import std.collection.*
+import std.core.Duration
+import std.core.sleep
 import atelier.message.*
 import atelier.provider.*
 import atelier.tool.*
@@ -23,6 +39,29 @@ import atelier.trust.*
 import atelier.skill.*
 import atelier.event.EventStream
 import jsonvalue.*
+
+/**
+ * 等本次 run **真正收尾**（finally 跑完）。
+ *
+ * `afterRun` 在 finally 里、`setResult` 在 try 内，而 `result()` 只取信号队列 ——
+ * 它返回时 finally 可能还没跑。这里轮询「状态回到 Idle」：该转换在 afterRun **之后**、
+ * `close()` 之前，因此拿到 Idle 即说明收尾钩子已经执行过。
+ *
+ * 超时只是兜底（防止用例永久挂住），正常路径在毫秒级收敛。
+ */
+func awaitRunSettled(runtime: AgentRuntime, sessionId: String): Unit {
+    var waited: Int64 = 0
+    let step: Int64 = 2
+    let limit: Int64 = 2000
+    while (waited < limit) {
+        match (runtime.statusOf(sessionId)) {
+            case AgentStatus.Idle => return
+            case AgentStatus.Running =>
+                sleep(Duration.millisecond * step)
+                waited += step
+        }
+    }
+}
 
 // 记录 beforeRun / afterRun 的调用次数与顺序
 class RunPhaseRecorder <: Hook {
@@ -66,8 +105,12 @@ class SchemaThrowingTool <: Tool {
     public func executionMode(): ToolExecutionMode { ToolExecutionMode.Parallel }
 }
 
-func runWithHook(provider: Provider, toolReg: ToolRegistry,
-    hooks: ArrayList<Hook>): ArrayList<Message> {
+// 跑一次 run 并**等它真正收尾**再返回。
+//
+// 用显式会话 id（chatWithSessionId）而不是 chat()：`chat()` 内部生成的 id 拿不到，
+// 而等待收敛需要它来查状态。
+func runWithHook(provider: Provider, toolReg: ToolRegistry, hooks: ArrayList<Hook>,
+    sessionId: String): ArrayList<Message> {
     let providerReg = ProviderRegistry()
     providerReg.register("default", provider)
     // 必须把工具列进 config.tools：否则它不在"可见工具"里，schema() 不会被调用，
@@ -83,14 +126,18 @@ func runWithHook(provider: Provider, toolReg: ToolRegistry,
         providerReg, hooks, McpManager())
     let msgs = ArrayList<Message>()
     msgs.add(UserMessage(ContentList.ofText("hi"), 0))
-    let stream = runtime.chat(msgs)
+    let stream = runtime.chatWithSessionId(sessionId, msgs, SessionEnvironment())
     // 框架级异常会沿流抛出：本文件主要关心钩子是否被调用，故吞掉返回值
-    try {
+    let history = try {
         stream.result()
     } catch (e: Exception) {
         // 预期：框架级异常或 provider 失败沿流抛出
         ArrayList<Message>()
     }
+    // result() 在 setResult 时就返回，而 afterRun 在 finally 里跑得更晚 ——
+    // 必须等收尾真正完成，否则断言会偶发失败
+    awaitRunSettled(runtime, sessionId)
+    history
 }
 
 // 正常结束：beforeRun / afterRun 各一次（基线，锁住正常路径没被改动影响）
@@ -110,7 +157,8 @@ func runtime_afterRunHook_runsOnNormalCompletion() {
         providerReg, hooks, McpManager())
     let msgs = ArrayList<Message>()
     msgs.add(UserMessage(ContentList.ofText("hi"), 0))
-    runtime.chat(msgs).result()
+    runtime.chatWithSessionId("s_afterrun_normal", msgs, SessionEnvironment()).result()
+    awaitRunSettled(runtime, "s_afterrun_normal")
 
     @Expect(recorder.beforeRunCalls, Int64(1))
     @Expect(recorder.afterRunCalls, Int64(1))
@@ -128,7 +176,7 @@ func runtime_afterRunHook_runsOnFrameworkError() {
     toolReg.register(SchemaThrowingTool())
     let responses = ArrayList<AssistantMessage>()
     responses.add(endTurnMsg("ok"))
-    runWithHook(ScriptedMsgProvider(responses), toolReg, hooks)
+    runWithHook(ScriptedMsgProvider(responses), toolReg, hooks, "s_afterrun_framework_error")
 
     @Expect(recorder.beforeRunCalls, Int64(1))
     // 关键断言：框架级异常路径同样收尾（把 afterRun 移回 try 内时这条为 0）
@@ -144,7 +192,7 @@ func runtime_afterRunHook_runsOnProviderFailureMessage() {
     hooks.add(recorder)
     let provider = ThrowingOnStreamProvider()
     let toolReg = ToolRegistry()
-    runWithHook(provider, toolReg, hooks)
+    runWithHook(provider, toolReg, hooks, "s_afterrun_provider_failure")
 
     @Expect(recorder.beforeRunCalls, Int64(1))
     @Expect(recorder.afterRunCalls, Int64(1))
@@ -177,7 +225,10 @@ func runtime_afterRunHook_itsOwnErrorDoesNotBreakShutdown() {
         providerReg, hooks, McpManager())
     let msgs = ArrayList<Message>()
     msgs.add(UserMessage(ContentList.ofText("hi"), 0))
-    let history = runtime.chat(msgs).result()
+    let history = runtime.chatWithSessionId("s_afterrun_hook_throws", msgs,
+        SessionEnvironment()).result()
+    // 这条正是曾经 flaky 的那条：afterRun 在 finally 里，result() 早于它
+    awaitRunSettled(runtime, "s_afterrun_hook_throws")
 
     // 抛错的钩子被执行了；排在它后面的钩子照样执行（逐个隔离）
     @Expect(throwing.calls, Int64(1))
