@@ -37,7 +37,15 @@ public class StormSessionStore <: SessionStore {
     private let db: Storm
 
     public init(path: String) {
-        this.db = Storm.open(path)
+        // syncWrites=true：每次写入同步落盘。
+        //
+        // 会话是**用户可见的持久数据**，不能像缓存那样等 memtable 满了才刷。
+        // 默认的 syncWrites=false 意味着进程被 kill（容器重启、OOM、Ctrl-C 之外的
+        // 强制终止）时，最近的全部对话直接消失——而现象是"重启后历史没了"，
+        // 排查时会被误导到上层。
+        //
+        // 代价是每次写的延迟略高；会话写入频率（每轮一次）远达不到这个瓶颈。
+        this.db = Storm.open(path, syncWrites: true)
     }
 
     public func close(): Unit { this.db.close() }
