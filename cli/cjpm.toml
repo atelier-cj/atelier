@@ -1,6 +1,6 @@
 [package]
 name = "cli"
-version = "0.1.13"
+version = "0.1.15"
 cjc-version = "1.1.3"
 output-type = "static"
 compile-option = "-Woff unused"
@@ -10,7 +10,7 @@ authors = ["ystyle"]
 repository = "https://atomgit.com/ystyle/atelier"
 
 [dependencies]
-atelier = "0.1.4"
+atelier = "0.1.15"
 server = "0.1.0"
 "opencj::ulid" = "0.1.2"
 # 工具参数的 JSON 呈现与测试里的 JsonValue 构造需要直接引用该包
@@ -20,7 +20,7 @@ server = "0.1.0"
 # xisp 0.5.0 起终端模块拆为独立包（原 xisp.terminal 子包）
 "ystyle::xisp_terminal" = "0.5.0"
 # A2A v1 协议层（a2a-cj，中心仓 0.1.0）
-"a2a" = "0.1.0"
+"a2a" = "0.1.1"
 "cjterm_stream" = "0.1.0"
 "pulldown4cj" = "0.1.0"
 

@@ -35,6 +35,9 @@ public class CompactionJournalRow {
 
 public class StormSessionStore <: SessionStore {
     private let db: Storm
+    // 数据库生命周期归谁：自己 open 的就自己关；外部注入的交给持有者。
+    // 不能让 close() 无条件关 —— 注入场景下关掉会连带弄死持有者的其它表。
+    private let ownsDb: Bool
 
     public init(path: String) {
         // syncWrites=true：每次写入同步落盘。
@@ -46,9 +49,27 @@ public class StormSessionStore <: SessionStore {
         //
         // 代价是每次写的延迟略高；会话写入频率（每轮一次）远达不到这个瓶颈。
         this.db = Storm.open(path, syncWrites: true)
+        this.ownsDb = true
     }
 
-    public func close(): Unit { this.db.close() }
+    /**
+     * 用**已有的** Storm 实例构造：调用方负责打开与关闭。
+     *
+     * 场景：同一进程里还要存别的东西（如宿主的可写配置），而 bstorm 的数据目录
+     * 不能被打开两次（badgercj 只有进程内锁，没有跨进程文件锁）。此时由调用方
+     * 持有唯一的 `Storm`，会话存储与其它用途的表共用一个实例 —— 不同 tableName，
+     * 互不影响。
+     */
+    public init(db: Storm) {
+        this.db = db
+        this.ownsDb = false
+    }
+
+    public func close(): Unit {
+        if (this.ownsDb) {
+            this.db.close()
+        }
+    }
 
     private func journalId(sessionId: String): String { "compact:" + sessionId }
 
