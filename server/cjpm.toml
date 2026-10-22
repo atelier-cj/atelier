@@ -1,6 +1,6 @@
 [package]
 name = "server"
-version = "0.1.13"
+version = "0.1.15"
 cjc-version = "1.1.0"
 output-type = "static"
 compile-option = "-Woff unused"
@@ -9,6 +9,6 @@ authors = ["ystyle"]
 repository = "https://atomgit.com/ystyle/atelier"
 
 [dependencies]
-atelier = "0.1.4"
+atelier = "0.1.15"
 jsonvalue = "1.1.1"
 tomlcj = "1.0.0"
