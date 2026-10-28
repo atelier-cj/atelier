@@ -14,3 +14,9 @@ build-script-cache/
 # 工作区级锁文件（cjpm 构建时生成；成员级 atelier/cjpm.lock 才是被跟踪的那份）
 /cjpm.lock
 .worktrees/
+
+# 排查用的临时日志（一次性产物，不进版本库；曾误提交过一整批）
+*.log
+
+# 一次性依赖探针工程（验证依赖能否解析/编译，不参与构建）
+/.probe/
