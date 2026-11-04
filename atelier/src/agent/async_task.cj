@@ -30,7 +30,9 @@ import atelier.tool.*
 // 消费方据此决定"要不要给用户提示 / 要不要设超时"。
 
 // 异步任务的 reason 取值
-public const ExternalReasonAsyncTask: String = "async_task"
+// 异步任务的 reason 值**定义在 tool 层**（工具要构造它）；这里只是同义别名，
+// 保持两边字符串一致，避免手写两处导致对不上。
+public const ExternalReasonAsyncTask: String = AsyncTaskReason
 
 // 一个后台任务的完成信号。
 public class AsyncTaskResult {
@@ -163,42 +165,4 @@ public func collectAsyncResults(msgs: ArrayList<Message>): HashMap<String, Async
         out[requestId] = AsyncTaskResult(requestId, toolCallId, toolName, text, isError: isError)
     }
     out
-}
-
-// 异步工具声明的统一入口：工具返回它，运行时就会挂起这次 run，
-// 并登记一个待回填的后台任务。
-//
-// 为什么做成构造器而不是让工具自己 new ExternalRequest：
-//   · reason 必须统一（`async_task`），否则消费方分不清"等后台"与"等人"；
-//   · requestId 的生成规则必须一致（幂等回填靠它）；
-//   · 挂起登记与挂起请求是**同一件事的两面**，分开写一定会漏一边——
-//     漏了登记，后台跑完也没人知道该填给谁。
-//
-// 用法：
-//
-//   public func execute(ctx: ToolContext, args: JsonValue): ToolResult {
-//       let reqId = newAsyncRequestId(ctx.toolCallId)
-//       spawn { /* 干活 */ ; sendResultBack(reqId, ...) }
-//       asyncToolResult(reqId, "已提交后台执行", ctx.toolCallId)
-//   }
-public func newAsyncRequestId(toolCallId: String): String {
-    "async-" + toolCallId
-}
-
-// 构造"这次由后台执行"的工具结果。
-//
-// `text` 是给模型看的一句话（"已提交后台执行，结果稍后送达"）——它不会写进历史
-// （挂起时不产生结果消息），但会出现在工具执行结束事件里，前端可据此显示进度。
-public func asyncToolResult(requestId: String, text: String, toolCallId: String,
-    toolName!: String = ""): ToolResult {
-    ToolResult(text, None, false, false,
-        external: Some(ExternalRequest(requestId, ExternalReasonAsyncTask, text,
-            toolCallId: toolCallId)))
-}
-
-// 判断一个挂起是不是"等后台任务"（相对于"等人答复/前端执行"）。
-//
-// 消费方据此决定要不要设超时：等后台一定会来，等人可能永远不来。
-public func isAsyncTaskRequest(req: ExternalRequest): Bool {
-    req.reason == ExternalReasonAsyncTask
 }

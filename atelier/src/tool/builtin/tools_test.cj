@@ -311,3 +311,87 @@ func askUser_missingQuestionIsAnError() {
     @Expect(r.isError, true)
     @Expect(r.text.contains("question"), true)
 }
+
+// ---------- bash 后台模式 ----------
+
+// 后台通道替身：同步执行 work 并记下结果，测试里不必和线程赛跑
+class CapturingBackground {
+    public let submitted = ArrayList<String>()
+    public var text = ""
+    public var failed = false
+    public let done = ArrayList<String>()
+
+    public func submit(requestId: String, toolCallId: String, toolName: String,
+        work: BackgroundWork): Unit {
+        this.submitted.add(requestId)
+        let (t, f) = work()
+        this.text = t
+        this.failed = f
+        this.done.add(requestId)
+    }
+}
+
+@Test
+func bash_backgroundReturnsImmediately() {
+    // 关键行为：带 background=true 时**不等待命令完成**，立刻返回挂起请求
+    let cap = CapturingBackground()
+    let ctx = ToolContext(".", HashMap<String, String>(), "",
+        toolCallId: "call-42", background: Some({ r, c, n, w => cap.submit(r, c, n, w) }))
+    let args = HashMap<String, JsonValue>()
+    args.add("command", JsonValue.String("echo backgrounded"))
+    args.add("background", JsonValue.Boolean(true))
+    let result = BashTool().execute(ctx, JsonValue.Map(args))
+
+    // 必须声明挂起（external），否则 run 不会中断，等于还是同步
+    @Expect(result.external.isSome(), true)
+    match (result.external) {
+        case Some(req) =>
+            @Expect(req.reason, AsyncTaskReason)
+            @Expect(req.toolCallId, "call-42")
+            @Expect(req.id, "async-call-42")
+        case None => @Fail("应带 external")
+    }
+    // 不是错误
+    @Expect(result.isError, false)
+    // 任务确实交出去了，且跑出了结果
+    @Expect(cap.submitted.size, 1)
+    @Expect(cap.text.contains("backgrounded"), true)
+    @Expect(cap.failed, false)
+}
+
+@Test
+func bash_backgroundFallbackWhenNoChannel() {
+    // 没有后台通道时必须**回退同步执行**——不能因为宿主没实现就静默不干活
+    let ctx = ToolContext(".", HashMap<String, String>(), "", toolCallId: "c1")
+    let args = HashMap<String, JsonValue>()
+    args.add("command", JsonValue.String("echo sync-fallback"))
+    args.add("background", JsonValue.Boolean(true))
+    let result = BashTool().execute(ctx, JsonValue.Map(args))
+    // 没有挂起：直接在本次调用里给出了结果
+    @Expect(result.external.isNone(), true)
+    @Expect(result.text.contains("sync-fallback"), true)
+}
+
+@Test
+func bash_backgroundCapturesFailure() {
+    // 后台任务失败也要如实上报，不能吞成成功
+    let cap = CapturingBackground()
+    let ctx = ToolContext(".", HashMap<String, String>(), "",
+        toolCallId: "c9", background: Some({ r, c, n, w => cap.submit(r, c, n, w) }))
+    let args = HashMap<String, JsonValue>()
+    args.add("command", JsonValue.String("exit 3"))
+    args.add("background", JsonValue.Boolean(true))
+    BashTool().execute(ctx, JsonValue.Map(args))
+    @Expect(cap.failed, true)
+}
+
+@Test
+func bash_noBackgroundParamStaysSync() {
+    // 不传 background 时行为完全不变（向后兼容）
+    let ctx = makeCtx()
+    let args = HashMap<String, JsonValue>()
+    args.add("command", JsonValue.String("echo plain"))
+    let result = BashTool().execute(ctx, JsonValue.Map(args))
+    @Expect(result.external.isNone(), true)
+    @Expect(result.text.contains("plain"), true)
+}
