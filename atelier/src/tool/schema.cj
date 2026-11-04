@@ -19,6 +19,11 @@ public class SchemaBuilder {
         this
     }
 
+    public func addBoolean(name: String, desc: String, required!: Bool = false): SchemaBuilder {
+        addField(name, "boolean", desc, required)
+        this
+    }
+
     public func addEnum(name: String, desc: String, values: ArrayList<String>, required!: Bool = false): SchemaBuilder {
         let field = HashMap<String, JsonValue>()
         field.add("type", JsonValue.String("string"))

@@ -25,6 +25,38 @@ public enum ToolExecutionMode {
 public type AskFn = (UserRequest) -> UserAnswer
 
 /**
+ * 后台任务的工作体：跑完返回 (文本, 是否失败)。
+ *
+ * 用「返回」而不是「回调」：工作体只管干活与产出，什么时候交回去由宿主决定，
+ * 工具不需要知道结果最终进了哪个会话。
+ */
+// 异步任务的 reason 取值。
+//
+// 放在 tool 层（而不是 agent 层）是因为工具要构造它；agent 层只**读**它做判断，
+// 方向是 agent → tool，不会形成环。
+public const AsyncTaskReason: String = "async_task"
+
+public type BackgroundWork = () -> (String, Bool)
+
+/**
+ * 后台执行通道：工具把一段耗时工作交出去，立刻返回 `asyncToolResult` 挂起本次 run。
+ *
+ * 宿主实现它（通常是起一个线程跑 work，跑完把结果登记进自己的待回填表），
+ * 然后在**下一次 run** 里把结果作为配对的工具结果消息写回历史。
+ *
+ * 为什么由宿主提供而不是工具自己 spawn：
+ *   · 工具不该管理线程生命周期（谁启谁停、宿主关闭时怎么收）；
+ *   · 结果必须回到宿主的会话里，工具没有那条通路；
+ *   · 测试里可以塞一个同步执行的替身，不必和线程赛跑。
+ *
+ * 参数：requestId（回填时的关联键）、toolCallId、toolName、work。
+ *
+ * 未提供时工具**必须回退到同步执行**——不能因为"没有后台通道"就静默不干活。
+ */
+public type BackgroundSubmit = (String, String, String, BackgroundWork) -> Unit
+
+
+/**
  * 结构化提问入口（审批 / 选择 / 表单）。
  *
  * 宿主没给实现时返回 `Cancelled`：这表示"这条通道不存在"，而不是"用户拒绝了"。
@@ -50,6 +82,8 @@ public struct ToolContext {
     public let toolCallId: String
     // 结构化提问实现（None = 无交互通道，提问即取消）
     public let askFn: Option<AskFn>
+    // 后台执行通道（None = 不支持后台，工具须回退同步执行）
+    public let backgroundFn: Option<BackgroundSubmit>
 
     public init(workDir: String) {
         this.workDir = workDir
@@ -57,6 +91,7 @@ public struct ToolContext {
         this.sessionId = ""
         this.toolCallId = ""
         this.askFn = None
+        this.backgroundFn = None
     }
 
     public init(workDir: String, env: HashMap<String, String>) {
@@ -65,15 +100,36 @@ public struct ToolContext {
         this.sessionId = ""
         this.toolCallId = ""
         this.askFn = None
+        this.backgroundFn = None
     }
 
     public init(workDir: String, env: HashMap<String, String>, sessionId: String,
-        toolCallId!: String = "", ask!: Option<AskFn> = None) {
+        toolCallId!: String = "", ask!: Option<AskFn> = None,
+        background!: Option<BackgroundSubmit> = None) {
         this.workDir = workDir
         this.env = env
         this.sessionId = sessionId
         this.toolCallId = toolCallId
         this.askFn = ask
+        this.backgroundFn = background
+    }
+}
+
+extend ToolContext {
+    /**
+     * 提交一个后台任务；没有后台通道时返回 false（调用方须回退同步执行）。
+     *
+     * 刻意返回 Bool 而不是静默 no-op：工具必须能区分"交出去了"与"没人接"，
+     * 后者的正确反应是同步跑，而不是返回一句"已提交"却什么也没发生。
+     */
+    public func submitBackground(requestId: String, toolName: String,
+        work: BackgroundWork): Bool {
+        match (this.backgroundFn) {
+            case Some(f) =>
+                f(requestId, this.toolCallId, toolName, work)
+                true
+            case None => false
+        }
     }
 }
 
@@ -170,3 +226,44 @@ public class ExternalRequest {
         this.request = request
     }
 }
+
+// ---------- 异步工具的构造辅助（放在 tool 层，避免 agent ↔ tool.builtin 循环依赖）----------
+
+// 异步工具声明的统一入口：工具返回它，运行时就会挂起这次 run，
+// 并登记一个待回填的后台任务。
+//
+// 为什么做成构造器而不是让工具自己 new ExternalRequest：
+//   · reason 必须统一（`async_task`），否则消费方分不清"等后台"与"等人"；
+//   · requestId 的生成规则必须一致（幂等回填靠它）；
+//   · 挂起登记与挂起请求是**同一件事的两面**，分开写一定会漏一边——
+//     漏了登记，后台跑完也没人知道该填给谁。
+//
+// 用法：
+//
+//   public func execute(ctx: ToolContext, args: JsonValue): ToolResult {
+//       let reqId = newAsyncRequestId(ctx.toolCallId)
+//       spawn { /* 干活 */ ; sendResultBack(reqId, ...) }
+//       asyncToolResult(reqId, "已提交后台执行", ctx.toolCallId)
+//   }
+public func newAsyncRequestId(toolCallId: String): String {
+    "async-" + toolCallId
+}
+
+// 构造"这次由后台执行"的工具结果。
+//
+// `text` 是给模型看的一句话（"已提交后台执行，结果稍后送达"）——它不会写进历史
+// （挂起时不产生结果消息），但会出现在工具执行结束事件里，前端可据此显示进度。
+public func asyncToolResult(requestId: String, text: String, toolCallId: String,
+    toolName!: String = ""): ToolResult {
+    ToolResult(text, None, false, false,
+        external: Some(ExternalRequest(requestId, AsyncTaskReason, text,
+            toolCallId: toolCallId)))
+}
+
+// 判断一个挂起是不是"等后台任务"（相对于"等人答复/前端执行"）。
+//
+// 消费方据此决定要不要设超时：等后台一定会来，等人可能永远不来。
+public func isAsyncTaskRequest(req: ExternalRequest): Bool {
+    req.reason == AsyncTaskReason
+}
+
