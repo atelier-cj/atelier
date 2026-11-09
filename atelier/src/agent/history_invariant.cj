@@ -25,7 +25,10 @@ func unansweredToolCallNote(toolName: String): String {
 }
 
 // 就地补齐缺失的工具结果。幂等：补齐后再跑一次不会重复插入。
-func ensureToolCallResults(messages: ArrayList<Message>): Int64 {
+//
+// **公开**：自建循环的宿主（不经过本仓 AgentRuntime 的装配）同样要过这道关。
+// 不变式是 provider 的硬要求（违反即 400），不该只在一条装配路径上被保证。
+public func ensureToolCallResults(messages: ArrayList<Message>): Int64 {
     var inserted: Int64 = 0
     var i: Int64 = 0
     while (i < messages.size) {
