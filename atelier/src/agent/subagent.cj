@@ -195,11 +195,12 @@ public class SubAgentManager {
         agents!: AgentRegistry = AgentRegistry(),
         providers!: ProviderRegistry = ProviderRegistry(),
         trust!: TrustManager = TrustManager(),
+        hooks!: ArrayList<Hook> = ArrayList<Hook>(),
         eventBus!: ?EventBus = None,
         idleTimeoutSec!: Int64 = 0): SubAgentManager {
         SubAgentManager(
             HarnessSpec(tools: tools, store: store, skills: skills, agents: agents,
-                providers: providers, trust: trust, eventBus: eventBus),
+                providers: providers, trust: trust, hooks: hooks, eventBus: eventBus),
             idleTimeoutSec: idleTimeoutSec)
     }
 

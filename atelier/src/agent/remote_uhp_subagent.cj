@@ -1,0 +1,269 @@
+package atelier.agent
+
+import std.collection.*
+import std.core.Duration
+import std.env.getStdErr
+import std.sync.*
+import uhp.client.{TaskStream, UhpClient, parseJson}
+import uhp.transport.StdHttpTransport
+import uhp.types.generated.Response
+import uhp.types.handwritten.*
+
+// 远端 UHP 子 Agent：把**任意 UHP 服务端**（自带 session/容器/文件/记忆的 harness）
+// 当作可持续子代理驱动。父侧既有的 `subagent_*` 工具零改动即可使用本句柄
+// （与本地子、ACP 远程子、A2A 远程子同构）。
+//
+// ## 与另外三种执行位置的关键差异
+//
+// | 能力 | 这里 |
+// |---|---|
+// | 过程可见 | ✅ 有 SSE 事件流（能看，不能改） |
+// | 中途 steer | ❌ 协议没有；只能 cancel 或等本轮结束 |
+// | 子问父 | ✅ 但**以一轮 response 为界**：`incomplete` → 父回答 → 新开一轮 |
+//
+// `steer` 的缺失是**能力事实**，不是失败——父侧应当据此选择"等或取消重派"，
+// 所以这里不假装支持，也没有对应的重写方法。
+//
+// ## 续聊的两种形态
+//
+// 同一个 UHP session 里可以连续开多轮 response；带 `previousResponseId` 能把
+// 上一轮的上下文接起来。这里两者都用：session 保环境，previousResponseId 保对话。
+
+// 一轮流式回合的收敛状态：终态 / 是否在等输入（等输入 ≠ 失败，会话仍然活着）
+class UhpTurnOutcome {
+    var status: String = ""          // completed / incomplete / failed / cancelled
+    var inputRequired: Bool = false
+    var errorText: String = ""
+    var responseId: Option<String> = None
+}
+
+/**
+ * 一轮远端回合的最小流接口。
+ *
+ * 抽这一层的理由：`TaskStream` 是具体的 HTTP 流，测试里没法造假；
+ * 而本 handle 真正依赖的只有「下一个事件」这件事。
+ */
+public interface UhpTurnStream {
+    func nextEvent(): Option<UhpEvent>
+}
+
+/** 把 SDK 的 TaskStream 适配成 UhpTurnStream。 */
+class UhpSdkStream <: UhpTurnStream {
+    private let inner: TaskStream
+
+    public init(inner: TaskStream) {
+        this.inner = inner
+    }
+
+    public func nextEvent(): Option<UhpEvent> {
+        this.inner.next()
+    }
+
+    public func close(): Unit {
+        this.inner.close()
+    }
+}
+
+/**
+ * 怎样开一轮远端回合。
+ *
+ * `baseUrl/token` 的实现在 cli/装配层注入；测试注入假实现。
+ * 返回 None = 这一轮没开起来（已由实现方给出可读原因，见 errorText）。
+ */
+public interface UhpTurnRunner {
+    func openTurn(text: String, previousResponseId: Option<String>): Option<UhpTurnStream>
+    func cancel(responseId: String): Unit
+    func describeError(): String
+}
+
+public open class RemoteUhpSubAgentHandle <: SubAgentHandle {
+    private let runner: UhpTurnRunner
+    private let boxAdder: (AgentMail) -> Unit
+    // 上一轮的 response：下一轮带着它，远端据此接上下文
+    private var lastResponseId: Option<String> = None
+    // 当前在跑的那一轮（cancel 要寻址它）
+    private var currentResponseId: Option<String> = None
+    private let bufLock = Mutex()
+    private var buffered: String = ""
+    private var turnNo: Int64 = 0
+
+    public init(subSessionId: String, parentSessionId: String, runner: UhpTurnRunner,
+        boxAdder: (AgentMail) -> Unit) {
+        super(subSessionId, parentSessionId)
+        this.runner = runner
+        this.boxAdder = boxAdder
+    }
+
+    // 重写：投递 = 一次远端回合（worker 线程串行消费 inbox）
+    public override func send(mail: AgentMail): Unit {
+        if (this.exited.load()) { return }
+        if (mail.kind != AgentMailKindUserText) { return }
+        this.inbox.add(mail)
+    }
+
+    // 重写：中断进行中的远端任务。
+    // UHP 只有 cancel，没有"中途改方向"——这条差异由父侧的策略层承担。
+    public override func cancel(): Unit {
+        this.cancelRequested.store(true)
+        match (this.currentResponseId) {
+            case Some(id) =>
+                try {
+                    this.runner.cancel(id)
+                } catch (e: Exception) {
+                    this.logRemote("取消失败：" + e.message)
+                }
+            case None => ()
+        }
+    }
+
+    public override func close(): Unit {
+        this.closeRequested.store(true)
+        this.cancel()
+        this.exited.store(true)
+    }
+
+    /** 起点：在独立线程里跑「收信 → 远端回合」循环。 */
+    public func serveRemote(): Unit {
+        while (!this.closeRequested.load()) {
+            let mail = match (this.inbox.remove(Duration.second)) {
+                case Some(m) => m
+                case None => continue
+            }
+            if (this.closeRequested.load()) { break }
+            this.runTurn(mail.text)
+        }
+        this.exited.store(true)
+    }
+
+    private func runTurn(text: String): Unit {
+        this.turnNo++
+        let replyKind = if (this.turnNo == Int64(1)) { AgentMailKindDone } else { AgentMailKindReply }
+        synchronized(this.bufLock) { this.buffered = "" }
+        let outcome = UhpTurnOutcome()
+        try {
+            let stream = match (this.runner.openTurn(text, this.lastResponseId)) {
+                case Some(v) => v
+                case None =>
+                    this.deliver("远端 UHP 调用失败: " + this.runner.describeError(), replyKind)
+                    return
+            }
+            this.pump(stream, outcome)
+        } catch (e: Exception) {
+            this.deliver("远端 UHP 调用失败: " + e.message, replyKind)
+            return
+        }
+        // 等输入：这一轮到此为止，把问题交回父；会话保持（父的下一条消息即答复）
+        if (outcome.inputRequired) {
+            let q = this.takeBuffer()
+            this.deliver(if (q == "") { "[远端等待补充输入]" } else { q }, replyKind)
+            return
+        }
+        let body = this.takeBuffer()
+        // 失败/中断时**已产出的部分也要带出去**，但必须标注它是残缺的：
+        // 只给错误信息，父会以为子什么都没干；只给半截正文，父会当完整结论用。
+        let finalText = match (outcome.status) {
+            case "failed" =>
+                let why = if (outcome.errorText == "") { "远端 UHP 任务失败（无详情）" } else { outcome.errorText }
+                if (body == "") { why } else { body + "\n（" + why + "）" }
+            case "cancelled" =>
+                if (body == "") { "[cancelled]" } else { body + "\n（已取消）" }
+            case _ =>
+                if (body == "") { "[远端 UHP 无输出]" } else { body }
+        }
+        this.deliver(finalText, replyKind)
+    }
+
+    // 读完一轮事件流。返回时 outcome 里已带终态。
+    private func pump(stream: UhpTurnStream, outcome: UhpTurnOutcome): Unit {
+        while (true) {
+            let ev = match (stream.nextEvent()) {
+                case Some(e) => e
+                case None => break
+            }
+            match (ev) {
+                case OutputTextDelta(d) => this.appendText(d.delta)
+                case Created(r) => this.noteResponse(r, outcome)
+                case InProgress(r) => this.noteResponse(r, outcome)
+                case Completed(r) =>
+                    this.noteResponse(r, outcome)
+                    outcome.status = "completed"
+                    return
+                case Incomplete(r) =>
+                    this.noteResponse(r, outcome)
+                    outcome.status = "incomplete"
+                    // 缺信息才是"等父回答"；其它不完整原因（如 max output）按失败处理
+                    outcome.inputRequired = this.looksLikeInputRequired(r)
+                    return
+                case Failed(r) =>
+                    this.noteResponse(r, outcome)
+                    outcome.status = "failed"
+                    return
+                case Error(e) =>
+                    outcome.status = "failed"
+                    outcome.errorText = "远端流错误：" + e.message
+                    return
+                case _ => ()   // 未知事件容忍：流式协议要求如此
+            }
+        }
+        // 流结束却没见到终态：不能当成功——那会把半截输出当结论
+        if (outcome.status == "") {
+            outcome.status = "failed"
+            outcome.errorText = "远端流未给出终态事件（可能中断）"
+        }
+    }
+
+    private func noteResponse(raw: ResponseEvent, outcome: UhpTurnOutcome): Unit {
+        match (raw.responseRaw) {
+            case Some(body) =>
+                try {
+                    let resp = parseJson<Response>(body)
+                    if (resp.id != "") {
+                        outcome.responseId = Some(resp.id)
+                        this.currentResponseId = Some(resp.id)
+                        this.lastResponseId = Some(resp.id)
+                    }
+                    if (resp.status != "") { outcome.status = resp.status }
+                } catch (e: Exception) {
+                    // 解析不了不该让整轮崩：文本已经靠 delta 累积下来了
+                }
+            case None => ()
+        }
+    }
+
+    // 判断 incomplete 是否属于"要父补充输入"。
+    //
+    // 协议把原因放在 `incomplete_details.reason`，但本 SDK 这一版**没有把它建模**
+    // （`ResponseIncompleteDetails` 只有 extras）。所以一律按"要输入"处理：
+    // 保守方向——把问题交回父、会话保持打开，让父有机会补一句；
+    // 反过来（当失败）会把一次本可继续的对话直接判死。
+    private func looksLikeInputRequired(raw: ResponseEvent): Bool {
+        true
+    }
+
+    private func appendText(t: String): Unit {
+        synchronized(this.bufLock) {
+            this.buffered = this.buffered + t
+        }
+    }
+
+    private func takeBuffer(): String {
+        synchronized(this.bufLock) {
+            let s = this.buffered
+            this.buffered = ""
+            s
+        }
+    }
+
+    private func deliver(body: String, kind: String): Unit {
+        let text = if (body == "") { "[空]" } else { body }
+        this.boxAdder(AgentMail(this.subSessionId, this.parentSessionId, kind, text))
+    }
+
+    private func logRemote(msg: String): Unit {
+        try {
+            getStdErr().write("[uhp] " + this.subSessionId + ": " + msg + "\n")
+        } catch (e: Exception) {
+            ()
+        }
+    }
+}
