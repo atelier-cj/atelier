@@ -212,3 +212,7 @@ cjpm test --show-all-output --filter 'TestName.*'
 | `acp` | ACP v1 协议层（Agent/Client 双端） | MulanPSL-2.0 |
 
 核心 Harness（Agent Loop、事件流、上下文压缩、Provider、信任闸门）全部自研，零外部依赖。
+
+## License
+
+MIT，见 [LICENSE](LICENSE)。
