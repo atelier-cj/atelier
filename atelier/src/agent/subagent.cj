@@ -172,6 +172,36 @@ public class SubAgentManager {
         this.loop = SessionLoop(spec)
     }
 
+    /**
+     * 只给出「子 agent 真正需要的那几样」来建 manager。
+     *
+     * ## 为什么需要它
+     *
+     * `HarnessSpec` 是宿主级装配束（17 个字段）。宿主想用子 agent 时，
+     * 实际必须提供的只有三样：**工具表**（子的能力来源）、**会话存储**（子历史落哪）、
+     * **技能表**（子看到哪些技能）。其余走默认值即可。
+     * 让每个宿主自己去记住"17 个字段里哪几个是必需的"，是把这个知识放错了地方。
+     *
+     * ## 默认值带来的两个行为，调用方要知道
+     *
+     * 1. `agents` 为空时 `startByName` 找不到任何 agent——但 `start(config, provider)`
+     *    仍然可用（config 与 provider 由调用方直接给）。
+     * 2. `providers` 为空时 `resolveSubProvider` 会一路兜底到环境变量
+     *    `OPENAI_BASE_URL` / `OPENAI_API_KEY`。**没配 provider 不会报错，会静默去连
+     *    环境变量指的地址**——用 `startByName` 的宿主必须自己把 provider 放进来。
+     */
+    public static func create(tools!: ToolRegistry, store!: SessionStore,
+        skills!: SkillRegistry = SkillRegistry(),
+        agents!: AgentRegistry = AgentRegistry(),
+        providers!: ProviderRegistry = ProviderRegistry(),
+        eventBus!: ?EventBus = None,
+        idleTimeoutSec!: Int64 = 0): SubAgentManager {
+        SubAgentManager(
+            HarnessSpec(tools: tools, store: store, skills: skills, agents: agents,
+                providers: providers, eventBus: eventBus),
+            idleTimeoutSec: idleTimeoutSec)
+    }
+
     // 启动子 Agent：立即返回句柄（首回合在 worker 线程异步执行，完成后 outbox 投 done）
     public func start(config: AgentConfig, provider: Provider,
         parentSessionId: String, initialPrompt: String, env: SessionEnvironment): SubAgentHandle {
