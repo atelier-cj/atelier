@@ -8,6 +8,7 @@ import uhp.client.{TaskStream, UhpClient, parseJson}
 import uhp.transport.StdHttpTransport
 import uhp.types.generated.Response
 import uhp.types.handwritten.*
+import jsonvalue.*
 
 // 远端 UHP 子 Agent：把**任意 UHP 服务端**（自带 session/容器/文件/记忆的 harness）
 // 当作可持续子代理驱动。父侧既有的 `subagent_*` 工具零改动即可使用本句柄
@@ -65,6 +66,54 @@ class UhpSdkStream <: UhpTurnStream {
 }
 
 /**
+ * 基于 UHP SDK 的 `UhpTurnRunner`：装配层（宿主的宿主）直接用这个。
+ *
+ * 协议细节留在这里，宿主只给"端点 + 令牌 + 选哪个 harness"。
+ */
+public class UhpHttpTurnRunner <: UhpTurnRunner {
+    private let client: UhpClient
+    private let harnessId: Option<String>
+    private let model: Option<String>
+    private let baseUrl: String
+    private var lastError: String = ""
+    private let lock = Mutex()
+
+    public init(baseUrl: String, token: String, harnessId!: Option<String> = None,
+        model!: Option<String> = None) {
+        this.baseUrl = baseUrl
+        this.harnessId = harnessId
+        this.model = model
+        this.client = UhpClient(baseUrl, token, StdHttpTransport(baseUrl))
+    }
+
+    public func openTurn(text: String, previousResponseId: Option<String>): Option<UhpTurnStream> {
+        try {
+            let stream = this.client.createTaskStreamWithInput(text, model: this.model,
+                harnessId: this.harnessId, previousResponseId: previousResponseId)
+            synchronized(this.lock) { this.lastError = "" }
+            return Option<UhpTurnStream>.Some(UhpSdkStream(stream))
+        } catch (e: Exception) {
+            synchronized(this.lock) { this.lastError = e.message }
+            return Option<UhpTurnStream>.None
+        }
+    }
+
+    public func cancel(responseId: String): Unit {
+        try {
+            let _ = this.client.cancelResponse(responseId)
+        } catch (e: Exception) {
+            synchronized(this.lock) { this.lastError = e.message }
+        }
+    }
+
+    public func describeError(): String {
+        synchronized(this.lock) {
+            if (this.lastError == "") { "无法连接 UHP 端点 " + this.baseUrl } else { this.lastError }
+        }
+    }
+}
+
+/**
  * 怎样开一轮远端回合。
  *
  * `baseUrl/token` 的实现在 cli/装配层注入；测试注入假实现。
@@ -87,11 +136,22 @@ public open class RemoteUhpSubAgentHandle <: SubAgentHandle {
     private var buffered: String = ""
     private var turnNo: Int64 = 0
 
+    // 工具留痕回调：远端每次工具调用/输出都会回调一次（name, args, output, isError）。
+    //
+    // 为什么由调用方注入：**留痕是宿主的事**（写哪、留多久、算不算记忆），
+    // 传输层只负责把事件流里已经有的东西交出来。协议本来就有这些事件，
+    // 不交出去就会出现"子做了什么只能转述、无法自证"。
+    public let onTool: Option<(String, String, String, Bool) -> Unit>
+    // 已发出、等输出的工具调用（FIFO：同一轮里工具调用是顺序的）
+    private let pendingTools = ArrayList<(String, String)>()
+    private let toolLock = Mutex()
+
     public init(subSessionId: String, parentSessionId: String, runner: UhpTurnRunner,
-        boxAdder: (AgentMail) -> Unit) {
+        boxAdder: (AgentMail) -> Unit, onTool!: Option<(String, String, String, Bool) -> Unit> = None) {
         super(subSessionId, parentSessionId)
         this.runner = runner
         this.boxAdder = boxAdder
+        this.onTool = onTool
     }
 
     // 重写：投递 = 一次远端回合（worker 线程串行消费 inbox）
@@ -202,6 +262,7 @@ public open class RemoteUhpSubAgentHandle <: SubAgentHandle {
                     outcome.status = "failed"
                     outcome.errorText = "远端流错误：" + e.message
                     return
+                case OutputItemDone(item) => this.noteItem(item)
                 case _ => ()   // 未知事件容忍：流式协议要求如此
             }
         }
@@ -209,6 +270,59 @@ public open class RemoteUhpSubAgentHandle <: SubAgentHandle {
         if (outcome.status == "") {
             outcome.status = "failed"
             outcome.errorText = "远端流未给出终态事件（可能中断）"
+        }
+    }
+
+    /**
+     * 从 `response.output_item.done` 里取工具调用/结果。
+     *
+     * 协议里工具调用是两项：`function_call`（工具名 + 参数 JSON）与
+     * `function_call_output`（输出）。两者各自一个 item，靠**顺序**配对——
+     * 事件里没有共同的 id 字段（item id 在部分实现里缺失），所以用 FIFO。
+     */
+    private func noteItem(item: ItemEvent): Unit {
+        let raw = match (item.itemRaw) {
+            case Some(r) => r
+            case None => return
+        }
+        let j = JsonValue.parse(raw)
+        let fields = match (j) {
+            case JsonValue.Map(m) => m
+            case _ => return
+        }
+        let kind = match (fields.get("type")) {
+            case Some(JsonValue.String(s)) => s
+            case _ => return
+        }
+        let cb = match (this.onTool) {
+            case Some(c) => c
+            case None => return
+        }
+        match (kind) {
+            case "function_call" =>
+                let name = fieldText(fields, "name")
+                let args = fieldText(fields, "arguments")
+                synchronized(this.toolLock) { this.pendingTools.add((name, args)) }
+            case "function_call_output" =>
+                let out = fieldText(fields, "output")
+                // remove(at:) 是唯一删单个元素的写法（remove(0) 会被当成区间）
+                let pair = synchronized(this.toolLock) {
+                    if (this.pendingTools.size == 0) { return }
+                    this.pendingTools.remove(at: 0)
+                }
+                let (name, args) = pair
+                // 远端把工具失败也放在 output 里（不是单独事件）：只在明确带错误标记时才标失败
+                let isError = out.contains("\"is_error\":true") || out.contains("isError\":true")
+                cb(name, args, out, isError)
+            case _ => ()
+        }
+    }
+
+    // 取字符串字段（缺失或类型不对 → 空串；留痕不该因为字段怪就整条丢掉）
+    private func fieldText(fields: HashMap<String, JsonValue>, key: String): String {
+        match (fields.get(key)) {
+            case Some(JsonValue.String(v)) => v
+            case _ => ""
         }
     }
 

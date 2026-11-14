@@ -157,3 +157,51 @@ func uhp_cancelTargetsCurrentResponse() {
     @Expect(runner.cancels.size >= before, true)
     h.close()
 }
+
+// ---- 工具留痕：远端工具调用要能被宿主看见 ----
+//
+// 协议里工具调用是两项 item：function_call（名 + 参数）与 function_call_output（输出）。
+// 不解析它们，宿主就只能转述结论、"子做了什么"无法自证。
+
+func itemDone(seq: Int64, raw: String): UhpEvent {
+    let e = ItemEvent(seq)
+    e.itemRaw = Some(raw)
+    UhpEvent.OutputItemDone(e)
+}
+
+@Test
+func uhp_toolCallsAreReportedToHost() {
+    let records = ArrayList<String>()
+    let events = ArrayList<UhpEvent>()
+    events.add(itemDone(1, "{\"type\":\"function_call\",\"name\":\"bash\",\"arguments\":\"{\\\"command\\\":\\\"echo hi\\\"}\"}"))
+    events.add(itemDone(2, "{\"type\":\"function_call_output\",\"output\":\"hi\\n\"}"))
+    events.add(textDelta(3, "好了"))
+    events.add(UhpEvent.Completed(responseEvent(4, "resp_1", "completed")))
+    let runner = FakeRunner(events)
+    let box = LinkedBlockingQueue<AgentMail>()
+    let cb: (String, String, String, Bool) -> Unit = { name, args, out, isErr =>
+        records.add(name + "|" + args + "|" + out + "|" + (if (isErr) { "1" } else { "0" }))
+    }
+    let h = RemoteUhpSubAgentHandle("sub_2", "main", runner, { m => box.add(m) },
+        onTool: Some(cb))
+    spawn { h.serveRemote() }
+    h.send(AgentMail("main", "sub_2", AgentMailKindUserText, "跑一下"))
+    let _ = box.remove(3 * Duration.second)
+    h.close()
+    @Expect(records.size, 1)
+    @Expect(records[0].startsWith("bash|"), true)
+    @Expect(records[0].contains("echo hi"), true)
+    @Expect(records[0].endsWith("|hi\n|0"), true)
+}
+
+@Test
+func uhp_toolReportWithoutCallbackIsHarmless() {
+    // 没接留痕回调时不能崩、也不能影响回合本身
+    let events = ArrayList<UhpEvent>()
+    events.add(itemDone(1, "{\"type\":\"function_call\",\"name\":\"bash\",\"arguments\":\"{}\"}"))
+    events.add(itemDone(2, "{\"type\":\"function_call_output\",\"output\":\"ok\"}"))
+    events.add(textDelta(3, "完事"))
+    events.add(UhpEvent.Completed(responseEvent(4, "resp_2", "completed")))
+    let mail = runOneTurn(FakeRunner(events), "跑")
+    @Expect(mail.text.contains("完事"), true)
+}
