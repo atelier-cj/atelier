@@ -145,6 +145,8 @@ public open class RemoteUhpSubAgentHandle <: SubAgentHandle {
     // 已发出、等输出的工具调用（FIFO：同一轮里工具调用是顺序的）
     private let pendingTools = ArrayList<(String, String)>()
     private let toolLock = Mutex()
+    // 本轮是否已经通过 `output_item.done` 交过工具调用（避免与终态兜底重复记）
+    private var itemToolsSeen: Bool = false
 
     public init(subSessionId: String, parentSessionId: String, runner: UhpTurnRunner,
         boxAdder: (AgentMail) -> Unit, onTool!: Option<(String, String, String, Bool) -> Unit> = None) {
@@ -207,7 +209,9 @@ public open class RemoteUhpSubAgentHandle <: SubAgentHandle {
                     this.deliver("远端 UHP 调用失败: " + this.runner.describeError(), replyKind)
                     return
             }
-            this.pump(stream, outcome)
+            this.itemToolsSeen = false
+        this.pump(stream, outcome)
+        this.flushPendingTools()
         } catch (e: Exception) {
             this.deliver("远端 UHP 调用失败: " + e.message, replyKind)
             return
@@ -246,6 +250,7 @@ public open class RemoteUhpSubAgentHandle <: SubAgentHandle {
                 case InProgress(r) => this.noteResponse(r, outcome)
                 case Completed(r) =>
                     this.noteResponse(r, outcome)
+                    this.noteToolsFromResponse(r)
                     outcome.status = "completed"
                     return
                 case Incomplete(r) =>
@@ -280,6 +285,26 @@ public open class RemoteUhpSubAgentHandle <: SubAgentHandle {
      * `function_call_output`（输出）。两者各自一个 item，靠**顺序**配对——
      * 事件里没有共同的 id 字段（item id 在部分实现里缺失），所以用 FIFO。
      */
+    // 回合结束仍没等到输出的工具调用也要交出去。
+    //
+    // 不是所有 harness 都会回传 `function_call_output`（实测 ACP 系只给调用不给输出），
+    // 如果只在配对成功时才上报，这些 harness 就永远是 0 条——表现成"子没干活"，
+    // 而实际上它干了，只是我们没记。
+    private func flushPendingTools(): Unit {
+        let cb = match (this.onTool) {
+            case Some(c) => c
+            case None => return
+        }
+        let left = synchronized(this.toolLock) {
+            let items = ArrayList<(String, String)>(this.pendingTools)
+            this.pendingTools.clear()
+            items
+        }
+        for ((name, args) in left) {
+            cb(name, args, "", false)
+        }
+    }
+
     private func noteItem(item: ItemEvent): Unit {
         let raw = match (item.itemRaw) {
             case Some(r) => r
@@ -300,6 +325,7 @@ public open class RemoteUhpSubAgentHandle <: SubAgentHandle {
         }
         match (kind) {
             case "function_call" =>
+                synchronized(this.toolLock) { this.itemToolsSeen = true }
                 let name = fieldText(fields, "name")
                 let args = fieldText(fields, "arguments")
                 synchronized(this.toolLock) { this.pendingTools.add((name, args)) }
@@ -323,6 +349,64 @@ public open class RemoteUhpSubAgentHandle <: SubAgentHandle {
         match (fields.get(key)) {
             case Some(JsonValue.String(v)) => v
             case _ => ""
+        }
+    }
+
+    /**
+     * 终态兜底：从响应体里取 `output` 数组里的工具调用。
+     *
+     * 为什么需要两套解析：流式协议里工具调用**应该**以 `response.output_item.done` 出现，
+     * 但实测有的实现（ACP 系）只在终态 `response.completed` 的 `output` 数组里给一次，
+     * 中间没有任何 item 事件。只认前一种，这类 harness 就会永远 0 条留痕。
+     */
+    private func noteToolsFromResponse(raw: ResponseEvent): Unit {
+        if (synchronized(this.toolLock) { this.itemToolsSeen }) { return }
+        let cb = match (this.onTool) {
+            case Some(c) => c
+            case None => return
+        }
+        let body = match (raw.responseRaw) {
+            case Some(b) => b
+            case None => return
+        }
+        let items = match (JsonValue.parse(body)) {
+            case JsonValue.Map(m) => match (m.get("output")) {
+                case Some(JsonValue.Array(a)) => a
+                case _ => return
+            }
+            case _ => return
+        }
+        // 先收集再配对：`output` 数组里调用与输出是相邻两项，
+        // 逐项立即上报会把一次调用拆成两条（一条没输出、一条没工具名），读起来像"跑了两次"。
+        let calls = ArrayList<(String, String)>()
+        let outputs = ArrayList<String>()
+        for (item in items) {
+            let fields = match (item) {
+                case JsonValue.Map(m) => m
+                case _ => continue
+            }
+            let kind = match (fields.get("type")) {
+                case Some(JsonValue.String(t)) => t
+                case _ => continue
+            }
+            match (kind) {
+                case "function_call" =>
+                    calls.add((fieldText(fields, "name"), fieldText(fields, "arguments")))
+                case "function_call_output" =>
+                    outputs.add(fieldText(fields, "output"))
+                case _ => ()
+            }
+        }
+        for (i in 0..calls.size) {
+            let (name, args) = calls[i]
+            let out = if (i < outputs.size) { outputs[i] } else { "" }
+            cb(name, args, out, false)
+        }
+        // 输出比调用多（对端只回结果不回调用）：结果也得留，工具名留空
+        if (outputs.size > calls.size) {
+            for (i in calls.size..outputs.size) {
+                cb("", "", outputs[i], false)
+            }
         }
     }
 

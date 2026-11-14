@@ -205,3 +205,78 @@ func uhp_toolReportWithoutCallbackIsHarmless() {
     let mail = runOneTurn(FakeRunner(events), "跑")
     @Expect(mail.text.contains("完事"), true)
 }
+
+@Test
+func uhp_toolCallWithoutOutputStillReported() {
+    // 实测 ACP 系 harness（pi）只回 function_call、不回 function_call_output。
+    // 如果只在配对成功时上报，这类 harness 永远 0 条 —— 表现成"子没干活"。
+    let records = ArrayList<String>()
+    let events = ArrayList<UhpEvent>()
+    events.add(itemDone(1, "{\"type\":\"function_call\",\"name\":\"bash\",\"arguments\":\"{\\\"command\\\":\\\"echo hi\\\"}\"}"))
+    events.add(textDelta(2, "好"))
+    events.add(UhpEvent.Completed(responseEvent(3, "resp_3", "completed")))
+    let cb: (String, String, String, Bool) -> Unit = { name, args, out, isErr =>
+        records.add(name + "|" + args + "|" + out)
+    }
+    let runner = FakeRunner(events)
+    let box = LinkedBlockingQueue<AgentMail>()
+    let h = RemoteUhpSubAgentHandle("sub_3", "main", runner, { m => box.add(m) }, onTool: Some(cb))
+    spawn { h.serveRemote() }
+    h.send(AgentMail("main", "sub_3", AgentMailKindUserText, "跑"))
+    let _ = box.remove(3 * Duration.second)
+    h.close()
+    @Expect(records.size, 1)
+    @Expect(records[0].startsWith("bash|"), true)
+    // 输出为空但记录仍在：调用发生过就是事实
+    @Expect(records[0].endsWith("|"), true)
+}
+
+@Test
+func uhp_toolCallsFromCompletedResponse() {
+    // 实测 ACP 系（pi）在流式里**不发** output_item.done：工具调用只出现在
+    // 终态 response.completed 的 output 数组里。只认 item 事件 → 永远 0 条留痕。
+    let records = ArrayList<String>()
+    let events = ArrayList<UhpEvent>()
+    events.add(textDelta(1, "好了"))
+    let done = ResponseEvent(2)
+    done.responseRaw = Some("{\"id\":\"resp_9\",\"object\":\"response\",\"status\":\"completed\",\"output\":["
+        + "{\"type\":\"message\",\"role\":\"assistant\"},"
+        + "{\"type\":\"function_call\",\"name\":\"bash\",\"arguments\":\"{\\\"command\\\":\\\"echo hi\\\"}\"}]}")
+    events.add(UhpEvent.Completed(done))
+    let cb: (String, String, String, Bool) -> Unit = { name, args, out, isErr =>
+        records.add(name + "|" + args + "|" + out)
+    }
+    let box = LinkedBlockingQueue<AgentMail>()
+    let h = RemoteUhpSubAgentHandle("sub_4", "main", FakeRunner(events), { m => box.add(m) },
+        onTool: Some(cb))
+    spawn { h.serveRemote() }
+    h.send(AgentMail("main", "sub_4", AgentMailKindUserText, "跑"))
+    let _ = box.remove(3 * Duration.second)
+    h.close()
+    @Expect(records.size, 1)
+    @Expect(records[0].startsWith("bash|"), true)
+}
+
+@Test
+func uhp_itemEventsWinOverCompletedFallback() {
+    // 两套来源都在时不能重复记：item 事件更细（带输出），优先用它
+    let records = ArrayList<String>()
+    let events = ArrayList<UhpEvent>()
+    events.add(itemDone(1, "{\"type\":\"function_call\",\"name\":\"bash\",\"arguments\":\"{}\"}"))
+    events.add(itemDone(2, "{\"type\":\"function_call_output\",\"output\":\"hi\"}"))
+    let done = ResponseEvent(3)
+    done.responseRaw = Some("{\"id\":\"resp_10\",\"status\":\"completed\",\"output\":["
+        + "{\"type\":\"function_call\",\"name\":\"bash\",\"arguments\":\"{}\"}]}")
+    events.add(UhpEvent.Completed(done))
+    let cb: (String, String, String, Bool) -> Unit = { name, args, out, isErr =>
+        records.add(name)
+    }
+    let box = LinkedBlockingQueue<AgentMail>()
+    let h = RemoteUhpSubAgentHandle("sub_5", "main", FakeRunner(events), { m => box.add(m) },
+        onTool: Some(cb))
+    spawn { h.serveRemote() }
+    h.send(AgentMail("main", "sub_5", AgentMailKindUserText, "跑"))
+    let _ = box.remove(3 * Duration.second)
+    h.close()
+    @Expect(records.size, 1)
+}
