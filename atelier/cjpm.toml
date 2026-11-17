@@ -20,7 +20,7 @@ repository = "https://atomgit.com/ystyle/atelier"
 "bstorm" = "2.0.1"
 "opencj::ulid" = "0.1.2"
 "llm_api" = "1.4.1"
-"acp" = "0.2.7"
+"acp" = "0.3.0"
 # UHP（Unified Harness Protocol）：第四种执行位置（远端 harness 自带环境）
 "uhp" = "0.1.1"
 # PTC 程序执行引擎（中断检查点 / 纯函数子集 / 严格解析由 xisp 0.4.1 提供）
