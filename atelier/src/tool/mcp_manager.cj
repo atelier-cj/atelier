@@ -12,7 +12,7 @@ import jsonvalue.*
 import std.collection.*
 import std.sync.Mutex
 import stdx.log.*
-import std.env.getVariable
+import std.env.{getVariable, getVariables}
 
 public struct McpServerConfig {
     public let name: String
@@ -20,8 +20,8 @@ public struct McpServerConfig {
     public let command: String
     public let url: String
     public let headers: HashMap<String, String>
-    // stdio 子进程额外环境（std launch environment=Some 为整体替换语义，
-    // createTransport 会先并入 PATH/LD_LIBRARY_PATH/HOME 等关键变量）
+    // stdio 子进程额外环境。std launch 的 environment=Some 是整体替换语义，
+    // createTransport 用 stdioEnvironment 合成「当前进程环境 + 本表」，本表优先
     public let env: HashMap<String, String>
 
     public init(name: String, transport: String, command: String, url: String) {
@@ -311,25 +311,37 @@ public class McpManager {
     }
 }
 
+// stdio 子进程环境：当前进程环境 + 自定义变量（自定义优先）。
+//
+// 为什么总是显式给环境，而不是「无自定义时传 None 继承父进程」：mcp 的
+// StdioClientTransport 只有 env=Some 分支按空白拆 argv，env=None 分支把整串 command
+// 当单个可执行路径 launch。而 atelier 的 McpServerConfig.command 是「可执行 参数...」
+// 单串模型（本地 [[mcpServer]] 与 ACP mcpServers 都走它），env=None 时带参命令必然启动失败。
+// 因此这里始终合成一份完整环境，保证 launched argv 正确、且子进程仍拿到父进程的环境。
+func stdioEnvironment(custom: HashMap<String, String>): HashMap<String, String> {
+    let merged = HashMap<String, String>()
+    try {
+        for ((k, v) in getVariables()) { merged[k] = v }
+    } catch (_) { () }
+    // 兜底关键变量：命令名解析、动态库查找、用户目录都依赖它们
+    for (k in ["PATH", "LD_LIBRARY_PATH", "HOME"]) {
+        if (!merged.contains(k)) {
+            match (getVariable(k)) {
+                case Some(v) => merged[k] = v
+                case None => ()
+            }
+        }
+    }
+    for ((k, v) in custom) { merged[k] = v }
+    merged
+}
+
 func createTransport(cfg: McpServerConfig): Option<Transport> {
     let log = getGlobalLogger([("name", "McpManager")])
     try {
         if (cfg.transport == "stdio") {
             if (cfg.command == "") { log.warn("mcp ${cfg.name}: missing command", Array<Attr>()); return Option<Transport>.None }
-            if (cfg.env.size > 0) {
-                // environment=Some 为整体替换：并入关键变量后叠加自定义
-                let merged = HashMap<String, String>()
-                for (k in ["PATH", "LD_LIBRARY_PATH", "HOME"]) {
-                    match (getVariable(k)) {
-                        case Some(v) => merged[k] = v
-                        case None => ()
-                    }
-                }
-                for ((k, v) in cfg.env) { merged[k] = v }
-                Option<Transport>.Some(StdioClientTransport(cfg.command, env: Some(merged)))
-            } else {
-                Option<Transport>.Some(StdioClientTransport(cfg.command))
-            }
+            Option<Transport>.Some(StdioClientTransport(cfg.command, env: Some(stdioEnvironment(cfg.env))))
         } else if (cfg.transport == "streamable-http") {
             if (cfg.url == "") { log.warn("mcp ${cfg.name}: missing url", Array<Attr>()); return Option<Transport>.None }
             let t = StatelessHttpClient_2026_07_28(cfg.url)

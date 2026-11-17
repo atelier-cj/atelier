@@ -202,3 +202,35 @@ func loadMcpToolset_missingParamError() {
     let r = t.execute(ToolContext("."), JsonValue.Map(HashMap()))
     @Expect(r.isError, true)
 }
+
+// stdio 的 command 允许带参（"可执行 参数..."）：ACP client 经 session/new 下发的 mcpServers
+// 就是 command + args 形态。带参命令必须真的能启动——把整串当单个可执行路径会让所有
+// 「command 带参」的服务静默连不上（官方 TCK 的 stdio stub 正是这种形态）。
+@Test
+func mcpManager_stdioCommandWithArgsLaunches() {
+    let t = createTransport(McpServerConfig("argvprobe", "stdio", "true argv-probe", ""))
+    @Expect(t.isSome(), true)
+    t.getOrThrow().close()
+}
+
+// stdioEnvironment：自定义变量叠加在**继承的进程环境**之上（不是替换）。
+// 只带自定义项会让 npx/python 这类依赖 PATH/HOME 的 server 起不来；
+// 同键时自定义优先（Agent 配置要能覆盖父进程的值）。
+@Test
+func mcpManager_stdioEnvironmentInheritsAndOverrides() {
+    let custom = HashMap<String, String>()
+    custom["ATELIER_MCP_PROBE"] = "custom"
+    let env = stdioEnvironment(custom)
+    match (env.get("ATELIER_MCP_PROBE")) {
+        case Some(v) => @Expect(v, "custom")
+        case None => @Fail("custom env dropped")
+    }
+    @Expect(env.contains("PATH"), true)
+
+    custom["PATH"] = "/nonexistent-probe-path"
+    let env2 = stdioEnvironment(custom)
+    match (env2.get("PATH")) {
+        case Some(v) => @Expect(v, "/nonexistent-probe-path")
+        case None => @Fail("override lost")
+    }
+}

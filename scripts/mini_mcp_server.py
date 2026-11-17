@@ -2,14 +2,16 @@
 """mini_mcp_server.py —— 最小 MCP stdio server（真实连接验证用）。
 
 实现 initialize / notifications/initialized / tools/list / tools/call（echo_tool）。
-收到 initialize 后把环境变量 TOKEN 与自身收到的消息记录到 MCP_MARKER_FILE（若设置），
-供端到端断言「真实握手成功 + stdio env 注入生效」。线协议：newline-framed JSON-RPC。
+收到 initialize 后把环境变量 TOKEN 与自身收到的消息记录到 MCP_MARKER_FILE（若设置；
+未设置时取 argv[1]），供端到端断言「真实握手成功 + stdio env 注入生效」。
+两种 marker 通道并存是为了分别覆盖「有 env」与「无 env 但带参命令」两种启动形态：
+后者只能靠 argv 观测，没有 env 可用。线协议：newline-framed JSON-RPC。
 """
 import json
 import os
 import sys
 
-MARKER = os.environ.get("MCP_MARKER_FILE", "")
+MARKER = os.environ.get("MCP_MARKER_FILE", "") or (sys.argv[1] if len(sys.argv) > 1 else "")
 TOKEN = os.environ.get("TOKEN", "")
 
 
