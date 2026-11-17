@@ -19,7 +19,7 @@ repository = "https://atomgit.com/ystyle/atelier"
 "ystyle::jsonrpc" = "0.7.9"
 "bstorm" = "2.0.1"
 "opencj::ulid" = "0.1.2"
-"llm_api" = "1.4.1"
+"llm_api" = "1.4.2"
 "acp" = "0.3.0"
 # UHP（Unified Harness Protocol）：第四种执行位置（远端 harness 自带环境）
 "uhp" = "0.1.1"

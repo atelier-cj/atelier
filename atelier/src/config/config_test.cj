@@ -779,3 +779,80 @@ public func resolveA2aPublicUrl_trimsTrailingSlashOnly() {
     cfg.publicUrl = "  https://a.example.com/base//  "
     @Expect(resolveA2aPublicUrl(cfg, "x"), "https://a.example.com/base")
 }
+
+// ===================== apiKey 的 ${VAR} 展开 =====================
+// 文档（docs/configuration.md）从第一版起就写着 apiKey 支持 ${ENV_VAR}，但实现只反序列化
+// 就把字面量交给 provider —— 密钥不落盘的做法失效，且故障表现为与根因无关的 401。
+
+func envOf(pairs: Array<(String, String)>): (String) -> Option<String> {
+    let m = HashMap<String, String>()
+    for ((k, v) in pairs) { m[k] = v }
+    { k: String => m.get(k) }
+}
+
+@Test
+public func expandEnvRefs_replacesKnownVariable() {
+    let (out, missing) = expandEnvRefs("\${A}/v1", envOf([("A", "sk-1")]))
+    @Expect(out, "sk-1/v1")
+    @Expect(missing.size, 0)
+}
+
+@Test
+public func expandEnvRefs_multipleReferences() {
+    let (out, missing) = expandEnvRefs("\${H}://x/\${P}", envOf([("H", "http"), ("P", "9")]))
+    @Expect(out, "http://x/9")
+    @Expect(missing.size, 0)
+}
+
+@Test
+public func expandEnvRefs_unsetBecomesEmptyAndIsReported() {
+    // 保留字面量等于把它当密钥发出去（实测服务端报「key 以 EY) 结尾」），
+    // 所以展开为空串并回报变量名，由调用方留痕
+    let (out, missing) = expandEnvRefs("pre-\${NOPE}-post", envOf([]))
+    @Expect(out, "pre--post")
+    @Expect(missing.size, 1)
+    @Expect(missing[0], "NOPE")
+}
+
+@Test
+public func expandEnvRefs_unsetMixedWithSet() {
+    let (out, missing) = expandEnvRefs("\${A}\${B}", envOf([("A", "1")]))
+    @Expect(out, "1")
+    @Expect(missing.size, 1)
+    @Expect(missing[0], "B")
+}
+
+@Test
+public func expandEnvRefs_plainValueUntouched() {
+    let (out, missing) = expandEnvRefs("sk-plain-key", envOf([]))
+    @Expect(out, "sk-plain-key")
+    @Expect(missing.size, 0)
+}
+
+@Test
+public func expandEnvRefs_nonReferenceBracesUntouched() {
+    // 不是引用的形态一律原样保留：静默改写会把「我写的就是这个值」变成错
+    for (raw in ["\${}", "\${1A}", "\${A", "a\${b", "\$A", "plain"]) {
+        let (out, missing) = expandEnvRefs(raw, envOf([("A", "x")]))
+        @Expect(out, raw)
+        @Expect(missing.size, 0)
+    }
+}
+
+@Test
+public func expandEnvRefs_valueWithNonAsciiTextSurvives() {
+    // String.size 是字节数：按字节扫描/切片会切碎多字节字符
+    let (out, _) = expandEnvRefs("前缀\${A}后缀", envOf([("A", "中间")]))
+    @Expect(out, "前缀中间后缀")
+}
+
+@Test
+public func toProviderConfig_plainApiKeyPassesThrough() {
+    // 不含引用的 apiKey 不受展开影响（ollama 这类无密钥端点也走这条路径）
+    let tp = TomlProvider()
+    tp.name = "p"
+    tp.providerType = "openai"
+    tp.baseURL = "http://x"
+    tp.apiKey = "sk-plain"
+    @Expect(toProviderConfig(tp).apiKey, "sk-plain")
+}
