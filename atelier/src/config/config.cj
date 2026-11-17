@@ -568,6 +568,81 @@ public class TomlProvider <: Serializable<TomlProvider> {
     }
 }
 
+/**
+ * 展开配置里的 `${VAR}` 环境变量引用，返回（展开结果，未取到值的变量名）。
+ *
+ * 存在的理由：`docs/configuration.md` 从第一版起就写着 `apiKey = "${OPENAI_API_KEY}"`
+ * 能引用环境变量（密钥不落盘），但实现只把 TOML 反序列化就原样交给 provider。
+ * 于是 `${OPENAI_API_KEY}` 这个**字面量**被当成密钥发出去，服务端报的是
+ * 「key 以 EY) 结尾」——离「环境变量没取到」十万八千里，实测排了两层才定位到。
+ *
+ * 三条取舍：
+ * - **未设置**的变量展开成空串并回报变量名（不保留字面量）：保留等于把它当密钥发出去，
+ *   只会换来更难懂的鉴权失败；调用方据回报留痕，说清是哪个变量没设。
+ * - **语法不合法**（`${}`、`${1A}`、没有闭合的 `}`）**原样保留**：那不是引用而是字面量，
+ *   静默改写会把「我写的就是这个值」变成错。
+ * - 在 **rune** 上扫描而不是字节上：`${` / `}` 是 ASCII，但键值里可能有非 ASCII 文本，
+ *   按字节切会切碎多字节字符（String.size 是字节数）。
+ *
+ * lookup 由调用方注入：生产传环境变量读取，测试传假表——测试不该改进程环境。
+ */
+public func expandEnvRefs(raw: String, lookup: (String) -> Option<String>): (String, ArrayList<String>) {
+    let missing = ArrayList<String>()
+    if (raw.size == 0) { return (raw, missing) }
+    let runes = raw.toRuneArray()
+    let out = StringBuilder()
+    var i = 0
+    while (i < runes.size) {
+        if (runes[i] == r'$' && i + 1 < runes.size && runes[i + 1] == r'{') {
+            var j = i + 2
+            while (j < runes.size && runes[j] != r'}') { j++ }
+            // 没有闭合的 `}`：不构成引用，落到下面按字面量输出
+            if (j < runes.size) {
+                let name = String(runes[(i + 2)..j])
+                if (isEnvVarName(name)) {
+                    match (lookup(name)) {
+                        case Some(v) => out.append(v)
+                        case None => missing.add(name)
+                    }
+                    i = j + 1
+                    continue
+                }
+            }
+        }
+        out.append(String(runes[i..(i + 1)]))
+        i++
+    }
+    (out.toString(), missing)
+}
+
+// 占位符名与 POSIX 环境变量同名规则：`[A-Za-z_][A-Za-z0-9_]*`
+func isEnvVarName(name: String): Bool {
+    if (name.size == 0) { return false }
+    let runes = name.toRuneArray()
+    if (!isEnvNameLead(runes[0])) { return false }
+    for (k in 1..runes.size) {
+        if (!isEnvNameBody(runes[k])) { return false }
+    }
+    true
+}
+
+func isEnvNameLead(r: Rune): Bool {
+    (r >= r'A' && r <= r'Z') || (r >= r'a' && r <= r'z') || r == r'_'
+}
+
+func isEnvNameBody(r: Rune): Bool {
+    isEnvNameLead(r) || (r >= r'0' && r <= r'9')
+}
+
+func joinNames(names: ArrayList<String>): String {
+    let b = StringBuilder()
+    for (i in 0..names.size) {
+        if (i > 0) { b.append(", ") }
+        b.append(names[i])
+    }
+    b.toString()
+}
+
 public func toProviderConfig(tp: TomlProvider): ProviderConfig {
     let extra = HashMap<String, JsonValue>()
     match (JsonValue.fromDataModel(tp.extra)) {
@@ -575,7 +650,14 @@ public func toProviderConfig(tp: TomlProvider): ProviderConfig {
             for ((k, v) in m) { extra[k] = v }
         case _ => ()
     }
-    ProviderConfig(tp.providerType, tp.name, tp.baseURL, tp.apiKey,
+    // 只有 apiKey 走上引用展开（文档承诺的就是它）。headers 里出现 `${...}` 时
+    // 大概率也是密钥，但那条路径既有字面量用法也可能存在，先不擅自改写。
+    let (apiKey, missingVars) = expandEnvRefs(tp.apiKey, { k => getVariable(k) })
+    if (missingVars.size > 0) {
+        eprintln("[atelier] provider '${tp.name}' 的 apiKey 引用了未设置的环境变量: " +
+            joinNames(missingVars) + "（按空串处理，鉴权会失败）")
+    }
+    ProviderConfig(tp.providerType, tp.name, tp.baseURL, apiKey,
         tp.headers, extra, skipTlsVerify: tp.skipTlsVerify)
 }
 
