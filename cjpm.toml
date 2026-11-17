@@ -15,12 +15,6 @@
     "cli"
   ]
 
-# 临时：acp 的会话一致性修复（session/list 的 cursor 错误通道 / boolean config option 能力门控）
-# 尚未发版，这里指向同工作区的 acp-cj 本地目录。acp 0.2.8 发布后删掉本段，
-# 并把 atelier/cjpm.toml 的 "acp" 依赖升到 0.2.8（届时 [replace] 也不该再出现）。
-[replace]
-  "acp" = { path = "../acp-cj" }
-
 # 共享的平台配置：成员不再各自重复声明（原三份内容相同，集中于此）。
 [target.x86_64-unknown-linux-gnu]
   link-option = "-luring"
