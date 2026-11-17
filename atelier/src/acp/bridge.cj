@@ -53,6 +53,20 @@ public func shouldSendConfigOptions(caps: ClientCapabilities): Bool {
     }
 }
 
+/**
+ * 真正下发给该 Client 的 config options（所有出口共用：session/new、set_config_option 回包）。
+ *
+ * `shouldSendConfigOptions` 只决定「下不下发整份列表」；单个选项还有自己的能力门控：
+ * boolean 型（compaction）在 Client 未声明 `session.configOptions.boolean` 时 MUST NOT 下发
+ * （规范原文如此）：未声明意味着对端不保证能渲染/回传该形态，下发出去是 Agent 侧违约。
+ *
+ * 「Client 完全没声明 session」也不构成下发 boolean 的理由：乐观下发只对 select 成立
+ * （它是 config options 的基本形态），boolean 是显式声明的扩展能力。
+ */
+public func visibleConfigOptions(options: ArrayList<SessionConfigOption>, caps: ClientCapabilities): ArrayList<SessionConfigOption> {
+    filterConfigOptionsForClient(options, caps)
+}
+
 public class AcpBridge {
     private let agent: AcpAgent
     private let agentName: String
@@ -148,7 +162,7 @@ public class AcpBridge {
                                 this.spec.mcp.addServer(this.spec.tools, cfg)
                                 logErr("[atelier-acp] client mcp '${ms.name}' 注册完成（${cfg.transport}）")
                             case None =>
-                                logErr("[atelier-acp] client mcp '${ms.name}' 形态不支持或配置无效，跳过（stdio env 暂不支持）")
+                                logErr("[atelier-acp] client mcp '${ms.name}' 形态不支持（sse/未知）或缺 command/url，跳过")
                         }
                     }
                 }
@@ -171,7 +185,11 @@ public class AcpBridge {
         match (host) {
             case Some(h) =>
                 let st = SessionInitialState()
-                st.configOptions = Some(h.options.optionList())
+                // boolean 型（compaction）只在 Client 声明了
+                // clientCapabilities.session.configOptions.boolean 时才下发：规范是 MUST NOT，
+                // select（模型）不受此限——它是 config options 的基本形态。
+                st.configOptions = Some(visibleConfigOptions(
+                    h.options.optionList(), this.agent.clientCapabilities))
                 Some(st)
             case None => None
         }
@@ -193,7 +211,9 @@ public class AcpBridge {
                         this.replayHistory(acpId, rec.atelierId)
                         complete(JsonValue.fromObject(LoadSessionResponse()))
                     case None =>
-                        fail(JsonRpcError(INVALID_PARAMS, "Unknown sessionId: ${acpId}"))
+                        // 未知会话统一 -32002（resource not found）+ data.sessionId；
+                        // load 允许从持久化恢复「本进程没见过」的会话，故由这里判定而不是库侧
+                        fail(unknownSessionError(acpId))
                 }
         }
     }
@@ -213,16 +233,18 @@ public class AcpBridge {
         }
     }
 
-    // session/list：全部已记录会话
-    private func onListSessions(req: ListSessionsRequest): ListSessionsResponse {
-        let resp = ListSessionsResponse()
-        for (r in this.manager.list()) {
-            let info = SessionInfo()
-            info.sessionId = r.sessionId
-            info.cwd = r.cwd
-            resp.sessions.add(info)
+    // session/list：cwd 过滤（协议语义 = 按会话工作目录筛选）+ cursor 校验。
+    // 本 Agent 不分页，任何 cursor 都不是它签发过的 → Err 由 acp 库映射为 -32602。
+    private func onListSessions(req: ListSessionsRequest): Result<ListSessionsResponse> {
+        match (listSessionsCursorError(req.cursor)) {
+            case Some(msg) => Result<ListSessionsResponse>.Err(msg)
+            case None =>
+                let resp = ListSessionsResponse()
+                for (info in listSessionInfos(this.manager.list(), req.cwd)) {
+                    resp.sessions.add(info)
+                }
+                Result<ListSessionsResponse>.Ok(resp)
         }
-        resp
     }
 
     // session/delete：删映射 + 删 atelier 会话
@@ -271,7 +293,8 @@ public class AcpBridge {
                 match (jv) {
                     case Some(v) =>
                         if (h.options.setOption(req.configId, v)) {
-                            return Some(h.options.optionList())
+                            return Some(visibleConfigOptions(
+                                h.options.optionList(), this.agent.clientCapabilities))
                         }
                         None
                     case None => None

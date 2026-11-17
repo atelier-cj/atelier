@@ -2,7 +2,8 @@
 """acp_e2e.py —— atelier acp（ACP v1 Agent, stdio）端到端验证 driver（离线：echo provider）。
 
 覆盖：initialize 能力协商 / session.new(初始 configOptions) / prompt 流式 / cancel /
-close / list / load 历史重放（跨进程）/ delete / set_config_option 校验。
+close / list（cwd 过滤 + cursor 校验）/ load 历史重放（跨进程）/ delete /
+set_config_option 校验 / config options 的 boolean 能力门控 / stdio MCP 真连接（含/不含 env）。
 
 用法：
   python3 scripts/acp_e2e.py [--atelier <bin路径>] [--delay-ms <N>]
@@ -143,8 +144,10 @@ def main():
 
     # ---- 1. initialize：能力协商 ----
     c, homedir, proc = spawn_client()
+    # clientCapabilities.session.configOptions.boolean = {} 才能拿 boolean 型 config option
+    # （ACP-CONFIG-003：未声明时 Agent MUST NOT 下发 type="boolean"）
     caps = {"fs": {"readTextFile": True, "writeTextFile": True},
-            "session": {"configOptions": {}}}
+            "session": {"configOptions": {"boolean": {}}}}
     resp = c.rpc("initialize", {"protocolVersion": 1, "clientCapabilities": caps})
     result = resp.get("result", {})
     check("initialize ok", resp.get("error") is None and "result" in resp, str(resp.get("error")))
@@ -198,10 +201,18 @@ def main():
                  {"sessionId": sid, "configId": "nope", "type": "select", "value": "x"})
     check("set_config_option 未知 id 拒绝", resp.get("error") is not None)
 
-    # ---- 6. session/list ----
+    # ---- 6. session/list：全量 / cwd 过滤 / cursor 校验 ----
     resp = c.rpc("session/list", {})
     sessions = resp.get("result", {}).get("sessions", [])
     check("session/list 含本会话", any(s["sessionId"] == sid for s in sessions))
+    resp = c.rpc("session/list", {"cwd": "/tmp"})
+    sessions = resp.get("result", {}).get("sessions", [])
+    check("session/list cwd 过滤命中", any(s["sessionId"] == sid for s in sessions))
+    resp = c.rpc("session/list", {"cwd": "/acp-e2e-no-session-here"})
+    check("session/list cwd 不匹配 → 空数组", resp.get("result", {}).get("sessions") == [], str(resp.get("result")))
+    # 本 Agent 不分页：任何未签发过的 cursor 都必须是 -32602，而不是被忽略后照常返回
+    resp = c.rpc("session/list", {"cursor": "_acp-e2e-never-issued"})
+    check("session/list 未签发 cursor → -32602", (resp.get("error") or {}).get("code") == -32602, str(resp.get("error")))
 
     # ---- 7. session/close：清运行态、映射保留 ----
     resp = c.rpc("session/close", {"sessionId": sid})
@@ -304,6 +315,44 @@ def main():
     check("mcp 真实握手+env 注入", mcp_ok, "marker missing/incomplete")
     c4.proc.stdin.close()
     proc4.wait(timeout=15)
+
+    # ---- 11. stdio MCP 不带 env：带参命令必须按 argv 启动 ----
+    # ACP 的 mcpServers 最常见的形态是 command + args + 无 env（官方 TCK 的 stub 就是这样）。
+    # 这条与第 10 条的区别只在「没有 env」，覆盖的是启动路径本身，而不是 env 注入。
+    marker2 = tempfile.mkdtemp(prefix="acp-mcp-argv-") + "/marker.log"
+    c5, homedir5, proc5 = spawn_client()
+    c5.rpc("initialize", {"protocolVersion": 1, "clientCapabilities": {}})
+    resp = c5.rpc("session/new", {"cwd": "/tmp", "mcpServers": [{
+        "name": "minisrv2", "command": sys.executable,
+        "args": [os.path.join(ROOT, "scripts", "mini_mcp_server.py"), marker2]}]})
+    check("mcp(no env) session/new ok", resp.get("error") is None, str(resp.get("error")))
+    handshake_ok = False
+    end = time.time() + 25
+    while time.time() < end and not handshake_ok:
+        if os.path.exists(marker2):
+            try:
+                handshake_ok = "initialize" in open(marker2).read()
+            except Exception:
+                pass
+        time.sleep(0.5)
+    check("mcp(no env) 带参命令真实握手", handshake_ok, "marker missing/incomplete")
+    c5.proc.stdin.close()
+    proc5.wait(timeout=15)
+
+    # ---- 12. config options 的 boolean 能力门控（ACP-CONFIG-003） ----
+    c6, homedir6, proc6 = spawn_client()
+    c6.rpc("initialize", {"protocolVersion": 1, "clientCapabilities": {}})
+    resp = c6.rpc("session/new", {"cwd": "/tmp"})
+    opts = resp.get("result", {}).get("configOptions") or []
+    check("未声明 boolean → 只下发 select", [o.get("type") for o in opts] == ["select"], str(opts))
+    sid6 = resp.get("result", {}).get("sessionId", "")
+    resp = c6.rpc("session/set_config_option",
+                  {"sessionId": sid6, "configId": "model", "type": "select", "value": "deepseek-chat"})
+    returned = (resp.get("result") or {}).get("configOptions") or []
+    check("set_config_option 回包同样不含 boolean",
+          [o.get("type") for o in returned] == ["select"], str(returned))
+    c6.proc.stdin.close()
+    proc6.wait(timeout=15)
 
     print(f"\n结果: PASS {passed} / FAIL {failed}")
     sys.exit(1 if failed else 0)

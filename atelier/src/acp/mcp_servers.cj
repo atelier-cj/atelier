@@ -6,9 +6,9 @@ import acp.types.McpServer
 import atelier.tool.{McpServerConfig}
 
 // ACP session/new 携带的 MCP server 配置 → atelier McpServerConfig 映射。
-// 形态映射：stdio（type=None/"stdio"）→ transport "stdio"（command）；
+// 形态映射：stdio（type=None/"stdio"）→ transport "stdio"（command = command + args，env → cfg.env）；
 // type="http" → "streamable-http"（url + headers）；type="sse" 与未知形态 → None（不支持）。
-// 边界：stdio 进程 env 无法表达（atelier stdio transport 无 env 注入）→ 忽略并交由调用方记录。
+// 缺 command/url 的空配置同样返回 None，由调用方记录日志（不静默吞掉整条会话请求）。
 public func acpMcpServerToConfig(s: McpServer): ?McpServerConfig {
     let typ = match (s.`type`) {
         case Some(t) => t
