@@ -7,6 +7,7 @@ import stdx.net.http.*
 import atelier.agent.*
 import atelier.provider.*
 import atelier.trust.*
+import atelier.a2a.AtelierVersion
 import server.*
 
 // 入口（cli.app）与 acp 命令共用的装配助手（自 main.cj 拆出，保持同一包可见性）
@@ -102,4 +103,44 @@ public func applyTrustFromEnv(trustMgr: TrustManager, raw: String): ArrayList<St
         applied.add(dir)
     }
     applied
+}
+
+// ---------- 非启动命令的快速出口 ----------
+
+/**
+ * `--version` / `--help` 该在此处就结束：**不装配运行时、不碰磁盘**。
+ *
+ * 动机（实测数字）：入口是先装配后分发，于是连 `--version` 都会打开会话库。
+ * 打开成本取决于库里遗留 `.mem`（WAL）的数量——288 个时单次 7–9 秒；
+ * 而遗留文件恰恰又是「入口提前 return、没走到 close()」留下的，两者互为因果。
+ * 探测方给的 RPC 上限通常只有十几秒，这条路径必须降到毫秒级。
+ *
+ * 返回 `Some(文本)` = 打印后以 0 退出；`None` = 继续按子命令装配。
+ */
+public func startupOutput(cmd: String): Option<String> {
+    match (cmd) {
+        case "-v" | "--version" => Some("atelier " + AtelierVersion)
+        case "-h" | "--help" => Some(usageText())
+        case _ => None
+    }
+}
+
+/** 用法帮助；`--help` 与未知子命令共用同一份文本（避免两处各写一份逐渐漂移）。 */
+public func usageText(): String {
+    let b = StringBuilder()
+    b.append("Atelier Agent Runtime\n")
+    b.append("Usage:\n")
+    b.append("  cli.app serve [port]          Start HTTP server\n")
+    b.append("  cli.app acp [agent]           Serve as ACP v1 agent over stdio (agent picked at startup)\n")
+    b.append("  cli.app a2a [agent] [port]    Serve as A2A v1 agent over HTTP (Agent Card + SSE, default port 8931)\n")
+    b.append("  cli.app tui [agent] [sid]     Start interactive TUI (alias: repl; resume session if sid given)\n")
+    b.append("  cli.app run [agent] <prompt>  Run single prompt\n")
+    b.append("  cli.app --version             Print version\n")
+    b.append("\n")
+    b.append("TUI slash commands: /help, /agent, /session, /model, /models, /tools, /subagent, /trust, /untrust, /clear, /exit\n")
+    b.append("Config: ~/.atelier.toml  — agent, provider, model, server, mcpServer, logging\n")
+    b.append("Skills: ~/.agents/skills/<name>/SKILL.md\n")
+    b.append("Logs:   ~/.atelier/atelier.log (set [logging] level = \"debug\")\n")
+    b.append("Sessions: ~/.atelier/sessions/ (persistent, auto-save after each turn)")
+    b.toString()
 }
