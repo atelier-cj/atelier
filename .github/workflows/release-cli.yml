@@ -131,6 +131,19 @@ jobs:
           version: ${{ env.CJC_VERSION }}
           components: stdx
 
+      - name: Show dependency resolution
+        shell: bash
+        run: |
+          echo "=== atelier/cjpm.toml 依赖声明 ==="
+          grep -E '"(uhp|bstorm)"' atelier/cjpm.toml || true
+          echo "=== cjpm update ==="
+          cjpm update 2>&1 | tail -6 || true
+          echo "=== lock 解析结果 ==="
+          grep -E "uhp|bstorm" cjpm.lock 2>/dev/null || echo "无 lock"
+          echo "=== CANGJIE_STDX_PATH ==="
+          echo "$CANGJIE_STDX_PATH"
+          ls -d "$CANGJIE_STDX_PATH" 2>/dev/null || echo "路径不存在"
+
       - name: Build Windows binary
         shell: bash
         env:
