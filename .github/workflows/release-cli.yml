@@ -116,8 +116,8 @@ jobs:
 
   build-windows:
     needs: prepare
-    # Win11/Server2025 的升级补丁会导致编译失败，用最接近 Win10 的 Server 2019
-    runs-on: windows-2019
+    # Server 2025（Win11 内核）的升级补丁会导致编译失败；Server 2022 是 Win10 内核
+    runs-on: windows-2022
     # 暂不阻塞：uhp 未声明 stdx 依赖，Windows 原生构建报 import 缺依赖；
     # 修上游前失败只显示黄标，不影响 Linux 资产发布。
     continue-on-error: true
