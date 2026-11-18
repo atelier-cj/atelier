@@ -44,11 +44,12 @@ unzip atelier.zip && chmod +x atelier
 |---|---|
 | Linux x86_64 | <https://github.com/atelier-cj/atelier/releases/latest/download/atelier_linux_amd64.zip> |
 | Windows x86_64 | <https://github.com/atelier-cj/atelier/releases/latest/download/atelier_windows_amd64.zip> |
+| macOS arm64 | <https://github.com/atelier-cj/atelier/releases/latest/download/atelier_macos_aarch64.zip> |
 
 全部版本与更新日志：<https://github.com/atelier-cj/atelier/releases>
 
-> macOS 暂未产出：cjpm 在 `darwin_aarch64` 上创建 TLS 上下文会 SIGABRT（已用
-> `DYLD_LIBRARY_PATH` 绕过第一阶段，构建链仍在收尾）。
+`v*` tag 推送即触发构建：三平台各自 `cjpm build` 后打包上传，同时产出不带版本号的
+固定名副本供上面的链接使用。
 
 ### 从源码构建
 
