@@ -17,12 +17,12 @@ repository = "https://atomgit.com/ystyle/atelier"
 "jsonvalue" = "1.1.1"
 "mustache" = "1.2.1"
 "ystyle::jsonrpc" = "0.7.9"
-"bstorm" = "2.1.0"
+"bstorm" = "2.1.2"
 "opencj::ulid" = "0.1.2"
 "llm_api" = "1.4.2"
 "acp" = "0.3.0"
 # UHP（Unified Harness Protocol）：第四种执行位置（远端 harness 自带环境）
-"uhp" = "0.1.1"
+"uhp" = "0.1.2"
 # PTC 程序执行引擎（中断检查点 / 纯函数子集 / 严格解析由 xisp 0.4.1 提供）
 "ystyle::xisp" = "0.5.0"
 # 编译期读取 cjpm.toml 的版本号（产品版本由 cjpm ws 物化到本成员）
