@@ -77,7 +77,7 @@ jobs:
 
   build-macos:
     needs: prepare
-    if: always() && (inputs.tag != '') && (needs.prepare.result == 'success' || needs.prepare.result == 'skipped')
+    if: always() && (github.event_name == 'push' || inputs.tag != '') && (needs.prepare.result == 'success' || needs.prepare.result == 'skipped')
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4

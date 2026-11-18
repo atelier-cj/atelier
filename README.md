@@ -40,12 +40,15 @@ unzip atelier.zip && chmod +x atelier
 ./atelier --version
 ```
 
-- 固定地址（永远指向最新版）：<https://github.com/atelier-cj/atelier/releases/latest/download/atelier_linux_amd64.zip>
-- 全部版本与更新日志：<https://github.com/atelier-cj/atelier/releases>
+| 平台 | 固定地址（永远指向最新版） |
+|---|---|
+| Linux x86_64 | <https://github.com/atelier-cj/atelier/releases/latest/download/atelier_linux_amd64.zip> |
+| Windows x86_64 | <https://github.com/atelier-cj/atelier/releases/latest/download/atelier_windows_amd64.zip> |
 
-> 当前只提供 **Linux x86_64**。macOS 构建受 cjpm 在 `darwin_aarch64` 上的 TLS 崩溃影响
-> （换 1.2.0 工具链仍复现）；Windows 卡在 `uhp` 未声明 `stdx` 依赖，原生构建报
-> `root package 'uhp' imports package 'stdx...'`。两者都要先修上游，再补对应资产。
+全部版本与更新日志：<https://github.com/atelier-cj/atelier/releases>
+
+> macOS 暂未产出：cjpm 在 `darwin_aarch64` 上创建 TLS 上下文会 SIGABRT（已用
+> `DYLD_LIBRARY_PATH` 绕过第一阶段，构建链仍在收尾）。
 
 ### 从源码构建
 
