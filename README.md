@@ -30,6 +30,25 @@ Atelier 是一个纯仓颉实现的 Agent Harness —— 把模型变成 Agent �
 
 ## 安装
 
+### 直接下载 CLI（免编译）
+
+终端 agent 的现成二进制挂在 GitHub Release（AtomGit 的流水线暂不可用，二进制改走 GitHub）：
+
+```bash
+curl -L -o atelier.zip https://github.com/atelier-cj/atelier/releases/latest/download/atelier_linux_amd64.zip
+unzip atelier.zip && chmod +x atelier
+./atelier --version
+```
+
+- 固定地址（永远指向最新版）：<https://github.com/atelier-cj/atelier/releases/latest/download/atelier_linux_amd64.zip>
+- 全部版本与更新日志：<https://github.com/atelier-cj/atelier/releases>
+
+> 当前只提供 **Linux x86_64**。macOS 构建受 cjpm 在 `darwin_aarch64` 上的 TLS 崩溃影响
+> （换 1.2.0 工具链仍复现）；Windows 卡在 `uhp` 未声明 `stdx` 依赖，原生构建报
+> `root package 'uhp' imports package 'stdx...'`。两者都要先修上游，再补对应资产。
+
+### 从源码构建
+
 仓库为 **monorepo**（一个 cjpm 工作区，产品版本 lockstep）：`atelier/`（核心库 `atelier`，发布中心仓）
 + `cli/`（终端 agent 产品，产物 `cli.app`）+ `server/`（HTTP 服务库 `server`）。
 
