@@ -102,10 +102,10 @@ jobs:
           CANGJIE_STDX_PATH: ${{ env.CANGJIE_STDX_PATH_STATIC }}/stdx
           TAG: ${{ inputs.tag || github.ref_name }}
         run: |
-          cjpm build
-          cp ./target/release/bin/cli.app "./target/release/bin/${BIN_NAME}"
+          cjpm build --target aarch64-apple-darwin
+          cp ./target/aarch64-apple-darwin/release/bin/cli.app "./target/aarch64-apple-darwin/release/bin/${BIN_NAME}"
           mkdir -p dist
-          zip -j "dist/${BIN_NAME}_${TAG}_macos_aarch64.zip" "./target/release/bin/${BIN_NAME}"
+          zip -j "dist/${BIN_NAME}_${TAG}_macos_aarch64.zip" "./target/aarch64-apple-darwin/release/bin/${BIN_NAME}"
           cp "dist/${BIN_NAME}_${TAG}_macos_aarch64.zip" "dist/${BIN_NAME}_macos_aarch64.zip"
 
       - name: Upload release assets
@@ -136,14 +136,16 @@ jobs:
           CANGJIE_STDX_PATH: ${{ env.CANGJIE_STDX_PATH_STATIC }}/stdx
           TAG: ${{ inputs.tag || github.ref_name }}
         run: |
-          cjpm build
+          # 显式指定 target：Windows runner 上的默认 target 字符串未必是 mingw，
+          # 不匹配时 [target.x86_64-w64-mingw32.*] 的 stdx 声明不会被采用
+          cjpm build --target x86_64-w64-mingw32
           echo "=== 构建产物 ==="
-          ls -la ./target/release/bin/ || true
-          BIN=$(ls ./target/release/bin/ | grep -E '^cli\.app(\.exe)?$' | head -1)
+          ls -la ./target/x86_64-w64-mingw32/release/bin/ || true
+          BIN=$(ls ./target/x86_64-w64-mingw32/release/bin/ | grep -E '^cli\.app(\.exe)?$' | head -1)
           if [ -z "$BIN" ]; then echo "未找到 cli.app.exe"; exit 1; fi
-          cp "./target/release/bin/$BIN" "./target/release/bin/${BIN_NAME}.exe"
+          cp "./target/x86_64-w64-mingw32/release/bin/$BIN" "./target/x86_64-w64-mingw32/release/bin/${BIN_NAME}.exe"
           mkdir -p dist
-          7z a "dist/${BIN_NAME}_${TAG}_windows_amd64.zip" "./target/release/bin/${BIN_NAME}.exe"
+          7z a "dist/${BIN_NAME}_${TAG}_windows_amd64.zip" "./target/x86_64-w64-mingw32/release/bin/${BIN_NAME}.exe"
           cp "dist/${BIN_NAME}_${TAG}_windows_amd64.zip" "dist/${BIN_NAME}_windows_amd64.zip"
 
       - name: Upload release assets
