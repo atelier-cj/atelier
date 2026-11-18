@@ -8,8 +8,13 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: '已存在的 tag（重跑构建用，如 v0.1.15）'
-        required: true
+        description: '已存在的 tag（重跑某个 tag 的构建）'
+        required: false
+        type: string
+      ref:
+        description: '要构建的代码 ref（验证改动时填 master，默认 master）'
+        required: false
+        default: master
         type: string
 
 permissions:
@@ -38,7 +43,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag || github.ref_name }}
+          ref: ${{ inputs.ref || inputs.tag || github.ref_name }}
       - uses: Zxilly/setup-cangjie@v3
         with:
           channel: sts
@@ -75,7 +80,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag || github.ref_name }}
+          ref: ${{ inputs.ref || inputs.tag || github.ref_name }}
       - uses: Zxilly/setup-cangjie@v3
         with:
           channel: sts
@@ -124,7 +129,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag || github.ref_name }}
+          ref: ${{ inputs.ref || inputs.tag || github.ref_name }}
       - uses: Zxilly/setup-cangjie@v3
         with:
           channel: sts
@@ -133,6 +138,8 @@ jobs:
 
       - name: Show dependency resolution
         shell: bash
+        env:
+          CANGJIE_STDX_PATH: ${{ env.CANGJIE_STDX_PATH_STATIC }}/stdx
         run: |
           echo "=== atelier/cjpm.toml 依赖声明 ==="
           grep -E '"(uhp|bstorm)"' atelier/cjpm.toml || true
