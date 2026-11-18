@@ -113,9 +113,11 @@ jobs:
           BIN_PATH=$(find ./target -type f -name 'cli.app' | head -1)
           if [ -z "$BIN_PATH" ]; then echo "未找到 cli.app"; find ./target -maxdepth 4 -type d | head; exit 1; fi
           echo "找到: $BIN_PATH"
-          cp "$BIN_PATH" "./${BIN_NAME}"
           mkdir -p dist
-          zip -j "dist/${BIN_NAME}_${TAG}_macos_aarch64.zip" "./${BIN_NAME}"
+          cp "$BIN_PATH" "dist/${BIN_NAME}"
+          chmod +x "dist/${BIN_NAME}"
+          ls -la "dist/${BIN_NAME}"
+          ( cd dist && zip "${BIN_NAME}_${TAG}_macos_aarch64.zip" "${BIN_NAME}" )
           cp "dist/${BIN_NAME}_${TAG}_macos_aarch64.zip" "dist/${BIN_NAME}_macos_aarch64.zip"
 
       - name: Upload release assets
