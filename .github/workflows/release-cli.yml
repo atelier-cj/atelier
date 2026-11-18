@@ -69,6 +69,10 @@ jobs:
   build-macos:
     needs: prepare
     runs-on: macos-15
+    # 1.1.3 的 cjpm 在 darwin_aarch64 上创建 TLS 上下文会 SIGABRT（stdx.net.tls），
+    # 换 1.2.0 工具链规避；若仍失败再考虑 macos-13（x86_64）
+    env:
+      CJC_VERSION: '1.2.0'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -99,6 +103,9 @@ jobs:
   build-windows:
     needs: prepare
     runs-on: ubuntu-latest
+    # 暂不阻塞：bstorm 的宏包在 mingw 交叉编译时按宿主 Linux 参数链接（-luring），
+    # 依赖链目前不支持 Windows 交叉构建。失败只显示黄标，不影响 Release。
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
         with:
