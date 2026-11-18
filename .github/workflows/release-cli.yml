@@ -87,12 +87,19 @@ jobs:
           components: stdx
 
       - name: Install OpenSSL
-        # cjpm 访问 https 中心仓时要加载 libcrypto，macOS 自带的不会用它，
-        # 缺失时 createContext 直接 SIGABRT（WARNING: loading libcrypto in an unsafe way）
+        # cjpm 访问 https 中心仓时要 dlopen libcrypto，找不到就直接 SIGABRT。
+        # 要求：目录下有 libcrypto.dylib 和 libcrypto.3.dylib，且 DYLD_LIBRARY_PATH
+        # 与 LIBRARY_PATH 都指向它（只设 LIBRARY_PATH 只管链接期，管不到运行期 dlopen）。
         run: |
-          brew install openssl@3
-          echo "LIBRARY_PATH=$(brew --prefix openssl@3)/lib" >> $GITHUB_ENV
-          echo "PKG_CONFIG_PATH=$(brew --prefix openssl@3)/lib/pkgconfig" >> $GITHUB_ENV
+          brew install openssl@3 || brew reinstall openssl@3
+          OSSL="$(brew --prefix openssl@3)"
+          echo "OpenSSL: $OSSL"
+          ls -1 "$OSSL/lib" | grep -E '^libcrypto' || true
+          test -f "$OSSL/lib/libcrypto.dylib"
+          test -f "$OSSL/lib/libcrypto.3.dylib"
+          echo "DYLD_LIBRARY_PATH=$OSSL/lib:$DYLD_LIBRARY_PATH" >> $GITHUB_ENV
+          echo "LIBRARY_PATH=$OSSL/lib" >> $GITHUB_ENV
+          echo "PKG_CONFIG_PATH=$OSSL/lib/pkgconfig" >> $GITHUB_ENV
 
       - name: Build macOS binary
         env:
