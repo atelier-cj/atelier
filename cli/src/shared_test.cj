@@ -101,3 +101,49 @@ func cliTestSpec(toolReg: ToolRegistry, store: SessionStore, trustMgr: TrustMana
         agents: agentReg, providers: providerReg, mcp: mcpMgr)
         .withProvider("default", provider)
 }
+
+// ---------- 非启动命令的快速出口 ----------
+// 动机：入口先装配后分发，`--version` 曾经要打开会话库（库里遗留 .mem 多时 7–9 秒）。
+// 这两条用例钉的是「命令分类」，时序由 LazySessionStore 的用例保证。
+
+@Test
+func startupOutput_versionPrintsVersionAndNoUsage() {
+    let out = startupOutput("--version")
+    @Expect(out.isSome(), true)
+    match (out) {
+        case Some(text) =>
+            // 必须带版本号且只有一行：探测方按行解析，混进用法帮助等于没有版本号
+            @Expect(text.startsWith("atelier "), true)
+            @Expect(text.contains("Usage:"), false)
+            @Expect(text.split("\n").size, 1)
+            @Expect(text.trimAscii().size > "atelier ".size, true)
+        case None => @Fail("--version 没有快速出口")
+    }
+    // -v 同义
+    match (startupOutput("-v")) {
+        case Some(t) => @Expect(t, out.getOrThrow())
+        case None => @Fail("-v 没有快速出口")
+    }
+}
+
+@Test
+func startupOutput_helpPrintsUsage() {
+    for (f in ["--help", "-h"]) {
+        match (startupOutput(f)) {
+            case Some(text) =>
+                @Expect(text.contains("Usage:"), true)
+                @Expect(text.contains("acp"), true)
+                // 帮助里要提到 --version，否则用户不知道有这个入口
+                @Expect(text.contains("--version"), true)
+            case None => @Fail("${f} 没有快速出口")
+        }
+    }
+}
+
+@Test
+func startupOutput_startCommandsGoThrough() {
+    // 真正的子命令必须返回 None，交给装配流程
+    for (c in ["serve", "acp", "a2a", "tui", "repl", "run", ""]) {
+        @Expect(startupOutput(c).isNone(), true)
+    }
+}

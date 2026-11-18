@@ -23,6 +23,15 @@ main(): Int64 {
     let args = getCommandLine()
     let cmd = if (args.size > 1) { args[1] } else { "" }
 
+    // 非启动命令先出口：版本 / 帮助不装配运行时、不碰磁盘。
+    // 实测动机见 startupOutput 注释——`--version` 曾经要 7–9 秒，全部耗在打开会话库上。
+    match (startupOutput(cmd)) {
+        case Some(text) =>
+            println(text)
+            return 0
+        case None => ()
+    }
+
     let trustMgr = TrustManager()
     let skillReg = SkillRegistry()
 
@@ -49,7 +58,9 @@ main(): Int64 {
             eprintln("[atelier] session dir create failed (${sessionDir}): ${e.toString()}")
         }
     }
-    let sessionStore: SessionStore = StormSessionStore(sessionDir)
+    // 懒打开：不用就不开。`run` 这类一次性命令本来就不落库，
+    // 打开它只是替用户付 WAL 重放的代价（见 LazySessionStore 注释）
+    let sessionStore: SessionStore = LazySessionStore(sessionDir)
 
     // Apply server config log level if not set by logging section
     if (config.logging.level == "" && serverCfg.logLevel != "") {
@@ -103,7 +114,10 @@ main(): Int64 {
         trustLog.info("trusted work dir (ATELIER_TRUST_DIR): ${d}", Array<Attr>())
     }
 
-    match (cmd) {
+    // close 放 finally：异常退出（配置错、provider 缺失……）此前会直接跳过关闭，
+    // 留下未落盘的 .mem，下次启动要多付一次重放——启动越慢错得越多，错得越多启动越慢。
+    try {
+        match (cmd) {
         case "serve" =>
             let port = if (args.size > 2) { args[2] } else { serverCfg.port.toString() }
             // [a2a].mountToServer：把 A2A 与既有服务挂到同一个 HTTP 端口。
@@ -218,22 +232,12 @@ main(): Int64 {
             }
 
         case _ =>
-            println("Atelier Agent Runtime")
-            println("Usage:")
-            println("  cli.app serve [port]          Start HTTP server")
-            println("  cli.app acp [agent]           Serve as ACP v1 agent over stdio (agent picked at startup)")
-            println("  cli.app a2a [agent] [port]    Serve as A2A v1 agent over HTTP (Agent Card + SSE, default port 8931)")
-            println("  cli.app tui [agent] [sid]     Start interactive TUI (alias: repl; resume session if sid given)")
-            println("  cli.app run [agent] <prompt>  Run single prompt")
-            println("")
-            println("TUI slash commands: /help, /agent, /session, /model, /models, /tools, /subagent, /trust, /untrust, /clear, /exit")
-            println("Config: ~/.atelier.toml  — agent, provider, model, server, mcpServer, logging")
-            println("Skills: ~/.agents/skills/<name>/SKILL.md")
-            println("Logs:   ~/.atelier/atelier.log (set [logging] level = \"debug\")")
-            println("Sessions: ~/.atelier/sessions/ (persistent, auto-save after each turn)")
+            println(usageText())
             return 1
+        }
+    } finally {
+        try { sessionStore.close() } catch (_) { () }
     }
-    try { sessionStore.close() } catch (_) { () }
     0
 }
 
