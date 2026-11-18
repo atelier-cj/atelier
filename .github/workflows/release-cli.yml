@@ -86,6 +86,14 @@ jobs:
           version: ${{ env.CJC_VERSION }}
           components: stdx
 
+      - name: Install OpenSSL
+        # cjpm 访问 https 中心仓时要加载 libcrypto，macOS 自带的不会用它，
+        # 缺失时 createContext 直接 SIGABRT（WARNING: loading libcrypto in an unsafe way）
+        run: |
+          brew install openssl@3
+          echo "LIBRARY_PATH=$(brew --prefix openssl@3)/lib" >> $GITHUB_ENV
+          echo "PKG_CONFIG_PATH=$(brew --prefix openssl@3)/lib/pkgconfig" >> $GITHUB_ENV
+
       - name: Build macOS binary
         env:
           CANGJIE_STDX_PATH: ${{ env.CANGJIE_STDX_PATH_STATIC }}/stdx
