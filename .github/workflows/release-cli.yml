@@ -102,10 +102,7 @@ jobs:
 
   build-windows:
     needs: prepare
-    runs-on: ubuntu-latest
-    # 暂不阻塞：bstorm 的宏包在 mingw 交叉编译时按宿主 Linux 参数链接（-luring），
-    # 依赖链目前不支持 Windows 交叉构建。失败只显示黄标，不影响 Release。
-    continue-on-error: true
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
         with:
@@ -116,29 +113,24 @@ jobs:
           version: ${{ env.CJC_VERSION }}
           components: stdx
 
-      - name: Install mingw toolchain
-        run: sudo apt-get update && sudo apt-get install -y mingw-w64 zip
-
-      - name: Fetch Windows stdx
-        run: |
-          curl -sL "https://atomgit.com/Cangjie/cangjie_stdx/releases/download/v1.1.0.1/cangjie-stdx-windows-x64-1.1.0.1.zip" -o /tmp/stdx-win.zip
-          mkdir -p /tmp/stdx-win
-          unzip -o /tmp/stdx-win.zip -d /tmp/stdx-win
-          find /tmp/stdx-win -name "libstdx.a" | head -3
-
       - name: Build Windows binary
+        shell: bash
         env:
+          CANGJIE_STDX_PATH: ${{ env.CANGJIE_STDX_PATH_STATIC }}/stdx
           TAG: ${{ inputs.tag || github.ref_name }}
         run: |
-          PATH_WIN=$(find /tmp/stdx-win -name "libstdx.a" | head -1 | xargs dirname)
-          export CANGJIE_STDX_PATH="${PATH_WIN}"
-          cjpm build --target x86_64-w64-mingw32
-          cp ./target/x86_64-w64-mingw32/release/bin/cli.app.exe "./target/x86_64-w64-mingw32/release/bin/${BIN_NAME}.exe"
+          cjpm build
+          echo "=== 构建产物 ==="
+          ls -la ./target/release/bin/ || true
+          BIN=$(ls ./target/release/bin/ | grep -E '^cli\.app(\.exe)?$' | head -1)
+          if [ -z "$BIN" ]; then echo "未找到 cli.app.exe"; exit 1; fi
+          cp "./target/release/bin/$BIN" "./target/release/bin/${BIN_NAME}.exe"
           mkdir -p dist
-          zip -j "dist/${BIN_NAME}_${TAG}_windows_amd64.zip" "./target/x86_64-w64-mingw32/release/bin/${BIN_NAME}.exe"
+          7z a "dist/${BIN_NAME}_${TAG}_windows_amd64.zip" "./target/release/bin/${BIN_NAME}.exe"
           cp "dist/${BIN_NAME}_${TAG}_windows_amd64.zip" "dist/${BIN_NAME}_windows_amd64.zip"
 
       - name: Upload release assets
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.tag || github.ref_name }}
