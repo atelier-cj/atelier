@@ -68,6 +68,9 @@ jobs:
 
   build-macos:
     needs: prepare
+    # 只在 workflow_dispatch 手动触发时构建：GitHub 免费组织的 mac runner 排队
+    # 十几分钟就会被取消，放在 tag 自动发版里只会让整条流水线变红。
+    if: inputs.tag != ''
     runs-on: macos-15
     # 1.1.3 的 cjpm 在 darwin_aarch64 上创建 TLS 上下文会 SIGABRT（stdx.net.tls），
     # 换 1.2.0 工具链规避；若仍失败再考虑 macos-13（x86_64）
