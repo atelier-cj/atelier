@@ -612,9 +612,35 @@ let runtime = AgentRuntime(spec, cfg)
 
 ---
 
+## ACP 子进程形态
+
+也可以反过来：不自己拉起 Agent，而是让 Agent 以**子进程**身份被编辑器 / 宿主拉起。这就是 ACP v1
+的 Agent 侧——stdio 上跑完整生命周期（`initialize → session/new → session/prompt → 流式
+session/update → cancel`），界面、工作区与会话入口都归宿主。
+
+```bash
+cli.app acp [agent]        # 发布产物里命令名为 atelier；stdio 服务，阻塞，agent 启动时选定
+```
+
+Zed 的 `settings.json` 里加一个 agent：
+
+```json
+{
+  "agent": { "command": "atelier", "args": ["acp"], "env": { "HOME": "/home/you" } }
+}
+```
+
+本地构建产物名为 `cli.app`，把 `command` 换成它的绝对路径即可；opencode / JetBrains 等宿主同理。
+**stdout 只出 ACP 帧**，日志与诊断一律走 stderr——stdout 被污染会让协议直接错乱。
+
+这条路径适合「编辑器里已经有工作区」的集成：`cwd`、附加目录、会话 id 都由宿主给出，
+Atelier 负责把 AgentRuntime / 会话持久化 / 信任闸门接进 ACP 回调（附加目录是会话级预信任，
+副作用工具直放行，`cwd` 仍走审批）。能力矩阵（`session/list` / `load` / `resume` / `delete`、
+config options、elicitation 表单提问、MCP over ACP）与已知边界见《[ACP 接入](acp.md)》。
+
 ## A2A 服务端形态
 
-除库 / HTTP 挂载 / 独立服务 / CLI / Docker 之外，还可用 A2A 协议对外：
+除上面的嵌入形态之外，还可以用 A2A 协议对外——它是**网络侧**的形态，不是被拉起的子进程：
 
 ```bash
 atelier a2a default 8931        # 独立端口，作为 A2A v1 Agent 提供服务

@@ -14,7 +14,7 @@
 
 | 文档 | 说明 |
 |------|------|
-| [集成指南](integration.md) | 快速装配（`Harness.open` / `HarnessSpec`）+ 6 种场景：库 / HTTP 挂载 / 独立服务 / CLI / Docker / 自建应用 |
+| [集成指南](integration.md) | 快速装配（`Harness.open` / `HarnessSpec`）+ 6 种嵌入场景 + ACP / A2A 两种对外形态 |
 | [配置参考](configuration.md) | TOML 配置 + AgentConfig 所有字段 |
 
 ## 核心概念
