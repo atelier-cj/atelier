@@ -640,13 +640,37 @@ config options、elicitation 表单提问、MCP over ACP）与已知边界见《
 
 ## A2A 服务端形态
 
-除上面的嵌入形态之外，还可以用 A2A 协议对外——它是**网络侧**的形态，不是被拉起的子进程：
+除上面的嵌入形态之外，还可以用 A2A 协议对外——它是**网络侧**的形态：ACP 是被宿主当子进程拉起，
+A2A 是被远程客户端调用。
 
 ```bash
-atelier a2a default 8931        # 独立端口，作为 A2A v1 Agent 提供服务
+cli.app a2a [agent] [port]      # 独立端口，默认 8931；工作目录 = 当前目录
+
+# 发现：Agent Card 由 agent 配置 + 技能注册表生成
+curl -s http://127.0.0.1:8931/.well-known/agent-card.json
+
+# 调用：JSON-RPC 绑定，SSE 流式
+curl -sN -H 'Content-Type: application/json' -H 'A2A-Version: 1.0' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"SendStreamingMessage","params":{"message":{"messageId":"m1","role":"ROLE_USER","parts":[{"text":"你好"}]}}}' \
+  http://127.0.0.1:8931/
 ```
 
-或挂进既有 HTTP 服务共用端口：
+`A2A-Version: 1.0` 头是**必须**的：缺失会被当 0.3 处理并回 `VERSION_NOT_SUPPORTED`。不接真实模型
+也能跑通整条链路——`ATELIER_PROVIDER=echo cli.app a2a`（`ATELIER_ECHO_DELAY_MS` 可加延时）。
+
+公开部署必须开认证，默认是匿名形态，只适合本机 / 内网：
+
+```toml
+# ~/.atelier.toml
+[a2a]
+auth = true
+token = "…"                 # 留空则回退环境变量 ATELIER_A2A_TOKEN
+```
+
+凭据二选一：`Authorization: Bearer <token>` 或 `X-API-Key: <token>`。Agent Card 始终匿名可读，
+否则客户端拿不到 scheme 声明。
+
+想和 agent API / AG-UI 共用一个端口，就挂进 `serve`（不需要路径前缀）：
 
 ```toml
 [a2a]
@@ -654,7 +678,8 @@ mountToServer = true
 ```
 
 ```bash
-atelier serve 8080              # 同一端口同时提供 agent API 与 A2A
+cli.app serve 8931          # 同一端口同时提供既有服务与 A2A
 ```
 
-能力矩阵、认证与 LB 部署（TLS 终止、SSE 缓冲）见《[A2A 接入](a2a.md)》。
+能力矩阵（`GetTask` / `ListTasks` / `CancelTask` / `SubscribeToTask`）、流式产物语义、
+input-required 续聊与 LB 部署（TLS 终止、SSE 缓冲）见《[A2A 接入](a2a.md)》。
