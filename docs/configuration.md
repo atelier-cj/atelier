@@ -1,5 +1,9 @@
 # 配置参考
 
+配置有两个位面：**TOML**（`~/.atelier.toml`，进程启动时读的那份）与**代码侧装配束**（`HarnessSpec`，
+库集成时在组合根显式装一次的对象）。本文只讲前者；后者连同快速装配入口 `Harness.open()` 见
+[集成指南](integration.md)。
+
 ## TOML 配置文件
 
 `~/.atelier.toml` 是 Atelier 的全局配置文件。不提供此文件也能运行，所有配置通过环境变量和默认值兜底。

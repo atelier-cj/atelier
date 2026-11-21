@@ -15,7 +15,57 @@
 atelier = { path = "/path/to/atelier" }
 ```
 
-**2. 创建 Agent 并运行**
+**2. 最快路径：装配束 + `Harness.open()`**
+
+装好一个装配束就能跑：不用先构造 `AgentRuntime`，也不用手写事件循环。
+
+```cangjie
+import atelier.agent.*
+
+main() {
+    let h = Harness.open()                 // 默认装配束：内置工具 + 内存会话 + 环境里的 provider
+    println(h.run("列出当前目录的文件"))
+    h.close()                              // 收尾：会话落盘 + 关闭 MCP 连接
+}
+```
+
+`open()` 的「零配置」指三件事：内置工具集（read / write / edit / bash / grep / glob / todo / ask /
+技能入口 / MCP 按需加载）、内存会话存储、以及**环境里配了 `OPENAI_API_KEY` 就挂一个名为 `default`
+的 provider**（端点默认 `https://api.openai.com/v1`，可用 `OPENAI_BASE_URL` 改）。没配这个环境变量时
+`open()` 不报错，但 `run()` 会因为找不到 `default` provider 而**明确报错**，不会静默连到别处。
+
+换组件就从默认装配束派生——`with*` 只改这一份，不写穿宿主共享的组件：
+
+```cangjie
+import atelier.agent.*
+import atelier.provider.*
+import atelier.session.*
+
+let spec = HarnessSpec.default()
+    .withProvider("default", OpenAIProvider("default", baseUrl, apiKey))
+    .withStore(StormSessionStore("./sessions"))   // 换持久化
+    .withTool(MyTool())                           // 加/换工具（同名覆盖）
+    .withAsk({ req => myApprovalUi(req) })        // 审批/选择/表单的提问通道
+
+let h = Harness.open(spec)
+```
+
+| 方法 | 作用 |
+|------|------|
+| `Harness.open()` / `Harness.open(spec)` | 拿一个能跑的 Harness |
+| `run(prompt)` / `run(agent, prompt)` | 单次提问，返回最终文本（agent 名缺省 `"default"`） |
+| `stream(agent, sessionId, msgs)` | 带会话 id 的事件流；会话由调用方负责持久化 |
+| `runtime(agent)` | 下钻到 `AgentLoop`（`drive` / `status` / `cancelSession`） |
+| `configOf(agent)` | 取该 agent 的 `AgentConfig`；注册表里没有就用默认配置 |
+| `components()` | 取回装配束本身 |
+| `close()` | 收尾：会话存储落盘 + MCP 连接关闭（任一失败不影响另一个） |
+
+`close()` 别忘——`StormSessionStore` 这类持久化存储靠它落盘。
+
+**3. 要事件流 / 细粒度控制：下钻到 AgentRuntime**
+
+与 `Harness` 用的是**同一份装配束**，没有第二套配置；区别只是把运行期拿在自己手里。下面为了
+能单独复制，把 `spec` 又构造了一遍：
 
 ```cangjie
 import atelier.*
@@ -542,7 +592,13 @@ let runtime = AgentRuntime(spec, cfg)
 `AgentConfig` 里的 `provider` 决定用哪个 provider（缺省 `"default"`）；装配束里找不到会**明确报错**，
 不会静默退化成某个默认端点。上下文窗口按 `(provider, model)` 查（见 docs/providers.md「上下文窗口」）。
 
-------|------|------|
+这就是 `Harness.open(spec)` 收的东西：只要一个能跑的 Harness 就停在上面；要事件流、取消、自己管
+会话再下钻到 `AgentRuntime(spec, cfg)`——两者共用同一份装配束。
+
+`AgentRuntime` 的构造参数与装配束一一对应：
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
 | `config` | `AgentConfig` | Agent 身份、模型、参数 |
 | `provider` | `Provider` | LLM 服务适配器 |
 | `toolRegistry` | `ToolRegistry` | 工具注册表 |

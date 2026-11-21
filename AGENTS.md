@@ -108,7 +108,8 @@ atelier/                     # 仓库根 = cjpm 工作区（[workspace]，产品
 ## 核心设计决策
 
 - **装配束（HarnessSpec）**：组件一次装配，`AgentRuntime(spec, cfg)` 是**唯一**构造；`with*` 派生
-  是值语义（不动共享组件），run 作用域的工具叠加走 `ToolRegistry.derived` 视图而不是复制表
+  是值语义（不动共享组件），run 作用域的工具叠加走 `ToolRegistry.derived` 视图而不是复制表。
+  `Harness.open(spec)` 只是这层之上的便利包装（单次 run / 收尾），不引入第二套配置
 - **依赖边界**：协议与共享类型用现成库（`ystyle::mcp` 工具协议、`llm_api` 消息/事件/Provider 类型与
   REST+SSE 实现、`acp` ACP v1、`ystyle::jsonrpc` 传输），会话存储用 `bstorm`；Agent 循环 / 工具 /
   压缩 / 会话树自研
