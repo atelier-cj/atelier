@@ -26,7 +26,7 @@
 | [工具](tools.md) | Tool 接口 + 内置工具 + 自定义 + MCP + Agent-as-Tool |
 | [Provider](providers.md) | Provider 接口 + OpenAI/Anthropic/Ollama + 上下文窗口 |
 | [Hook](hooks.md) | 决策型拦截器：观察/改写/短路 Agent 生命周期 |
-| [SDK 可替换点](extensibility.md) | 换掉整套策略：信任判定 / 压缩 / Agent 循环 |
+| [SDK 可替换点](extensibility.md) | 全部替换点：3 个契约级（信任判定 / 压缩 / 循环）+ 15 个组件级（存储 / Provider / 工具 / 中间件 …） |
 
 ## 进阶功能
 

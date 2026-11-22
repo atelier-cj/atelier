@@ -1,22 +1,52 @@
 # SDK 可替换点
 
-Atelier 的**内核行为**可以整块换掉，而不只是加钩子。本文记录三个可替换点、它们的边界，
-以及一个容易误解的地方（`ProviderMiddleware` 对流式不生效）。
+Atelier 的可替换点分两层：**契约级**（换掉整块策略——怎么判定、怎么压、怎么跑）与
+**组件级**（换掉某个组件的实现——历史存哪、工具从哪来、事件发到哪）。本文把两层都列全，
+每项给契约、默认、装配方式，以及对应章节的链接。
 
-> 与 [Hook](hooks.md) 的区别：Hook 是**生命周期拦截**（单次调用前后观察/改写/短路）；
-> 本文的三个点是**契约级替换**（整个判定策略 / 整个压缩策略 / 整个循环换掉）。
+> 与 [Hook](hooks.md) 的区别：Hook 是**生命周期拦截**（单次调用前后观察 / 改写 / 短路）；
+> 契约级是**整块策略替换**（整个判定 / 整个压缩 / 整个循环换掉）；组件级是**换实现**
+> （接口与语义不变，换谁来实现）。
 
 ---
 
-## 一、三个可替换点
+## 一、可替换点一览
+
+### 契约级（3 个）
 
 | 能力 | 契约类型 | 默认实现 | 装配方式 |
 |---|---|---|---|
-| **信任判定** | `type TrustGate`（函数类型） | `pathTrustGate(trustManager)` | `HarnessSpec.withTrustGate(g)` |
-| **压缩策略** | `interface Compactor` | `BasicCompactor` | `HarnessSpec.withCompactor(c)` |
-| **Agent 循环** | `interface AgentLoop` | `AgentRuntime` | `HarnessSpec.withLoopFactory(f)` |
+| **信任判定** | `type TrustGate`（函数类型） | `pathTrustGate(trustManager)` | `withTrustGate(g)` |
+| **压缩策略** | `interface Compactor` | `BasicCompactor` | `withCompactor(c)` |
+| **Agent 循环** | `interface AgentLoop` | `AgentRuntime` | `withLoopFactory(f)` |
 
-选择判据（为什么前两个/第三个的类型不同）：
+### 组件级（15 个）
+
+| 组件 | 契约 | 默认 | 装配 | 详见 |
+|---|---|---|---|---|
+| 会话存储 | `SessionStore` | 进程内存（退出即丢） | `withStore(s)` | [会话管理 · 自定义 SessionStore](sessions.md#自定义-sessionstore) |
+| Provider | `Provider` | 无；环境里有 `OPENAI_API_KEY` 才挂一个 `default` | `withProvider(name, p)` | [Provider · 自定义 Provider](providers.md#自定义-provider) |
+| Provider 注册表 | `ProviderRegistry` | 空 | `withProviders(reg)` | [Provider · ProviderRegistry](providers.md#providerregistry) |
+| 工具表 | `ToolRegistry` | 空表（`HarnessSpec.default()` 会注册内置工具） | `withTool` / `withToolsView` / `withToolRegistry` | [工具 · 自定义工具](tools.md#自定义工具) |
+| MCP 连接 | `McpManager` | 空 | `withMcp(m)` | [工具 · MCP 工具](tools.md#mcp-工具) |
+| Skill 注册表 | `SkillRegistry` | 空 | `withSkills(s)` | [Skill · 在 Agent 中使用](skills.md#在-agent-中使用) |
+| Agent 注册表 | `AgentRegistry` | 空 | `withAgents(a)` | [子 Agent](subagents.md) |
+| 钩子 | `ArrayList<Hook>` | 空 | `withHook` / `withHooks` | [Hook](hooks.md) |
+| 提问通道 | `Option<AskFn>` | `None`（需要拍板的地方按取消处理） | `withAsk(f)` | [信任闸门 · 审批交互](trust.md#审批交互结构化提问) |
+| 信任表 | `TrustManager` | 空表（所有目录未授权） | `withTrust(t)` | [信任闸门 · 三种状态](trust.md#三种状态) |
+| 模型窗口表 | `ModelContextRegistry` | 空（解析时回落兜底窗口） | `withModelContext` / `withModelFacts` / `withDefaults` | [Provider · 上下文窗口](providers.md#上下文窗口) |
+| 请求级中间件 | `ArrayList<ProviderMiddleware>` | 空 | `withMiddlewares(ms)` | [下文 §七](#七容易误解的一处providermiddleware-对流式不生效) |
+| 系统提示段 | `ArrayList<PromptSegmentContributor>` | 空 | `withContributors(cs)` | [下文 §六](#六组件级替换换实现不换策略) |
+| 事件总线 | `Option<EventBus>` | `None`（不发布） | `withEventBus(bus)` | [下文 §六](#六组件级替换换实现不换策略) |
+| 生命周期状态 | `Option<AgentStatusRegistry>` | `None`（每个 runtime 自建，状态不跨 run） | `withStatusRegistry(r)` | [下文 §六](#六组件级替换换实现不换策略) |
+
+表里不写 `AgentConfig`：它不是「换组件」，是 agent 的身份与参数（见[配置参考](configuration.md)）。
+
+---
+
+## 二、契约类型怎么选
+
+为什么前两个/第三个的类型不同：
 
 > **有状态 → interface + 类；单方法无状态 → 函数类型。**
 > 不是因为语言做不到，而是**状态藏在闭包里对开发者不友好**：看不见、不好调试、不好复用。
@@ -24,9 +54,12 @@ Atelier 的**内核行为**可以整块换掉，而不只是加钩子。本文�
 `TrustGate` 是无状态单方法（三个入参、一个决策），所以是函数类型；
 `Compactor` 与 `AgentLoop` 都有状态与多方法，所以是 interface。
 
+组件级那张表同理：能用一个函数类型表达的（`AskFn`、`TrustGate`、`ProviderMiddleware`）就是函数类型，
+要持有连接 / 索引 / 生命周期的是 interface 或具体类。
+
 ---
 
-## 二、`TrustGate`：信任判定
+## 三、`TrustGate`：信任判定
 
 ```cangjie
 public type TrustGate = (Tool, String, String) -> TrustDecision
@@ -56,11 +89,11 @@ let spec = HarnessSpec(...).withTrustGate({ tool, workDir, sessionId =>
 ```
 
 **边界**：闸门只回答"该不该问"，**不负责问**。提问由运行时的 `askFn` 通道发出
-（见 [trust.md](trust.md) 的审批小节）。
+（见 [trust.md](trust.md#审批交互结构化提问) 的审批小节）。
 
 ---
 
-## 三、`Compactor`：压缩策略
+## 四、`Compactor`：压缩策略
 
 ```cangjie
 public interface Compactor {
@@ -105,7 +138,7 @@ public interface Compactor {
 
 ---
 
-## 四、`AgentLoop`：Agent 循环
+## 五、`AgentLoop`：Agent 循环
 
 ```cangjie
 public interface AgentLoop {
@@ -158,7 +191,57 @@ let spec = HarnessSpec(...).withLoopFactory({ spec, cfg => MyLoop(spec, cfg) })
 
 ---
 
-## 五、容易误解的一处：`ProviderMiddleware` 对流式不生效
+## 六、组件级替换：换实现，不换策略
+
+下面这些没有「策略」可讲——接口是现成的，换的是实现或数据来源。逐类点一句要点，
+细节走链接。
+
+**会话存储**（`SessionStore`）。决定历史落在哪：进程内存、bstorm、还是宿主自己的库。
+接口是 `append` / `save` / `load` / `close` 加压缩台账；实现要点（原子写、按会话分文件、
+中断残留怎么捞）见 [会话管理 · 自定义 SessionStore](sessions.md#自定义-sessionstore)。
+`HarnessSpec.default()` 用内存实现——进程退出即丢，适合一次性的嵌入；命令行与服务形态默认 bstorm。
+
+**Provider 与 Provider 注册表**。`withProvider(name, p)` 写的是**本 spec 的叠加表**，
+不动宿主共享的 `ProviderRegistry`；`AgentConfig.provider` 按名字取，找不到会明确报错。
+自实现 Provider 要自己负责传输级重试（见下方 §七「重试到底归谁」）——
+写法和注册方式见 [Provider · 自定义 Provider](providers.md#自定义-provider)。
+
+**工具表**（`ToolRegistry`）。三种粒度：`withTool` 追加或同名覆盖一个工具、`withToolRegistry`
+换整张表、`withToolsView` 只给本次 run 一个叠加视图（不动根表，跑完即弃）。内置工具注册、
+自定义工具的 schema 与执行模式见 [工具 · 自定义工具](tools.md#自定义工具)；
+MCP 工具走 `withMcp` 换连接管理器，详见 [工具 · MCP 工具](tools.md#mcp-工具)。
+
+**Skill 与 Agent 注册表**。前者是按 AgentSkills 规范声明的技能来源，后者是子 Agent 注册表。
+换的是「从哪里读」，用法见 [Skill · 在 Agent 中使用](skills.md#在-agent-中使用) 与
+[子 Agent](subagents.md)。
+
+**钩子**（`Hook`）。6 个相位的决策型拦截器，注册序即执行序。严格说它不是「换实现」而是
+「加一层」，因为已经单独成文，入口见 [Hook](hooks.md)。
+
+**提问通道**（`AskFn`）。审批 / 选择 / 表单收敛成一个 `(UserRequest) -> UserAnswer`；
+不挂就等于没有交互通道——需要拍板的地方按**取消**处理（等同拒绝）。四端（TUI / ACP / AG-UI / HTTP）
+各自怎么接线见 [信任闸门 · 审批交互](trust.md#审批交互结构化提问)。
+
+**信任表**（`TrustManager`）。存的是「哪些目录被授权」的状态，不是策略；策略在 `TrustGate`。
+三态与目录继承见 [信任闸门 · 三种状态](trust.md#三种状态)。
+
+**模型窗口表**（`ModelContextRegistry`）。上下文窗口是 **`(provider, model)` 这一对的事实**，
+不是 agent 的属性：同名模型走官方端点和走一个截断过的代理，窗口可以不同。用
+`withModelContext` / `withModelFacts` 按端点声明，`withDefaults` 改兜底值——
+解析顺序与「没人声明时打警告」的行为见 [Provider · 上下文窗口](providers.md#上下文窗口)。
+
+**四个横切组件**：
+
+| 组件 | 要点 | 装配 |
+|---|---|---|
+| 系统提示段 | 追加在 `[Session Context]` 之后，不进消息历史（租户 / 合规 / 元数据） | `withContributors` |
+| 请求级中间件 | 包 `Provider.chat()`，按序 wrap（路由 / 限流 / 观测）——**流式不经过**，见 §七 | `withMiddlewares` |
+| 事件总线 | 进程级发布/订阅，跨会话审计与 UI 聚合；钩子没有跨会话全局视角，横切建议走它 | `withEventBus` |
+| 生命周期状态 | `Idle` / `Running` 的持有者；**必须由宿主在多个 runtime 之间共享**才有意义，否则只对单次 run 可观测 | `withStatusRegistry` |
+
+---
+
+## 七、容易误解的一处：`ProviderMiddleware` 对流式不生效
 
 `ProviderMiddleware` 是**请求级**中间件链（按序 wrap，先注入者最外层）：
 
@@ -189,15 +272,18 @@ public type ProviderMiddleware = (Provider) -> Provider
 
 ---
 
-## 六、与装配的关系
+## 八、与装配的关系
 
-三个点都在 `HarnessSpec` 上，**值语义派生**（`with*` 返回新 spec，不动共享组件）：
+所有替换点都挂在 `HarnessSpec` 上，**值语义派生**（`with*` 返回新 spec，不动共享组件）：
 
 ```cangjie
 HarnessSpec(tools: ..., store: ..., trust: ..., ...)
+    .withStore(myStore)             // 换会话存储
+    .withTool(myTool)               // 加/换工具
     .withTrustGate(myGate)          // 换信任判定
     .withCompactor(myCompactor)     // 换压缩策略
     .withLoopFactory(myFactory)     // 换整个循环
 ```
 
-派生规则见 [design.md](design.md) 的装配束章节。
+派生规则（哪些是副本、哪些只属于本 spec）见 [design.md](design.md) 的装配束章节，
+最短的消费方式见[集成指南](integration.md) 的快速装配小节。
